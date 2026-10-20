@@ -28,7 +28,7 @@ const FONT = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto
 const MONO = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 const TAU = Math.PI * 2, DEG = 180 / Math.PI;
 const LOUPE = 132, LOUPE_ZOOM = 3;
-const LEAVE_MS = 300, PAINT_MS = 260;
+const LEAVE_MS = 320, PAINT_MS = 260;
 const HIT_NODE = 12, HIT_LINE = 9;
 
 const I = {
@@ -113,7 +113,7 @@ function setBlur(el, b) {
 const DEFAULTS = {
   theme: 'system',
   c1: '#7CCBF5', c2: '#F2A7C6', c3: '#F0CD6E',
-  width: 1.5, label: 11,
+  width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
@@ -176,7 +176,7 @@ const toI = (sx, sy) => ({ x: (sx - S.view.x) / S.view.k, y: (sy - S.view.y) / S
 /* ---------------------------------------------------------------- theme -- */
 
 const mqDark = matchMedia('(prefers-color-scheme: dark)');
-const grid = { dirty: true, base: null, x: 0, y: 0, tx: 0, ty: 0, inf: 0, infT: 0, rgb: '255,255,255', a0: .075, a1: .2, ox: 0, oy: 0, needs: true };
+const grid = { dirty: true, base: null, rgb: '255,255,255', a0: .075, a1: .2, ox: 0, oy: 0, cols: 0, rows: 0, energy: null, active: new Set(), lx: null, ly: null, inside: false, needs: true };
 
 function applyTheme() {
   const t = cfg.theme === 'system' ? (mqDark.matches ? 'dark' : 'light') : cfg.theme;
@@ -501,44 +501,25 @@ function screenSegs(m) {
   }
   return topo(m.kind).filter(([, j]) => j < s.length).map(([i, j, ci]) => [s[i], s[j], colorIdx(m, ci)]);
 }
-/** Removal: the shape gets eaten away in chunks, quickly, until nothing is left. */
+/** Removal: a quick, smooth draw-back toward the centre while thinning and fading. */
 function startLeave(m) {
   if (!cfg.motion || !S.img || m.alpha < .05) return;
-  const ghost = { ...m, pts: m.pts.map(p => ({ ...p })), disp: { ...m.disp }, painted: 0, seed: Math.random() * 1000 };
+  const ghost = { ...m, pts: m.pts.map(p => ({ ...p })), disp: { ...m.disp }, painted: 0 };
   S.leaving.push({ m: ghost, t0: now(), alpha: m.alpha });
   wake(800);
 }
-/** Deterministic 0..1 noise per chunk, so chunks vanish in a stable random order. */
-const hash = (a, b) => { const s = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return s - Math.floor(s); };
 
 /* -------------------------------------------------------------- drawing -- */
 
 /**
  * Stroke a → b between fractions f0..f1.
- * fx: { halo, pulse (0..1 creation flash), head (draw-in tip), eat: { e, seed } (chunked removal) }
+ * fx: { halo, pulse (0..1 creation flash), head (draw-in tip) }
  */
 function seg(ctx, a, b, col, lw, u, f0, f1, fx) {
   if (f1 - f0 <= 0.0005) return;
   const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
   const x0 = a.x + dx * f0, y0 = a.y + dy * f0, x1 = a.x + dx * f1, y1 = a.y + dy * f1;
   ctx.beginPath();
-  if (fx && fx.eat) {
-    // split into ~9px chunks; each disappears at its own random moment
-    const n = Math.max(3, Math.min(80, Math.round(L / (9 * u))));
-    let any = false;
-    for (let k = 0; k < n; k++) {
-      if (hash(fx.eat.seed, k) * .92 < fx.eat.e) continue;
-      ctx.moveTo(a.x + dx * k / n, a.y + dy * k / n);
-      ctx.lineTo(a.x + dx * (k + 1) / n, a.y + dy * (k + 1) / n);
-      any = true;
-    }
-    if (!any) return;
-    ctx.save(); ctx.lineCap = 'butt';
-    ctx.strokeStyle = 'rgba(0,0,0,.34)'; ctx.lineWidth = lw + 1.8 * u; ctx.stroke();
-    ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.stroke();
-    ctx.restore();
-    return;
-  }
   ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
   if (fx && fx.halo) { ctx.strokeStyle = rgba(col, .2); ctx.lineWidth = lw + 7 * u; ctx.stroke(); }
   if (fx && fx.pulse > 0) { ctx.strokeStyle = rgba(col, .4 * fx.pulse); ctx.lineWidth = lw + (1 - fx.pulse) * 9 * u + 2 * u; ctx.stroke(); }
@@ -579,13 +560,17 @@ function node(ctx, p, col, u, s, hov, picked, ghost) {
   ctx.fillStyle = picked ? '#0E0F12' : '#FFFFFF'; ctx.fill();
   ctx.restore();
 }
-/** Value tag. Candidates are tried in order until one does not collide with an earlier label. */
+/**
+ * Value label: no box — just the number with a thin dark halo and a small colour tick,
+ * so it stays readable on any photo while covering as little of it as possible.
+ * Candidates are tried in order until one does not collide with an earlier label.
+ */
 function label(ctx, text, cands, col, o, alpha, blur, muted) {
   if (alpha <= 0.01) return;
   const u = o.u, fs = cfg.label * u;
   ctx.font = `500 ${fs}px ${MONO}`;
   const tw = ctx.measureText(text).width;
-  const w = tw + 19 * u, h = fs + 9 * u;
+  const w = tw + 8 * u, h = fs + 3 * u;
   let r = null;
   for (const c of cands) {
     const cx = c.x + (c.ax || 0) * w / 2, cy = c.y + (c.ay || 0) * h / 2;
@@ -595,17 +580,21 @@ function label(ctx, text, cands, col, o, alpha, blur, muted) {
     if (!hit) { r = rr; break; }
   }
   o.labels.push(r);
-  const y = r.y + (1 - alpha) * 3 * u;
+  const y = r.y + (1 - alpha) * 2 * u;
   ctx.save();
-  ctx.globalAlpha *= alpha;
-  roundRect(ctx, r.x, y, w, h, 4 * u);
-  ctx.fillStyle = 'rgba(13,14,17,.84)'; ctx.fill();
-  ctx.lineWidth = u; ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.stroke();
-  roundRect(ctx, r.x + 5 * u, y + 4 * u, 2 * u, h - 8 * u, u);
-  ctx.fillStyle = muted ? rgba(col, .5) : col; ctx.fill();
-  ctx.fillStyle = muted ? 'rgba(255,255,255,.58)' : 'rgba(255,255,255,.96)';
+  ctx.globalAlpha *= alpha * (muted ? .75 : 1);
+  // colour tick
+  roundRect(ctx, r.x + u, y + h * .22, 2 * u, h * .56, u);
+  ctx.fillStyle = 'rgba(8,10,16,.55)'; ctx.fill();
+  roundRect(ctx, r.x + 1.4 * u, y + h * .25, 1.4 * u, h * .5, .7 * u);
+  ctx.fillStyle = col; ctx.fill();
+  // text with halo
   ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
-  const tx = r.x + 12 * u, ty = y + h / 2 + .5 * u;
+  ctx.lineJoin = 'round';
+  const tx = r.x + 6.5 * u, ty = y + h / 2 + .5 * u;
+  ctx.strokeStyle = 'rgba(8,10,16,.62)'; ctx.lineWidth = 3 * u;
+  ctx.strokeText(text, tx, ty);
+  ctx.fillStyle = muted ? 'rgba(255,255,255,.7)' : 'rgba(255,255,255,.95)';
   if (blur > 0.05) {
     ctx.save(); ctx.globalAlpha *= 0.2 * blur;
     ctx.fillText(text, tx, ty - 1.2 * u); ctx.fillText(text, tx, ty + 1.2 * u);
@@ -614,8 +603,20 @@ function label(ctx, text, cands, col, o, alpha, blur, muted) {
   ctx.fillText(text, tx, ty);
   ctx.restore();
 }
+/** Unit normal of a→b pointing up (or right, for steep lines) — labels sit beside the line, not on it. */
+function sideNormal(a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1;
+  let nx = -dy / L, ny = dx / L;
+  if (Math.abs(dy) > Math.abs(dx) ? nx < 0 : ny > 0) { nx = -nx; ny = -ny; }
+  return { nx, ny };
+}
 function lineLabel(ctx, a, b, text, col, o, alpha, blur, muted) {
-  const cands = [.5, .34, .66, .2, .8].map(f => ({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f }));
+  const { nx, ny } = sideNormal(a, b), off = 5 * o.u, cands = [];
+  for (const f of [.5, .34, .66, .2, .8]) {
+    const x = a.x + (b.x - a.x) * f, y = a.y + (b.y - a.y) * f;
+    cands.push({ x: x + nx * off, y: y + ny * off, ax: nx, ay: ny });
+    cands.push({ x: x - nx * off, y: y - ny * off, ax: -nx, ay: -ny });
+  }
   label(ctx, text, cands, col, o, alpha, blur, muted);
 }
 function tag(ctx, text, x, y) {
@@ -643,15 +644,15 @@ function drawMeas(ctx, m, o) {
   const u = o.u, d = o.disp || m.disp, t = o.t, fin = !!o.final;
   const lv = o.leave == null ? -1 : o.leave;
   const age = fin ? 1e9 : t - m.shown;
+  // removal: lines draw back toward their centres while thinning and fading (lv: 0 → 1)
   const prog = fin || lv >= 0 ? 1 : ease(age / 280);
-  const f0 = 0, f1 = prog;
-  const sweep = lv >= 0 ? 1 - ease(lv * 1.4) : prog;
-  const la = fin ? 1 : lv >= 0 ? clamp(1 - lv * 3, 0, 1) : ease((age - 60) / 200);
+  const f0 = lv >= 0 ? lv / 2 : 0, f1 = lv >= 0 ? 1 - lv / 2 : prog;
+  const sweep = lv >= 0 ? 1 - lv : prog;
+  const la = fin ? 1 : lv >= 0 ? clamp(1 - lv * 2.5, 0, 1) : ease((age - 60) / 200);
   const pg = fin || lv >= 0 || !m.painted ? 1 : (t - m.painted) / PAINT_MS;
-  const seed = m.seed || 1;
-  const fx = { halo: !fin && !!o.picked, pulse: pg < 1 ? 1 - ease(pg) : 0, head: !fin && lv < 0 && prog < 1, eat: lv >= 0 ? { e: lv, seed } : null };
-  const fxAt = i => fx.eat ? { ...fx, eat: { e: lv, seed: seed + i * 7.13 } } : fx;
-  const lw = cfg.width * u * (o.hl && !fin ? 1.25 : 1);
+  const fx = { halo: !fin && !!o.picked && lv < 0, pulse: pg < 1 ? 1 - ease(pg) : 0, head: !fin && lv < 0 && prog < 1 };
+  const fxAt = () => fx;
+  const lw = cfg.width * u * (o.hl && !fin ? 1.25 : 1) * (lv >= 0 ? 1 - lv * .55 : 1);
   const blur = fin ? 0 : (d._b || 0);
   ctx.save();
   ctx.globalAlpha = o.alpha;
@@ -720,7 +721,7 @@ function drawMeas(ctx, m, o) {
   for (let i = 0; i < n; i++) {
     let s = 1;
     if (!fin) {
-      if (lv >= 0) s = clamp((.12 + hash(seed, 100 + i) * .7 - lv) / .05, 0, 1);   // each point blinks out at its own moment
+      if (lv >= 0) s = 1 - ease(clamp(lv * 1.25, 0, 1));
       else {
         const base = Math.max(m.times && m.times[i] != null ? m.times[i] : -1e9, m.shown + i * 25);
         s = ease((t - base) / 180);
@@ -743,7 +744,7 @@ function drawSegments(ctx, m, pts, d, o, s) {
   for (let i = 0; i < lens.length; i++) {
     const col = i % 2 ? cfg.c2 : cfg.c1, len = lens[i] || 1e-6;
     const fx = s.fxAt(i);
-    if (s.lv >= 0) seg(ctx, q[i], q[i + 1], col, s.lw, u, 0, 1, fx);
+    if (s.lv >= 0) seg(ctx, q[i], q[i + 1], col, s.lw, u, s.f0, s.f1, fx);
     else {
       const sp = clamp((s.prog * T - acc) / len, 0, 1);
       seg(ctx, q[i], q[i + 1], col, s.lw, u, 0, sp, { ...fx, head: fx.head && sp > 0 && sp < 1 });
@@ -759,11 +760,12 @@ function drawSegments(ctx, m, pts, d, o, s) {
   for (let i = 0; i < lens.length; i++) {
     const v = d['s' + i];
     if (v == null) continue;
-    const mx = (q[i].x + q[i + 1].x) / 2, my = (q[i].y + q[i + 1].y) / 2, off = 16 * u;
+    const mx = (q[i].x + q[i + 1].x) / 2, my = (q[i].y + q[i + 1].y) / 2, off = 10 * u;
+    const sn = sideNormal(q[i], q[i + 1]);
     label(ctx, v.toFixed(2) + 'x', [
+      { x: mx + sn.nx * off, y: my + sn.ny * off, ax: sn.nx, ay: sn.ny },
+      { x: mx - sn.nx * off, y: my - sn.ny * off, ax: -sn.nx, ay: -sn.ny },
       { x: mx, y: my },
-      { x: mx + nx * off, y: my + ny * off, ax: nx, ay: ny },
-      { x: mx - nx * off, y: my - ny * off, ax: -nx, ay: -ny },
     ], i % 2 ? cfg.c2 : cfg.c1, o, s.la, s.blur, i === segBase(m));
   }
 }
@@ -809,7 +811,8 @@ function drawOverlay(t, dt) {
   for (let i = S.leaving.length - 1; i >= 0; i--) {
     const L = S.leaving[i], e = (t - L.t0) / LEAVE_MS;
     if (e >= 1) { S.leaving.splice(i, 1); continue; }
-    drawMeas(ctx, L.m, { ...base, labels: [], alpha: L.alpha, leave: e });
+    const lv = easeInOut(e);
+    drawMeas(ctx, L.m, { ...base, labels: [], alpha: L.alpha * (1 - lv * lv), leave: lv });
     busy = true;
   }
 
@@ -932,42 +935,64 @@ function buildGridBase() {
   g.clearRect(0, 0, W, H);
   g.fillStyle = `rgba(${grid.rgb},${grid.a0})`;
   grid.ox = (W % SP) / 2; grid.oy = (H % SP) / 2;
+  grid.cols = Math.floor((W - grid.ox) / SP) + 1;
+  grid.rows = Math.floor((H - grid.oy) / SP) + 1;
   for (let x = grid.ox; x <= W; x += SP) for (let y = grid.oy; y <= H; y += SP) g.fillRect(x - .65, y - .65, 1.3, 1.3);
+  grid.energy = new Float32Array(grid.cols * grid.rows);
+  grid.active = new Set();
   grid.dirty = false; grid.needs = true;
+}
+
+/* Each dot holds an "energy" that the cursor tops up and that decays slowly,
+   so moving the cursor leaves a softly fading trail of lit dots. */
+const GRID_R = 30, GRID_FADE = .9;   // radius (px) · trail half-life-ish (s)
+function gridStamp(x, y) {
+  if (!grid.energy) return;
+  const E = GRID_R * 2.2;
+  const i0 = Math.max(0, Math.ceil((x - E - grid.ox) / SP)), i1 = Math.min(grid.cols - 1, Math.floor((x + E - grid.ox) / SP));
+  const j0 = Math.max(0, Math.ceil((y - E - grid.oy) / SP)), j1 = Math.min(grid.rows - 1, Math.floor((y + E - grid.oy) / SP));
+  for (let i = i0; i <= i1; i++) {
+    for (let j = j0; j <= j1; j++) {
+      const dx = grid.ox + i * SP - x, dy = grid.oy + j * SP - y;
+      const f = Math.exp(-(dx * dx + dy * dy) / (2 * GRID_R * GRID_R));
+      if (f < .02) continue;
+      const idx = j * grid.cols + i;
+      if (f > grid.energy[idx]) { grid.energy[idx] = f; grid.active.add(idx); }
+    }
+  }
+}
+function gridTrail(x, y) {
+  if (!cfg.gridFx) return;
+  const lx = grid.lx, ly = grid.ly;
+  if (lx == null) gridStamp(x, y);
+  else {
+    // fill in fast moves so the trail stays continuous
+    const n = Math.min(40, Math.ceil(Math.hypot(x - lx, y - ly) / (GRID_R * .5)));
+    for (let s = 1; s <= n; s++) gridStamp(lx + (x - lx) * s / n, ly + (y - ly) * s / n);
+  }
+  grid.lx = x; grid.ly = y;
 }
 function drawGrid(dt) {
   if (grid.dirty) buildGridBase();
-  const k = 1 - Math.exp(-dt * 8);
-  const dx = grid.tx - grid.x, dy = grid.ty - grid.y;
-  grid.x += dx * k; grid.y += dy * k;
-  const di = grid.infT - grid.inf;
-  grid.inf += di * (1 - Math.exp(-dt * 4));
-  const moving = Math.abs(dx) > .3 || Math.abs(dy) > .3 || Math.abs(di) > .003;
-  if (!moving && !grid.needs) return;
+  if (grid.inside && cfg.gridFx) gridStamp(grid.lx, grid.ly);
+  if (!grid.active.size && !grid.needs) return;
   grid.needs = false;
   bctx.setTransform(1, 0, 0, 1, 0, 0);
   bctx.clearRect(0, 0, bg.width, bg.height);
   bctx.drawImage(grid.base, 0, 0);
-  if (!cfg.gridFx || grid.inf < .004) return;
+  if (!grid.active.size) return;
   bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const R = 68, E = R * 2.6;
-  const i0 = Math.max(0, Math.ceil((grid.x - E - grid.ox) / SP)), i1 = Math.floor((grid.x + E - grid.ox) / SP);
-  const j0 = Math.max(0, Math.ceil((grid.y - E - grid.oy) / SP)), j1 = Math.floor((grid.y + E - grid.oy) / SP);
-  if (i1 < i0 || j1 < j0) return;
-  bctx.clearRect(grid.ox + i0 * SP - SP / 2, grid.oy + j0 * SP - SP / 2, (i1 - i0 + 1) * SP, (j1 - j0 + 1) * SP);
-  for (let i = i0; i <= i1; i++) {
-    const px = grid.ox + i * SP;
-    if (px > W) break;
-    for (let j = j0; j <= j1; j++) {
-      const py = grid.oy + j * SP;
-      if (py > H) break;
-      const ddx = px - grid.x, ddy = py - grid.y, d2 = ddx * ddx + ddy * ddy;
-      const f = Math.exp(-d2 / (2 * R * R)) * grid.inf;
-      const d = Math.sqrt(d2) || 1, push = f * 2.5;
-      const x = px + ddx / d * push, y = py + ddy / d * push, s = 1.3 + f * .6;
-      bctx.fillStyle = `rgba(${grid.rgb},${(grid.a0 + f * grid.a1).toFixed(3)})`;
-      bctx.fillRect(x - s / 2, y - s / 2, s, s);
-    }
+  const decay = Math.exp(-dt / (GRID_FADE * .45));
+  for (const idx of grid.active) {
+    const e = grid.energy[idx] * decay;
+    const i = idx % grid.cols, j = (idx - i) / grid.cols;
+    const px = grid.ox + i * SP, py = grid.oy + j * SP;
+    bctx.clearRect(px - 3, py - 3, 6, 6);
+    if (e < .01) { grid.energy[idx] = 0; grid.active.delete(idx); bctx.fillStyle = `rgba(${grid.rgb},${grid.a0})`; bctx.fillRect(px - .65, py - .65, 1.3, 1.3); continue; }
+    grid.energy[idx] = e;
+    const s = 1.3 + e * .7;
+    bctx.fillStyle = `rgba(${grid.rgb},${(grid.a0 + e * grid.a1).toFixed(3)})`;
+    bctx.fillRect(px - s / 2, py - s / 2, s, s);
   }
 }
 
@@ -984,7 +1009,7 @@ function stepView(dt) {
 function setViewNow(v) { S.view = { ...v }; S.viewT = { ...v }; wake(); }
 function safeRect() {
   const mob = W <= 860;
-  const l = mob ? 12 : 92, r = mob ? 12 : 356, t = mob ? 72 : 24, b = mob ? 48 : 48;
+  const l = mob ? 12 : 84, r = mob ? 12 : 352, t = mob ? 76 : 24, b = 48;
   return { x: l, y: t, w: Math.max(120, W - l - r), h: Math.max(120, H - t - b) };
 }
 function fitView(intro) {
@@ -1281,11 +1306,10 @@ function setRef(id) {
 /* --------------------------------------------------------- global input -- */
 
 addEventListener('pointermove', e => {
-  grid.tx = e.clientX; grid.ty = e.clientY;
-  if (grid.inf < .01) { grid.x = grid.tx; grid.y = grid.ty; }
-  grid.infT = 1;
+  if (!grid.inside) { grid.lx = null; grid.inside = true; }
+  gridTrail(e.clientX, e.clientY);
 }, { passive: true });
-document.addEventListener('pointerout', e => { if (!e.relatedTarget) grid.infT = 0; });
+document.addEventListener('pointerout', e => { if (!e.relatedTarget) grid.inside = false; });
 
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
