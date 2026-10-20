@@ -34,10 +34,10 @@ uniform vec3  uView;        // x, y, k  (css px)
 uniform float uDpr;
 uniform float uCanvasH;     // device px
 uniform vec2  uRot;         // cos θ, sin θ
-uniform float uZoom;
-uniform float uFlip;
-uniform vec4  uEll;         // face ellipse cx, cy, ax, ay (U space)
-uniform float uLensK;       // face depth ÷ camera distance (0 = off)
+uniform vec2  uScale;       // x scale (sign = flip), y scale
+uniform vec2  uTrans;       // translation (view px)
+uniform vec4  uEll;         // face frame: origin x, y, half bizygomatic, half nasion–menton (P space)
+uniform float uLensD;       // camera distance in cm (0 = off)
 uniform float uAlpha;
 out vec4 outColor;
 
@@ -54,15 +54,37 @@ vec2 fieldAt(vec2 p) {
   return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
 }
 
-// Head modelled as a smooth dome: depth 1 at the face centre, 0 at the
-// face outline, gently further back beyond it. Re-projecting from a near
-// camera to a far one scales offsets by 1 / (1 - k·depth).
-float lensG(vec2 u) {
-  if (uLensK <= 0.0) return 1.0;
-  vec2 r = (u - uEll.xy) / uEll.zw;
-  float r2 = dot(r, r);
-  float h = r2 < 1.0 ? 1.0 - r2 : -0.5 * (1.0 - exp(-(r2 - 1.0) / 0.5));
-  return 1.0 / (1.0 - uLensK * h);
+// ---- close-range perspective model (keep in sync with depthAt() in app.js) ----
+// Depth in cm in front of the ear plane, in face-normalised coordinates
+// (X = ±1 at the zygions, Y = −1 at nasion, +1 at menton).
+float hump(float t) { t = clamp(t, 0.0, 1.0); return 1.0 - t * t * (3.0 - 2.0 * t); }
+float gauss(vec2 q, vec2 c, vec2 s) { vec2 d = (q - c) / s; return exp(-0.5 * dot(d, d)); }
+float depthAt(vec2 q) {
+  float hx = hump((q.x * q.x) / (1.3 * 1.3));                              // face curves back toward the ears
+  float hy = q.y < -1.0 ? hump((-1.0 - q.y) / 1.9)                         // forehead → crown
+           : q.y > 0.9 ? mix(1.0, 0.25, 1.0 - hump((q.y - 0.9) / 0.6))      // under the chin → neck
+           : 1.0;
+  float z = 8.5 * hx * hy;
+  z += 2.8 * gauss(q, vec2(0.0, -0.3), vec2(0.19, 0.40));                  // nose
+  z += 0.8 * gauss(q, vec2(0.0, 0.25), vec2(0.30, 0.16));                  // lips
+  z += 0.5 * gauss(q, vec2(0.0, 0.85), vec2(0.30, 0.20));                  // chin
+  z -= 1.2 * (gauss(q, vec2(0.47, -0.9), vec2(0.2, 0.14)) + gauss(q, vec2(-0.47, -0.9), vec2(0.2, 0.14)));  // eye sockets
+  return max(z, 0.0);
+}
+uniform float uZref;   // depth at the zygion (computed in app.js) — cheekbone width is held fixed
+#define ZREF uZref
+// Source/output scale for a point at face position p: x_near = x_far · (D − zref) / (D − z).
+float lensG(vec2 p) {
+  vec2 q = (p - uEll.xy) / uEll.zw;
+  float e = (q.x * q.x) / (1.3 * 1.3) + ((q.y + 0.95) * (q.y + 0.95)) / 4.0;
+  float w = 1.0 - smoothstep(1.0, 3.5, e);                                 // far background stays put
+  return (uLensD - ZREF * w) / (uLensD - depthAt(q));
+}
+vec2 lensUP(vec2 u) {
+  if (uLensD <= 0.0) return u;
+  vec2 p = u;
+  for (int i = 0; i < 6; i++) p = uEll.xy + (u - uEll.xy) * lensG(p);
+  return p;
 }
 
 // Catmull-Rom bicubic in 9 bilinear taps — sharp, no gaussian softening.
@@ -98,11 +120,10 @@ void main() {
   vec2 v = (frag - uView.xy) / uView.z;
 
   vec2 c0 = uSize * 0.5;
-  vec2 dv = v - c0;
-  vec2 u = c0 + vec2(uRot.x * dv.x + uRot.y * dv.y, -uRot.y * dv.x + uRot.x * dv.y) / uZoom;
-  u.x = c0.x + (u.x - c0.x) * uFlip;
+  vec2 dv = v - c0 - uTrans;
+  vec2 u = c0 + vec2(uRot.x * dv.x + uRot.y * dv.y, -uRot.y * dv.x + uRot.x * dv.y) / uScale;
 
-  vec2 p = uEll.xy + (u - uEll.xy) * lensG(u);
+  vec2 p = lensUP(u);
   vec2 s = p;
   if (uMorph == 1) s += fieldAt(p);
 
@@ -144,7 +165,7 @@ function createRenderer(canvas) {
 
   const U = {};
   ['uImg', 'uTexSize', 'uSize', 'uField', 'uFieldN', 'uCell', 'uMorph', 'uView', 'uDpr', 'uCanvasH',
-   'uRot', 'uZoom', 'uFlip', 'uEll', 'uLensK', 'uAlpha'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+   'uRot', 'uScale', 'uTrans', 'uEll', 'uLensD', 'uZref', 'uAlpha'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
   const vao = gl.createVertexArray();
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
   const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
@@ -194,8 +215,8 @@ function createRenderer(canvas) {
       hasField = true;
     },
     /**
-     * p: { cw, ch (device px), view {x,y,k}, dpr, size [iw,ih], rot (rad), zoom, flip,
-     *      ell [cx,cy,ax,ay] | null, lensK, morph (bool), cell, alpha }
+     * p: { cw, ch (device px), view {x,y,k}, dpr, size [iw,ih], rot (rad), scale [sx,sy], trans [tx,ty],
+     *      ell [cx,cy,ax,ay] | null, lensD (cm, 0 = off), morph (bool), cell, alpha }
      */
     render(p) {
       if (canvas.width !== p.cw) canvas.width = p.cw;
@@ -217,11 +238,12 @@ function createRenderer(canvas) {
       gl.uniform1f(U.uDpr, p.dpr);
       gl.uniform1f(U.uCanvasH, p.ch);
       gl.uniform2f(U.uRot, Math.cos(p.rot), Math.sin(p.rot));
-      gl.uniform1f(U.uZoom, p.zoom);
-      gl.uniform1f(U.uFlip, p.flip);
+      gl.uniform2f(U.uScale, p.scale[0], p.scale[1]);
+      gl.uniform2f(U.uTrans, p.trans[0], p.trans[1]);
       const e = p.ell || [0, 0, 1, 1];
       gl.uniform4f(U.uEll, e[0], e[1], Math.max(1, e[2]), Math.max(1, e[3]));
-      gl.uniform1f(U.uLensK, p.ell ? p.lensK : 0);
+      gl.uniform1f(U.uLensD, p.ell ? p.lensD : 0);
+      gl.uniform1f(U.uZref, p.zref || 0);
       gl.uniform1f(U.uAlpha, p.alpha == null ? 1 : p.alpha);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
@@ -230,5 +252,5 @@ function createRenderer(canvas) {
   };
 }
 
-window.CraniWarp = { createRenderer, build: '8' };
+window.CraniWarp = { createRenderer, build: '9' };
 })();
