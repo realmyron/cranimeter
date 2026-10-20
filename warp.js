@@ -47,22 +47,27 @@ uniform ivec2 uMapN;
 uniform float uMapCell;
 uniform sampler2D uMask;    // face-layer mask in source space
 uniform float uShowLayers;
+uniform sampler2D uDepth;   // RGBA32F grid: face depth at each node of the photo (r), its change at each node of the result (g) — source px
+uniform float uShade;       // 0…1 relighting strength
+uniform vec3  uLight;       // light direction (image x right, y down, z toward the camera)
 out vec4 outColor;
 
-vec4 mapAt(vec2 x) {
+vec4 gridAt(sampler2D g, vec2 x) {
   vec2 f = x / uMapCell;
   vec2 fl = floor(f);
   vec2 t = f - fl;
   ivec2 i0 = clamp(ivec2(fl), ivec2(0), uMapN - 1);
   ivec2 i1 = clamp(ivec2(fl) + 1, ivec2(0), uMapN - 1);
-  vec4 a = texelFetch(uMap, ivec2(i0.x, i0.y), 0);
-  vec4 b = texelFetch(uMap, ivec2(i1.x, i0.y), 0);
-  vec4 c = texelFetch(uMap, ivec2(i0.x, i1.y), 0);
-  vec4 d = texelFetch(uMap, ivec2(i1.x, i1.y), 0);
+  vec4 a = texelFetch(g, ivec2(i0.x, i0.y), 0);
+  vec4 b = texelFetch(g, ivec2(i1.x, i0.y), 0);
+  vec4 c = texelFetch(g, ivec2(i0.x, i1.y), 0);
+  vec4 d = texelFetch(g, ivec2(i1.x, i1.y), 0);
+  return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+vec4 mapAt(vec2 x) {
   // outside the grid, carry on with the edge's offset
-  vec4 r = mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
   vec2 xe = clamp(x, vec2(0.0), vec2(uMapN - 1) * uMapCell);
-  return r + vec4(x - xe, x - xe);
+  return gridAt(uMap, x) + vec4(x - xe, x - xe);
 }
 
 vec2 fieldAt(vec2 p) {
@@ -166,12 +171,29 @@ void main() {
 
   float m = layered ? texture(uMask, uvf).r : 0.0;     // is the face layer here?
 
+  // Relighting: the face's depth before (z0, carried from the photo) and after (z1) the change.
+  // Their slopes give the surface normals; the ratio of the two Lambert terms is the shading change.
+  bool shade = uMapOn == 1 && uShade > 0.0;
+  float z0 = shade ? gridAt(uDepth, sf).r : 0.0;
+  float z1 = z0 + (shade ? gridAt(uDepth, x).g : 0.0);
+  float spx = uView.z * uDpr;   // device px per source px
+  vec2 g0 = vec2(dFdx(z0), -dFdy(z0)) * spx, g1 = vec2(dFdx(z1), -dFdy(z1)) * spx;
+
   vec4 colb = mix(bicubic(uvb), textureGrad(uImg, uvb, dbx, dby), smoothstep(0.0, 0.7, lodb));
   vec4 col = colb;
   float edgeB = min(min(sb.x, sb.y), min(uSize.x - sb.x, uSize.y - sb.y));
   float a = clamp(edgeB / max(footb, 1e-4) + 0.5, 0.0, 1.0);   // anti-aliased photo border
   if (uMapOn == 1) {
     vec4 colf = mix(bicubic(uvf), textureGrad(uImg, uvf, dfx, dfy), smoothstep(0.0, 0.7, lodf));
+    if (shade) {
+      vec3 L = normalize(uLight);
+      vec3 n0 = normalize(vec3(-g0, 1.0)), n1 = normalize(vec3(-g1, 1.0));
+      // skin scatters light, so geometric highlights stay softer than shadows
+      float k = (max(dot(n1, L), 0.0) + 0.3) / (max(dot(n0, L), 0.0) + 0.3);
+      k = k > 1.0 ? 1.0 + (min(k, 1.6) - 1.0) * 0.45 : max(k, 0.55);
+      colf.rgb *= mix(1.0, k, uShade);
+      colf.rgb = min(colf.rgb, vec3(colf.a));
+    }
     float edgeF = min(min(sf.x, sf.y), min(uSize.x - sf.x, uSize.y - sf.y));
     float af = clamp(edgeF / max(footf, 1e-4) + 0.5, 0.0, 1.0);
     col = mix(colb, colf, m);
@@ -184,17 +206,19 @@ void main() {
   outColor = col * (a * uAlpha);
 }`;
 
-// Pre-pass: evaluates both face-map layers (thin-plate splines fitted in facemap.js) once per
-// grid node, so each frame only interpolates the grid.
+// Pre-pass: evaluates both face-map layers and the two depth fields (thin-plate splines fitted in
+// facemap.js) once per grid node, so each frame only interpolates the grids.
 const MAP_FS = `#version 300 es
 precision highp float;
 precision highp sampler2D;
-uniform sampler2D uCtrl;    // row 0: face layer, row 1: back layer — (centre x, y, weight x, y), in units of uS
-uniform int   uNF, uNB;
+uniform sampler2D uCtrl;    // rows: face layer, back layer, base depth, depth change — (centre x, y, weight x, y), in units of uS
+uniform int   uNF, uNB, uND, uNC;
 uniform vec3  uAF[2], uAB[2];   // affine parts (x and y rows)
+uniform vec3  uAD, uAC;
 uniform float uS;
 uniform float uMapCell;
-out vec4 outMap;
+layout(location = 0) out vec4 outMap;
+layout(location = 1) out vec4 outDepth;
 vec2 tps(int row, int n, vec3 ax, vec3 ay, vec2 v) {
   vec2 X = v / uS;
   vec2 d = vec2(ax.x + ax.y * X.x + ax.z * X.y, ay.x + ay.y * X.x + ay.z * X.y);
@@ -206,9 +230,21 @@ vec2 tps(int row, int n, vec3 ax, vec3 ay, vec2 v) {
   }
   return v + d * uS;
 }
+float tps1(int row, int n, vec3 a, vec2 v) {
+  vec2 X = v / uS;
+  float d = a.x + a.y * X.x + a.z * X.y;
+  for (int i = 0; i < 2048; i++) {
+    if (i >= n) break;
+    vec4 c = texelFetch(uCtrl, ivec2(i, row), 0);
+    vec2 e = X - c.xy; float r2 = dot(e, e);
+    if (r2 > 1e-12) d += c.z * (0.5 * r2 * log(r2));
+  }
+  return d * uS;
+}
 void main() {
   vec2 v = (gl_FragCoord.xy - 0.5) * uMapCell;
   outMap = vec4(tps(0, uNF, uAF[0], uAF[1], v), tps(1, uNB, uAB[0], uAB[1], v));
+  outDepth = vec4(uND > 0 ? tps1(2, uND, uAD, v) : 0.0, uNC > 0 ? tps1(3, uNC, uAC, v) : 0.0, 0.0, 1.0);
 }`;
 
 function createRenderer(canvas) {
@@ -241,9 +277,9 @@ function createRenderer(canvas) {
   const U = {};
   ['uImg', 'uTexSize', 'uSize', 'uField', 'uFieldN', 'uCell', 'uMorph', 'uView', 'uDpr', 'uCanvasH',
    'uRot', 'uScale', 'uTrans', 'uEll', 'uLensD', 'uZref', 'uAlpha',
-   'uMapOn', 'uMap', 'uMapN', 'uMapCell', 'uMask', 'uShowLayers'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+   'uMapOn', 'uMap', 'uMapN', 'uMapCell', 'uMask', 'uShowLayers', 'uDepth', 'uShade', 'uLight'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
   const MU = {};
-  if (mapProg) ['uCtrl', 'uNF', 'uNB', 'uAF', 'uAB', 'uS', 'uMapCell'].forEach(n => { MU[n] = gl.getUniformLocation(mapProg, n); });
+  if (mapProg) ['uCtrl', 'uNF', 'uNB', 'uND', 'uNC', 'uAF', 'uAB', 'uAD', 'uAC', 'uS', 'uMapCell'].forEach(n => { MU[n] = gl.getUniformLocation(mapProg, n); });
   const vao = gl.createVertexArray();
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
   const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
@@ -278,8 +314,9 @@ function createRenderer(canvas) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   };
-  const mapTex = gl.createTexture(), ctrlTex = gl.createTexture(), mapFbo = gl.createFramebuffer();
+  const mapTex = gl.createTexture(), depthTex = gl.createTexture(), ctrlTex = gl.createTexture(), mapFbo = gl.createFramebuffer();
   rgba32(mapTex, 1, 1, new Float32Array(4));
+  rgba32(depthTex, 1, 1, new Float32Array(4));
   let mapW = 1, mapH = 1, mapCell = 1;
 
   let texW = 1, texH = 1, fieldW = 0, fieldH = 0, hasField = false;
@@ -289,31 +326,39 @@ function createRenderer(canvas) {
     /** True when the face-map grid can be computed on the GPU (computeMap); otherwise use setMapGrid. */
     gpuMap: !!mapProg,
     /**
-     * Evaluate both face-map layers on a gw × gh grid (cell = source px between nodes).
-     * F, B: thin-plate splines from CraniMap.tpsFit (same length unit s).
+     * Evaluate both face-map layers and the two depth fields on a gw × gh grid (cell = source px
+     * between nodes). F, B: thin-plate splines from CraniMap.tpsFit (same length unit s);
+     * D, C: scalar splines for the face depth (on the photo) and its change (on the result), or null.
      */
-    computeMap(F, B, gw, gh, cell) {
-      const n = Math.max(1, F.n, B.n), ctrl = new Float32Array(n * 2 * 4);
-      for (let i = 0; i < F.n; i++) ctrl.set([F.c[2 * i], F.c[2 * i + 1], F.w[2 * i], F.w[2 * i + 1]], 4 * i);
-      for (let i = 0; i < B.n; i++) ctrl.set([B.c[2 * i], B.c[2 * i + 1], B.w[2 * i], B.w[2 * i + 1]], 4 * (n + i));
-      rgba32(ctrlTex, n, 2, ctrl);
-      if (gw !== mapW || gh !== mapH) { rgba32(mapTex, gw, gh, null); mapW = gw; mapH = gh; }
+    computeMap(F, B, D, C, gw, gh, cell) {
+      const n = Math.max(1, F.n, B.n, D ? D.n : 0, C ? C.n : 0), ctrl = new Float32Array(n * 4 * 4);
+      const put = (T, row) => { if (T) for (let i = 0; i < T.n; i++) ctrl.set([T.c[2 * i], T.c[2 * i + 1], T.w[2 * i], T.w[2 * i + 1]], 4 * (row * n + i)); };
+      put(F, 0); put(B, 1); put(D, 2); put(C, 3);
+      rgba32(ctrlTex, n, 4, ctrl);
+      if (gw !== mapW || gh !== mapH) { rgba32(mapTex, gw, gh, null); rgba32(depthTex, gw, gh, null); mapW = gw; mapH = gh; }
       mapCell = cell;
       gl.bindFramebuffer(gl.FRAMEBUFFER, mapFbo);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, mapTex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, depthTex, 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
       gl.viewport(0, 0, gw, gh);
       gl.useProgram(mapProg);
       gl.bindVertexArray(vao);
+      // keep the target textures off every sampler unit while drawing into them
       gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, ctrlTex); gl.uniform1i(MU.uCtrl, 3);
+      gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, null);
       gl.uniform1i(MU.uNF, F.n); gl.uniform1i(MU.uNB, B.n);
+      gl.uniform1i(MU.uND, D ? D.n : 0); gl.uniform1i(MU.uNC, C ? C.n : 0);
       gl.uniform3fv(MU.uAF, F.a); gl.uniform3fv(MU.uAB, B.a);
+      gl.uniform3fv(MU.uAD, D ? D.a.slice(0, 3) : [0, 0, 0]); gl.uniform3fv(MU.uAC, C ? C.a.slice(0, 3) : [0, 0, 0]);
       gl.uniform1f(MU.uS, F.s); gl.uniform1f(MU.uMapCell, cell);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     },
-    /** Upload a face-map grid computed elsewhere (Float32Array gw*gh*4: face x, y, back x, y). */
-    setMapGrid(data, gw, gh, cell) {
+    /** Upload grids computed elsewhere (Float32Array gw*gh*4: face x, y, back x, y · depth, depth change, 0, 0). */
+    setMapGrid(data, depth, gw, gh, cell) {
       rgba32(mapTex, gw, gh, data);
+      rgba32(depthTex, gw, gh, depth);
       mapW = gw; mapH = gh; mapCell = cell;
     },
     /** Upload the photo (an image or canvas already scaled to fit maxTex). */
@@ -377,14 +422,18 @@ function createRenderer(canvas) {
       gl.uniform4f(U.uEll, e[0], e[1], Math.max(1, e[2]), Math.max(1, e[3]));
       gl.uniform1f(U.uLensD, p.ell ? p.lensD : 0);
       gl.uniform1f(U.uZref, p.zref || 0);
-      // face map: p.map = { moved (grid is current), showLayers } | null
+      // face map: p.map = { moved (grids are current), showLayers, shade (0…1), light [x, y, z] } | null
       const M = p.map;
       gl.uniform1i(U.uMapOn, M ? (M.moved ? 1 : 2) : 0);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.uniform1i(U.uMask, 2);
       gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, mapTex); gl.uniform1i(U.uMap, 3);
+      gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, depthTex); gl.uniform1i(U.uDepth, 4);
       gl.uniform2i(U.uMapN, mapW, mapH);
       gl.uniform1f(U.uMapCell, mapCell);
       gl.uniform1f(U.uShowLayers, M && M.showLayers ? 1 : 0);
+      gl.uniform1f(U.uShade, M && M.moved ? (M.shade || 0) : 0);
+      const L = (M && M.light) || [0, -.35, 1];
+      gl.uniform3f(U.uLight, L[0], L[1], L[2]);
       gl.uniform1f(U.uAlpha, p.alpha == null ? 1 : p.alpha);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
@@ -393,5 +442,5 @@ function createRenderer(canvas) {
   };
 }
 
-window.CraniWarp = { createRenderer, build: '11' };
+window.CraniWarp = { createRenderer, build: '12' };
 })();
