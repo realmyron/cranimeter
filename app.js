@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '8';   // must match <meta name="cranimeter-build"> in index.html and warp.js
+const BUILD = '9';   // must match <meta name="cranimeter-build"> in index.html and warp.js
 const { GROUPS, LANDMARKS } = window.CRANI;
 const P = {};
 GROUPS.forEach(g => g.items.forEach(it => { it.group = g.name; P[it.id] = it; }));
@@ -119,7 +119,7 @@ const DEFAULTS = {
   c1: '#7CCBF5', c2: '#F2A7C6', c3: '#F0CD6E',
   width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
-  mMode: 'push', mSize: .09, mStrength: .55, mHard: .25,
+  mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mProtect: false, mLimit: false,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -202,7 +202,7 @@ const S = {
   leaving: [],
   awakeUntil: 0,
   // image edits: rotation (deg), zoom, flip, lens 0–100 and the face ellipse (U space)
-  adj: { rot: 0, zoom: 1, flip: 1, lens: 0, ell: null },
+  adj: { rot: 0, zoom: 1, aspect: 1, flip: 1, tx: 0, ty: 0, lens: 0, ell: null },
   // morph displacement field over the photo (P space); field === null means no morph
   warp: { field: null, gw: 1, gh: 1, cs: 1 },
   scratch: null, stroke: null, hdrag: null, compare: false, adjSnap: null,
@@ -218,46 +218,65 @@ const toI = (sx, sy) => ({ x: (sx - S.view.x) / S.view.k, y: (sy - S.view.y) / S
    Measurement points are anchored in S, so they ride along with every
    rotation, lens correction and morph stroke. ---------------------------- */
 
-// Lens model: midline features sit ≈ 6 cm in front of the face outline. A camera at distance D
-// magnifies them by D / (D − 6 cm) relative to the outline; correction undoes that (k = 6 / D).
-const FACE_DEPTH_CM = 6;
-const lensDistanceCm = v => 20 / (v / 100);                 // slider 100 → 20 cm, 50 → 40 cm, 10 → 2 m
-const lensK = () => (S.adj.ell && S.adj.lens > 0) ? FACE_DEPTH_CM / lensDistanceCm(S.adj.lens) : 0;
-const isIdentity = () => !S.adj.rot && S.adj.zoom === 1 && S.adj.flip === 1 && !lensK() && !S.warp.field;
+/* ---- image transform: rotate · scale (with stretch + flip) · move, about the image centre ---- */
+const DEFAULT_ADJ = () => ({ rot: 0, zoom: 1, aspect: 1, flip: 1, tx: 0, ty: 0, lens: 0, ell: null });
+const scaleXY = (a = S.adj) => [a.flip * a.zoom * Math.sqrt(a.aspect), a.zoom / Math.sqrt(a.aspect)];
+const affineIdentity = () => { const a = S.adj; return !a.rot && a.zoom === 1 && a.aspect === 1 && a.flip === 1 && !a.tx && !a.ty; };
 
-function vToU(v) {
-  const a = S.adj, cx = S.iw / 2, cy = S.ih / 2, t = a.rot / DEG, c = Math.cos(t), s = Math.sin(t);
-  const dx = v.x - cx, dy = v.y - cy;
-  let ux = (c * dx + s * dy) / a.zoom, uy = (-s * dx + c * dy) / a.zoom;
-  return { x: cx + ux * a.flip, y: cy + uy };
+function vToU(v, a = S.adj) {
+  const cx = S.iw / 2, cy = S.ih / 2, t = a.rot / DEG, c = Math.cos(t), s = Math.sin(t), [sx, sy] = scaleXY(a);
+  const dx = v.x - cx - a.tx, dy = v.y - cy - a.ty;
+  return { x: cx + (c * dx + s * dy) / sx, y: cy + (-s * dx + c * dy) / sy };
 }
-function uToV(u) {
-  const a = S.adj, cx = S.iw / 2, cy = S.ih / 2, t = a.rot / DEG, c = Math.cos(t), s = Math.sin(t);
-  const dx = (u.x - cx) * a.flip, dy = u.y - cy;
-  return { x: cx + a.zoom * (c * dx - s * dy), y: cy + a.zoom * (s * dx + c * dy) };
+function uToV(u, a = S.adj) {
+  const cx = S.iw / 2, cy = S.ih / 2, t = a.rot / DEG, c = Math.cos(t), s = Math.sin(t), [sx, sy] = scaleXY(a);
+  const dx = (u.x - cx) * sx, dy = (u.y - cy) * sy;
+  return { x: cx + a.tx + c * dx - s * dy, y: cy + a.ty + s * dx + c * dy };
 }
-function lensG(u) {
-  const k = lensK();
-  if (!k) return 1;
-  const e = S.adj.ell, rx = (u.x - e.cx) / e.ax, ry = (u.y - e.cy) / e.ay, r2 = rx * rx + ry * ry;
-  const h = r2 < 1 ? 1 - r2 : -.5 * (1 - Math.exp(-(r2 - 1) / .5));
-  return 1 / (1 - k * h);
+
+/* ---- close-range lens (perspective) model — keep in sync with depthAt() in warp.js ----
+   A camera at distance D renders a point at depth z (cm in front of the ear plane) at
+   D/(D − z) times its far-away size. Typical depths: nose tip ≈ 11 cm, nasion / lips / chin ≈ 8–9,
+   zygion ≈ 3, ears and hair edge ≈ 0. Correcting to a far camera with the cheekbone width held
+   fixed shrinks the nose and chin, shortens the face and lets the head outline widen naturally. */
+const lensDistanceCm = v => 25 / (v / 100);              // slider 100 → 25 cm, 50 → 50 cm, 10 → 2.5 m
+const lensD = () => (S.adj.ell && S.adj.lens > 0) ? lensDistanceCm(S.adj.lens) : 0;
+const hump = t => { t = clamp(t, 0, 1); return 1 - t * t * (3 - 2 * t); };
+const gauss = (qx, qy, cx, cy, sx, sy) => { const dx = (qx - cx) / sx, dy = (qy - cy) / sy; return Math.exp(-.5 * (dx * dx + dy * dy)); };
+function depthAt(qx, qy) {
+  const hx = hump(qx * qx / (1.3 * 1.3));
+  const hy = qy < -1 ? hump((-1 - qy) / 1.9) : qy > .9 ? 1 + (.25 - 1) * (1 - hump((qy - .9) / .6)) : 1;
+  let z = 8.5 * hx * hy;
+  z += 2.8 * gauss(qx, qy, 0, -.3, .19, .40);
+  z += .8 * gauss(qx, qy, 0, .25, .30, .16);
+  z += .5 * gauss(qx, qy, 0, .85, .30, .20);
+  z -= 1.2 * (gauss(qx, qy, .47, -.9, .2, .14) + gauss(qx, qy, -.47, -.9, .2, .14));
+  return Math.max(z, 0);
 }
+const ZREF = depthAt(1, -.6);   // zygion depth
+function lensG(p) {
+  const D = lensD();
+  if (!D) return 1;
+  const e = S.adj.ell, qx = (p.x - e.cx) / e.ax, qy = (p.y - e.cy) / e.ay;
+  const ee = qx * qx / (1.3 * 1.3) + (qy + .95) * (qy + .95) / 4;
+  const w = 1 - smooth01(1, 3.5, ee);
+  return (D - ZREF * w) / (D - depthAt(qx, qy));
+}
+/** Lens-corrected view → original photo position (fixed-point; mirrors lensUP in warp.js). */
 function uToP(u) {
-  if (!lensK()) return { x: u.x, y: u.y };
-  const e = S.adj.ell, g = lensG(u);
-  return { x: e.cx + (u.x - e.cx) * g, y: e.cy + (u.y - e.cy) * g };
-}
-function pToU(p) {
-  if (!lensK()) return { x: p.x, y: p.y };
+  if (!lensD()) return { x: u.x, y: u.y };
   const e = S.adj.ell;
-  let u = { x: p.x, y: p.y };
-  for (let i = 0; i < 12; i++) {
-    const g = lensG(u);
-    u = { x: e.cx + (p.x - e.cx) / g, y: e.cy + (p.y - e.cy) / g };
-  }
-  return u;
+  let p = { x: u.x, y: u.y };
+  for (let i = 0; i < 10; i++) { const g = lensG(p); p = { x: e.cx + (u.x - e.cx) * g, y: e.cy + (u.y - e.cy) * g }; }
+  return p;
 }
+/** Original photo position → lens-corrected view (closed form). */
+function pToU(p) {
+  if (!lensD()) return { x: p.x, y: p.y };
+  const e = S.adj.ell, g = lensG(p);
+  return { x: e.cx + (p.x - e.cx) / g, y: e.cy + (p.y - e.cy) / g };
+}
+const isIdentity = () => affineIdentity() && !lensD() && !S.warp.field;
 function fieldAt(f, x, y) {
   const W_ = S.warp, cs = W_.cs, gw = W_.gw, gh = W_.gh;
   const fx = x / cs, fy = y / cs, i = Math.floor(fx), j = Math.floor(fy), tx = fx - i, ty = fy - j;
@@ -324,12 +343,29 @@ function morphDab(pc, d, R, mode, amt) {
   const j0 = Math.max(0, Math.floor((pc.y - R) / cs)), j1 = Math.min(gh - 1, Math.ceil((pc.y + R) / cs));
   if (i1 < i0 || j1 < j0) return;
   const hard = clamp(cfg.mHard, 0, 1) * .85, R2 = R * R;
+  const nw = i1 - i0 + 1, nh = j1 - j0 + 1;
+  // Beta · protect hair & background: weight each node by how much its colour matches the skin under the brush
+  let mask = null;
+  if (cfg.mProtect && mode !== 'restore' && S.stroke && S.stroke.ref) {
+    const ref = S.stroke.ref, sg2 = 2 * 34 * 34;
+    mask = new Float32Array(nw * nh);
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const idx = (j * gw + i) * 2, col = colorAt(i * cs + old[idx], j * cs + old[idx + 1]);
+      const dr = col[0] - ref[0], dg = col[1] - ref[1], db = col[2] - ref[2];
+      const d2 = (2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9;
+      mask[(j - j0) * nw + (i - i0)] = .06 + .94 * Math.exp(-d2 / sg2);
+    }
+    // feather the edge in proportion to the brush so skin/hair borders bend smoothly instead of tearing
+    const passes = clamp(Math.round(R / cs / 6), 2, 10);
+    for (let k = 0; k < passes; k++) blurGrid(mask, nw, nh);
+  }
   for (let j = j0; j <= j1; j++) {
     const y = j * cs, dy = y - pc.y;
     for (let i = i0; i <= i1; i++) {
       const x = i * cs, dx = x - pc.x, r2 = dx * dx + dy * dy;
       if (r2 >= R2) continue;
-      const w = (1 - smooth01(hard, 1, Math.sqrt(r2) / R)) * amt;
+      let w = (1 - smooth01(hard, 1, Math.sqrt(r2) / R)) * amt;
+      if (mask) w *= mask[(j - j0) * nw + (i - i0)];
       if (w <= 0) continue;
       const idx = (j * gw + i) * 2;
       if (mode === 'restore') { f[idx] = old[idx] * (1 - w); f[idx + 1] = old[idx + 1] * (1 - w); continue; }
@@ -340,8 +376,89 @@ function morphDab(pc, d, R, mode, amt) {
       f[idx] = o[0] + qx - x; f[idx + 1] = o[1] + qy - y;
     }
   }
+  // Beta · limit stretching: hold back changes wherever they would stretch or squash beyond ~1.7×
+  if (cfg.mLimit && mode !== 'restore') {
+    // Scale the whole dab (never parts of it — partial freezing would itself create hard
+    // stretch lines) to the largest strength that keeps every node within the limits,
+    // or no worse than it already was.
+    const delta = new Float32Array(nw * nh * 2), before = new Float32Array(nw * nh);
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const idx = (j * gw + i) * 2, k = (j - j0) * nw + (i - i0);
+      delta[k * 2] = f[idx] - old[idx]; delta[k * 2 + 1] = f[idx + 1] - old[idx + 1];
+      before[k] = stretchBad(old, i, j);
+    }
+    const apply = a => {
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        const idx = (j * gw + i) * 2, k = (j - j0) * nw + (i - i0);
+        f[idx] = old[idx] + delta[k * 2] * a; f[idx + 1] = old[idx + 1] + delta[k * 2 + 1] * a;
+      }
+    };
+    const ok = () => {
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        if (stretchBad(f, i, j) > before[(j - j0) * nw + (i - i0)] + 1e-4) return false;
+      }
+      return true;
+    };
+    if (!ok()) {
+      let lo = 0, hi = 1;
+      for (let it = 0; it < 7; it++) { const mid = (lo + hi) / 2; apply(mid); if (ok()) lo = mid; else hi = mid; }
+      apply(lo);
+    }
+  }
   for (let j = j0; j <= j1; j++) old.set(f.subarray((j * gw + i0) * 2, (j * gw + i1 + 1) * 2), (j * gw + i0) * 2);
   S.fieldDirty = true;
+}
+/** How far the mapping at node (i, j) exceeds the stretch limits (0 = fine). */
+function stretchBad(buf, i, j) {
+  const W_ = S.warp, gw = W_.gw, gh = W_.gh, cs = W_.cs;
+  const il = Math.max(0, i - 1), ir = Math.min(gw - 1, i + 1), jt = Math.max(0, j - 1), jb = Math.min(gh - 1, j + 1);
+  const L = (j * gw + il) * 2, Rr = (j * gw + ir) * 2, T = (jt * gw + i) * 2, B = (jb * gw + i) * 2;
+  const hx = (ir - il) * cs || 1, hy = (jb - jt) * cs || 1;
+  const a = 1 + (buf[Rr] - buf[L]) / hx, b = (buf[B] - buf[T]) / hy;
+  const c = (buf[Rr + 1] - buf[L + 1]) / hx, d = 1 + (buf[B + 1] - buf[T + 1]) / hy;
+  const det = a * d - b * c;
+  if (det <= 0) return 2;
+  const E = (a * a + b * b + c * c + d * d) / 2;
+  const smax = Math.sqrt(E + Math.sqrt(Math.max(0, E * E - det * det))), smin = det / smax;
+  return Math.max(0, .58 - smin) + Math.max(0, smax - 1.75);
+}
+/** 3×3 box blur in place (edges clamped). */
+function blurGrid(a, w, h) {
+  const t = new Float32Array(a.length);
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+    let s = 0, n = 0;
+    for (let dj = -1; dj <= 1; dj++) { const jj = j + dj; if (jj < 0 || jj >= h) continue; for (let di = -1; di <= 1; di++) { const ii = i + di; if (ii < 0 || ii >= w) continue; s += a[jj * w + ii]; n++; } }
+    t[j * w + i] = s / n;
+  }
+  a.set(t);
+}
+/** A small CPU copy of the photo, used to read colours for “Protect hair & background”. */
+function ensurePix() {
+  if (S.pix && S.pix.rec === S.imgRec) return S.pix;
+  const sc = Math.min(1, 768 / Math.max(S.iw, S.ih));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(S.iw * sc)); c.height = Math.max(1, Math.round(S.ih * sc));
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(S.img, 0, 0, c.width, c.height);
+  S.pix = { rec: S.imgRec, data: g.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, sc };
+  return S.pix;
+}
+function colorAt(x, y) {
+  const P_ = S.pix;
+  if (!P_) return [0, 0, 0];
+  const i = clamp(Math.round(x * P_.sc), 0, P_.w - 1), j = clamp(Math.round(y * P_.sc), 0, P_.h - 1), k = (j * P_.w + i) * 4;
+  return [P_.data[k], P_.data[k + 1], P_.data[k + 2]];
+}
+/** Average skin colour under the brush centre at the start of a stroke. */
+function strokeRef(v) {
+  ensurePix();
+  const { pc, R } = brushAt(v), acc = [0, 0, 0];
+  const pts = [[0, 0], ...Array.from({ length: 8 }, (_, i) => [Math.cos(i / 8 * TAU) * .18, Math.sin(i / 8 * TAU) * .18])];
+  for (const [ox, oy] of pts) {
+    const s = pToS({ x: pc.x + ox * R, y: pc.y + oy * R }), c = colorAt(s.x, s.y);
+    acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2];
+  }
+  return acc.map(v_ => v_ / pts.length);
 }
 const brushV = () => cfg.mSize * Math.max(S.iw, S.ih);   // brush radius in view px
 function brushAt(v) {
@@ -569,7 +686,7 @@ function pushUndo(s = snapshot()) {
 function restore(s) {
   const imgChanged = s.img !== S.imgRec;
   if (imgChanged) setImageState(s.img);
-  if (s.adj) S.adj = { ...s.adj, ell: s.adj.ell ? { ...s.adj.ell } : null };
+  if (s.adj) S.adj = { ...DEFAULT_ADJ(), ...s.adj, ell: s.adj.ell ? { ...s.adj.ell } : null };
   if (s.warp) { S.warp = s.warp; S.fieldDirty = true; }
   S.glDirty = true;
   const old = S.meas;
@@ -991,8 +1108,8 @@ function glParams(view, d, cw, ch, alpha) {
   const a = S.adj, e = a.ell;
   return {
     cw, ch, view, dpr: d, size: [S.iw, S.ih],
-    rot: a.rot / DEG, zoom: a.zoom, flip: a.flip,
-    ell: e ? [e.cx, e.cy, e.ax, e.ay] : null, lensK: lensK(),
+    rot: a.rot / DEG, scale: scaleXY(a), trans: [a.tx, a.ty],
+    ell: e ? [e.cx, e.cy, e.ax, e.ay] : null, lensD: lensD(), zref: ZREF,
     morph: !!S.warp.field && !S.compare, cell: S.warp.cs, alpha,
   };
 }
@@ -1053,23 +1170,37 @@ function drawBrush(ctx, c) {
   ctx.beginPath(); ctx.arc(c.x, c.y, 1.6, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fill();
   ctx.restore();
 }
-/** Screen positions of the face-outline handles (centre, side, bottom). */
+/* Face frame lives in P (original photo) space: origin between nasion and menton,
+   ax = half the bizygomatic width, ay = half the nasion–menton height. */
+const pToScreen = p => toS(uToV(pToU(p)));
+/** Screen positions of the face-frame handles (centre, cheekbone side, chin). */
 function ellHandles() {
   const e = S.adj.ell;
   if (!e) return [];
-  const sc = u => toS(uToV(u));
   return [
-    { id: 'c', p: sc({ x: e.cx, y: e.cy }) },
-    { id: 'x', p: sc({ x: e.cx + e.ax, y: e.cy }) },
-    { id: 'y', p: sc({ x: e.cx, y: e.cy + e.ay }) },
+    { id: 'c', p: pToScreen({ x: e.cx, y: e.cy }) },
+    { id: 'x', p: pToScreen({ x: e.cx + e.ax, y: e.cy }) },
+    { id: 'y', p: pToScreen({ x: e.cx, y: e.cy + e.ay }) },
   ];
+}
+/** Image-transform handles in screen space: the four corners and the rotate knob. */
+function xfHandles() {
+  const C = [{ x: 0, y: 0 }, { x: S.iw, y: 0 }, { x: S.iw, y: S.ih }, { x: 0, y: S.ih }].map(u => toS(uToV(u)));
+  const top = toS(uToV({ x: S.iw / 2, y: 0 })), ctr = toS(uToV({ x: S.iw / 2, y: S.ih / 2 }));
+  const L = Math.hypot(top.x - ctr.x, top.y - ctr.y) || 1;
+  const knob = { x: top.x + (top.x - ctr.x) / L * 26, y: top.y + (top.y - ctr.y) / L * 26 };
+  return { C, top, ctr, knob };
+}
+function outline(ctx, f, n = 72) {
+  ctx.beginPath();
+  for (let i = 0; i <= n; i++) { const p = f(i / n * TAU); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }
 }
 function drawAdjustGuides(ctx) {
   const blue = getComputedStyle(root).getPropertyValue('--blue').trim() || '#7EA6FF';
   ctx.save();
-  // level guides across the photo frame
+  // export frame with faint level guides
   const a = toS({ x: 0, y: 0 }), b = toS({ x: S.iw, y: S.ih });
-  ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 1;
   ctx.beginPath();
   for (let i = 1; i < 8; i++) {
     const y = Math.round(a.y + (b.y - a.y) * i / 8) + .5, x = Math.round(a.x + (b.x - a.x) * i / 8) + .5;
@@ -1077,16 +1208,18 @@ function drawAdjustGuides(ctx) {
     ctx.moveTo(x, a.y); ctx.lineTo(x, b.y);
   }
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,.22)';
+  ctx.setLineDash([3, 4]);
+  ctx.strokeStyle = 'rgba(255,255,255,.25)';
   ctx.strokeRect(Math.round(a.x) + .5, Math.round(a.y) + .5, Math.round(b.x - a.x), Math.round(b.y - a.y));
-  // face outline used by the lens correction
+  ctx.setLineDash([]);
+
+  // face + modelled head outline used by the lens correction
   const e = S.adj.ell;
   if (e && S.adj.lens > 0) {
-    ctx.beginPath();
-    for (let i = 0; i <= 72; i++) {
-      const t = i / 72 * TAU, p = toS(uToV({ x: e.cx + Math.cos(t) * e.ax, y: e.cy + Math.sin(t) * e.ay }));
-      i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
-    }
+    const fr = (X, Y) => pToScreen({ x: e.cx + X * e.ax, y: e.cy + Y * e.ay });
+    outline(ctx, t => fr(1.3 * Math.cos(t), -.95 + 2 * Math.sin(t)));
+    ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(blue, .4); ctx.lineWidth = 1; ctx.stroke();
+    outline(ctx, t => fr(Math.cos(t), Math.sin(t)));
     ctx.setLineDash([5, 5]);
     ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 3; ctx.stroke();
     ctx.strokeStyle = rgba(blue, .9); ctx.lineWidth = 1.3; ctx.stroke();
@@ -1099,6 +1232,24 @@ function drawAdjustGuides(ctx) {
       ctx.fillStyle = h.id === 'c' ? '#FFFFFF' : blue; ctx.fill();
     }
   }
+
+  // transform frame: corners stretch, knob / outside a corner rotates
+  const { C, top, knob } = xfHandles(), hz = S.tdrag ? S.tdrag.zone : S.hoverXf;
+  ctx.beginPath(); C.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath();
+  ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = rgba(blue, .85); ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(knob.x, knob.y);
+  ctx.strokeStyle = rgba(blue, .85); ctx.lineWidth = 1.2; ctx.stroke();
+  const sq = (p, on) => {
+    const r = on ? 5.5 : 4.5;
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(p.x - r - 1.5, p.y - r - 1.5, 2 * r + 3, 2 * r + 3);
+    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(p.x - r, p.y - r, 2 * r, 2 * r);
+    ctx.fillStyle = blue; ctx.fillRect(p.x - r + 2, p.y - r + 2, 2 * r - 4, 2 * r - 4);
+  };
+  C.forEach((p, i) => sq(p, hz && hz.type === 'corner' && hz.i === i));
+  const kon = hz && hz.type === 'rotate';
+  ctx.beginPath(); ctx.arc(knob.x, knob.y, kon ? 6.5 : 5.5, 0, TAU); ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(knob.x, knob.y, kon ? 5 : 4, 0, TAU); ctx.fillStyle = '#FFFFFF'; ctx.fill();
   ctx.restore();
 }
 
@@ -1316,10 +1467,11 @@ function stepView(dt) {
   } else { v.k = g.k; v.x = g.x; v.y = g.y; }
   setText(zoomPct, Math.round(g.k * 100) + '%');
 }
-function setViewNow(v) { S.view = { ...v }; S.viewT = { ...v }; wake(); }
+function setViewNow(v) { S.view = { ...v }; S.viewT = { ...v }; S.fitted = false; wake(); }
+const TOOLPANEL_W = 272;
 function safeRect() {
-  const mob = W <= 860;
-  const l = mob ? 12 : 84, r = mob ? 12 : 352, t = mob ? 76 : 24, b = 48;
+  const mob = W <= 860, drawer = !mob && body.classList.contains('topts-open') ? TOOLPANEL_W : 0;
+  const l = mob ? 12 : 84 + drawer, r = mob ? 12 : 352, t = mob ? 76 : 24, b = 48;
   return { x: l, y: t, w: Math.max(120, W - l - r), h: Math.max(120, H - t - b) };
 }
 function fitView(intro) {
@@ -1327,7 +1479,7 @@ function fitView(intro) {
   const r = safeRect();
   const k = Math.min(r.w / S.iw, r.h / S.ih) * .96;
   const v = { k, x: r.x + (r.w - S.iw * k) / 2, y: r.y + (r.h - S.ih * k) / 2 };
-  S.fitK = k; S.viewT = v;
+  S.fitK = k; S.viewT = v; S.fitted = true;
   if (intro) {
     const k0 = k * .94;
     S.view = { k: k0, x: v.x + S.iw * (k - k0) / 2, y: v.y + S.ih * (k - k0) / 2 };
@@ -1339,6 +1491,7 @@ function zoomAt(sx, sy, f) {
   const v = S.viewT, k = clamp(v.k * f, S.fitK * .2, 64);
   const ix = (sx - v.x) / v.k, iy = (sy - v.y) / v.k;
   S.viewT = { k, x: sx - ix * k, y: sy - iy * k };
+  S.fitted = false;
   wake();
 }
 const zoomCenter = f => { const r = safeRect(); zoomAt(r.x + r.w / 2, r.y + r.h / 2, f); };
@@ -1385,7 +1538,9 @@ function syncPicks() {
 }
 function refreshCursor() {
   let c;
-  if (S.drag || S.pan || S.hdrag || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
+  const xz = S.tdrag ? S.tdrag.zone : S.hoverXf;
+  if (S.tool === 'adjust' && xz && !S.space && !S.pan && !(S.press && S.press.moved)) c = xfCursor(xz);
+  else if (S.drag || S.pan || S.hdrag || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
   else if (S.box) c = 'crosshair';
   else if (S.space) c = 'grab';
   else if (S.tool === 'morph') c = 'none';
@@ -1401,9 +1556,40 @@ function handleAt(sx, sy) {
   for (const h of ellHandles()) if (Math.hypot(h.p.x - sx, h.p.y - sy) <= 11) return h.id;
   return null;
 }
+/** Which part of the transform frame is under the cursor: corner (stretch), rotate, or inside (move). */
+function xfZoneAt(sx, sy) {
+  if (S.tool !== 'adjust' || !GLR || !S.img) return null;
+  const { C, ctr, knob } = xfHandles();
+  if (Math.hypot(knob.x - sx, knob.y - sy) <= 11) return { type: 'rotate' };
+  for (let i = 0; i < 4; i++) if (Math.hypot(C[i].x - sx, C[i].y - sy) <= 10) return { type: 'corner', i };
+  const inside = (() => {
+    let s = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = C[i], b = C[(i + 1) % 4], cr = (b.x - a.x) * (sy - a.y) - (b.y - a.y) * (sx - a.x);
+      if (cr !== 0) { if (!s) s = Math.sign(cr); else if (Math.sign(cr) !== s) return false; }
+    }
+    return true;
+  })();
+  if (!inside) for (let i = 0; i < 4; i++) {
+    const d = Math.hypot(C[i].x - sx, C[i].y - sy);
+    if (d > 10 && d <= 34) return { type: 'rotate', i };
+  }
+  if (inside) return { type: 'move' };
+  return null;
+}
+const ROT_CURSOR = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18.5 9A7 7 0 1 0 19 14" stroke="#000" stroke-width="4"/><path d="M19 4v5h-5" stroke="#000" stroke-width="4"/><path d="M18.5 9A7 7 0 1 0 19 14" stroke="#fff" stroke-width="1.6"/><path d="M19 4v5h-5" stroke="#fff" stroke-width="1.6"/></g></svg>')}") 12 12, crosshair`;
+function xfCursor(z) {
+  if (z.type === 'move') return 'move';
+  if (z.type === 'rotate') return ROT_CURSOR;
+  const { C, ctr } = xfHandles(), p = C[z.i];
+  const ang = ((Math.atan2(p.y - ctr.y, p.x - ctr.x) * DEG) + 360) % 180;
+  return ang < 90 ? 'nwse-resize' : 'nesw-resize';
+}
 function updateHover(sx, sy) {
   const hh = handleAt(sx, sy);
   if (hh !== (S.hoverHandle || null)) { S.hoverHandle = hh; wake(); }
+  const xz = hh ? null : xfZoneAt(sx, sy);
+  if (JSON.stringify(xz) !== JSON.stringify(S.hoverXf || null)) { S.hoverXf = xz; wake(); }
   const h = S.draft || !S.img || EDIT_TOOLS.has(S.tool) ? null : hitTest(sx, sy);
   const changed = (h && h.id) !== (S.hover && S.hover.id) || (h && h.node) !== (S.hover && S.hover.node);
   S.hover = h;
@@ -1428,6 +1614,7 @@ ov.addEventListener('pointerdown', e => {
     if (S.drag) endDrag();
     if (S.stroke) endStroke();
     if (S.hdrag) endHandle();
+    if (S.tdrag) endXf();
     const [a, b] = [...pointers.values()];
     pinch = { d: dist(a, b) || 1, c: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, view: { ...S.view } };
     return;
@@ -1454,7 +1641,9 @@ ov.addEventListener('pointerdown', e => {
   if (S.tool === 'adjust') {
     const h = handleAt(sx, sy);
     if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
-    S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // drag pans
+    const z = xfZoneAt(sx, sy);
+    if (z) { S.tdrag = { zone: z, snap: snapshot(), start: { ...S.adj }, v0: toI(sx, sy), moved: false }; refreshCursor(); return; }
+    S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // outside the photo: drag pans
     return;
   }
   const sel = selectMode();
@@ -1504,6 +1693,7 @@ ov.addEventListener('pointermove', e => {
     return;
   }
   if (S.hdrag) { moveHandle(toI(sx, sy)); return; }
+  if (S.tdrag) { moveXf(toI(sx, sy), e); return; }
   if (S.drag) {
     const d = S.drag, m = S.meas.get(d.id);
     if (!m) { S.drag = null; return; }
@@ -1553,7 +1743,8 @@ ov.addEventListener('pointermove', e => {
 function startStroke(sx, sy) {
   const snap = snapshot();
   beginStroke();
-  S.stroke = { last: toI(sx, sy), snap, changed: false };
+  const v = toI(sx, sy);
+  S.stroke = { last: v, snap, changed: false, ref: cfg.mProtect ? strokeRef(v) : null };
   if (cfg.mMode !== 'push') dabHere(1 / 60);
   wake();
 }
@@ -1575,13 +1766,60 @@ function endStroke() {
 }
 /* face-outline handles (Adjust → lens) */
 function moveHandle(v) {
-  const e = S.adj.ell, u = vToU(v);
+  const e = S.adj.ell;
   if (!e) return;
-  if (S.hdrag.id === 'c') { e.cx = u.x; e.cy = u.y; }
-  else if (S.hdrag.id === 'x') e.ax = Math.max(8, Math.hypot(u.x - e.cx, u.y - e.cy));
-  else e.ay = Math.max(8, Math.hypot(u.x - e.cx, u.y - e.cy));
+  const p = uToP(vToU(v));   // the face frame lives on the original photo
+  if (S.hdrag.id === 'c') { e.cx = p.x; e.cy = p.y; }
+  else if (S.hdrag.id === 'x') e.ax = Math.max(8, Math.hypot(p.x - e.cx, p.y - e.cy));
+  else e.ay = Math.max(8, Math.hypot(p.x - e.cx, p.y - e.cy));
   S.hdrag.moved = true;
   syncPts();
+}
+/* image transform drags (Adjust): move · rotate · corner stretch */
+const IMG_CORNERS = () => [{ x: 0, y: 0 }, { x: S.iw, y: 0 }, { x: S.iw, y: S.ih }, { x: 0, y: S.ih }];
+function moveXf(v, e) {
+  const d = S.tdrag, st = d.start, z = d.zone, a = S.adj;
+  d.moved = true;
+  const c0 = { x: S.iw / 2, y: S.ih / 2 };
+  if (z.type === 'move') {
+    a.tx = st.tx + v.x - d.v0.x; a.ty = st.ty + v.y - d.v0.y;
+  } else if (z.type === 'rotate') {
+    const cx = c0.x + st.tx, cy = c0.y + st.ty;
+    let r = st.rot + (Math.atan2(v.y - cy, v.x - cx) - Math.atan2(d.v0.y - cy, d.v0.x - cx)) * DEG;
+    r = ((r + 180) % 360 + 360) % 360 - 180;
+    if (e.shiftKey) r = Math.round(r / 15) * 15;
+    a.rot = +r.toFixed(2);
+  } else {
+    const Cs = IMG_CORNERS(), Ci = Cs[z.i], O = e.altKey ? c0 : Cs[(z.i + 2) % 4];
+    const anchor = uToV(O, st);                       // stays put while stretching
+    const t = st.rot / DEG, c = Math.cos(t), s = Math.sin(t);
+    const dx = v.x - anchor.x, dy = v.y - anchor.y;
+    const lx = c * dx + s * dy, ly = -s * dx + c * dy;   // in the image's own axes
+    const Lx = Ci.x - O.x, Ly = Ci.y - O.y;
+    const [sx0, sy0] = scaleXY(st);
+    let sx, sy;
+    if (e.shiftKey) {                                  // keep proportions
+      const px = Lx * sx0, py = Ly * sy0;
+      const f = Math.max(.05, (lx * px + ly * py) / (px * px + py * py));
+      sx = sx0 * f; sy = sy0 * f;
+    } else {
+      sx = Math.sign(sx0) * Math.max(.05, lx / Lx * Math.sign(sx0));
+      sy = Math.max(.05, ly / Ly);
+    }
+    const ax = Math.abs(sx);
+    a.flip = Math.sign(sx) || 1;
+    a.zoom = clamp(Math.sqrt(ax * sy), .05, 20);
+    a.aspect = clamp(ax / sy, .2, 5);
+    const p0 = uToV(O, { ...a, tx: 0, ty: 0 });
+    a.tx = anchor.x - p0.x; a.ty = anchor.y - p0.y;
+  }
+  syncPts(); syncToolOpts();
+}
+function endXf() {
+  const d = S.tdrag;
+  S.tdrag = null;
+  if (d && d.moved) pushUndo(d.snap);
+  syncUI();
 }
 function endHandle() {
   const h = S.hdrag;
@@ -1599,6 +1837,7 @@ function pointerUp(e) {
   if (pinch) { if (pointers.size < 2) pinch = null; S.press = null; return; }
   if (S.stroke) endStroke();
   else if (S.hdrag) endHandle();
+  else if (S.tdrag) endXf();
   else if (S.drag) endDrag();
   else if (S.mdrag) {
     const md = S.mdrag;
@@ -1782,8 +2021,9 @@ function setImageState(rec) {
     return;
   }
   Object.assign(S, { img: rec.img, iw: rec.iw, ih: rec.ih, imgA: 0, stroke: null, hdrag: null, compare: false });
-  S.adj = { rot: 0, zoom: 1, flip: 1, lens: 0, ell: null };
+  S.adj = DEFAULT_ADJ();
   initWarp();
+  S.pix = null;
   S.fieldDirty = true; S.glDirty = true;
   body.classList.add('has-img');
   fitView(true);
@@ -1970,7 +2210,10 @@ const sliderRow = (id, label, min, max, step, tip) =>
 
 function renderToolOpts() {
   const t = S.img && EDIT_TOOLS.has(S.tool) ? S.tool : null;
+  const was = toolOpts.classList.contains('open');
   toolOpts.classList.toggle('open', !!t);
+  body.classList.toggle('topts-open', !!t);
+  if (was !== !!t && S.fitted) setTimeout(() => fitView(), 0);   // make room for the drawer
   if (t === toolOptsFor) { syncToolOpts(); return; }
   toolOptsFor = t;
   if (!t) return;
@@ -1993,8 +2236,16 @@ function renderToolOpts() {
       <div class="to-actions">
         <button type="button" class="btn ghost sm" id="mCompare">Hold to compare</button>
         <button type="button" class="btn ghost sm" id="mReset">Reset morph</button>
-      </div>`;
+      </div>
+      <div class="to-group">
+        <div class="to-beta"><span>Beta</span>for big reshapes like pushing the cheekbones out</div>
+        <label class="tg sm"><span>Protect hair &amp; background<small>Only drags areas that match the skin under the brush, so hair and background stay put</small></span><input type="checkbox" class="sw-toggle" id="mProtect"></label>
+        <label class="tg sm"><span>Limit stretching<small>Stops a push once any area would stretch or squash past ≈ 1.7× — never smears, but moves less. With both on, the hair edge limits how far skin can push into it</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>
+      </div>
+      <p class="to-note" style="margin-top:10px">Drag on the photo · <kbd>[</kbd> <kbd>]</kbd> brush size · hold <kbd>B</kbd> to compare</p>`;
     $('#mMode').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mMode = b.dataset.v; saveCfg(); syncToolOpts(); renderHint(); } });
+    $('#mProtect').addEventListener('change', e => { cfg.mProtect = e.target.checked; saveCfg(); });
+    $('#mLimit').addEventListener('change', e => { cfg.mLimit = e.target.checked; saveCfg(); });
     const bind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncToolOpts(); wake(); });
     bind('mSize', 'mSize', v => v / 100);
     bind('mStrength', 'mStrength', v => v / 100);
@@ -2013,14 +2264,18 @@ function renderToolOpts() {
   } else {
     toolOptsBody.innerHTML = `
       <div class="to-head"><span class="to-title">Adjust image</span><span class="to-sub">measurements stay attached</span></div>
+      <p class="to-note">Drag a <b>corner</b> to stretch (<kbd>Shift</kbd> keeps proportions, <kbd>Alt</kbd> from the centre), the <b>knob</b> or just outside a corner to rotate, and <b>inside</b> to move.</p>
       ${sliderRow('aRot', 'Rotation', -45, 45, .1)}
-      ${sliderRow('aZoom', 'Zoom', 50, 200, 1)}
+      ${sliderRow('aZoom', 'Scale', 25, 300, 1)}
+      ${sliderRow('aStretch', 'Stretch', 50, 200, 1, 'Width ÷ height')}
       <div class="to-actions" style="margin-top:4px">
         <button type="button" class="btn ghost sm" id="aLevel">Level eyes</button>
         <button type="button" class="btn ghost sm" id="aFlip">Flip</button>
+        <button type="button" class="btn ghost sm" id="aResetXf">Reset</button>
       </div>
       <div class="to-group">
-        ${sliderRow('aLens', 'Lens', 0, 100, 1, 'Corrects close-range (selfie) perspective distortion')}
+        <div class="to-head" style="margin:2px 0 6px"><span class="to-title" style="font-size:12.5px">Lens distortion</span><span class="to-sub">selfie correction</span></div>
+        ${sliderRow('aLens', 'Strength', 0, 100, 1, 'How close the camera was — higher means closer')}
         <p class="to-note" id="aLensNote"></p>
         <div class="to-actions" style="margin-top:2px">
           <button type="button" class="btn ghost sm" id="aFit">Fit to face</button>
@@ -2037,21 +2292,27 @@ function renderToolOpts() {
       el.addEventListener('input', e => { start(); apply(+e.target.value); syncPts(); syncToolOpts(); });
       el.addEventListener('change', commit);
       el.closest('.srow').querySelector('span').addEventListener('dblclick', () => {
-        start(); apply(id === 'aZoom' ? 100 : 0); syncPts(); syncToolOpts(); commit();
+        start(); apply(id === 'aZoom' || id === 'aStretch' ? 100 : 0); syncPts(); syncToolOpts(); commit();
       });
     };
     bind('aRot', v => { S.adj.rot = v; });
     bind('aZoom', v => { S.adj.zoom = v / 100; });
+    bind('aStretch', v => { S.adj.aspect = v / 100; });
     bind('aLens', v => {
       if (v > 0 && !S.adj.ell) S.adj.ell = guessFace();
       S.adj.lens = v;
     });
     $('#aLevel').addEventListener('click', levelEyes);
     $('#aFlip').addEventListener('click', () => { pushUndo(); S.adj.flip *= -1; syncPts(); syncToolOpts(); syncUI(); });
+    $('#aResetXf').addEventListener('click', () => {
+      pushUndo();
+      Object.assign(S.adj, { rot: 0, zoom: 1, aspect: 1, flip: 1, tx: 0, ty: 0 });
+      syncPts(); syncToolOpts(); syncUI();
+    });
     $('#aFit').addEventListener('click', () => fitFace(true));
     $('#aReset').addEventListener('click', () => {
       pushUndo();
-      S.adj = { rot: 0, zoom: 1, flip: 1, lens: 0, ell: S.adj.ell };
+      S.adj = { ...DEFAULT_ADJ(), ell: S.adj.ell };
       syncPts(); syncToolOpts(); syncUI();
     });
   }
@@ -2073,16 +2334,21 @@ function syncToolOpts() {
     setRange('mStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
     setRange('mHard', Math.round(cfg.mHard * 100), Math.round(cfg.mHard * 100) + '%');
     $('#mReset').disabled = !S.warp.field;
+    $('#mProtect').checked = !!cfg.mProtect;
+    $('#mLimit').checked = !!cfg.mLimit;
   } else if (toolOptsFor === 'adjust') {
     const a = S.adj;
-    setRange('aRot', a.rot, (a.rot > 0 ? '+' : '') + a.rot.toFixed(1) + '°');
-    setRange('aZoom', Math.round(a.zoom * 100), Math.round(a.zoom * 100) + '%');
+    setRange('aRot', clamp(a.rot, -45, 45), (a.rot > 0 ? '+' : '') + a.rot.toFixed(1) + '°');
+    setRange('aZoom', clamp(Math.round(a.zoom * 100), 25, 300), Math.round(a.zoom * 100) + '%');
+    setRange('aStretch', clamp(Math.round(a.aspect * 100), 50, 200), a.aspect === 1 ? 'none' : (a.aspect > 1 ? 'wider ' : 'taller ') + Math.round(Math.abs(a.aspect - 1) * 100) + '%');
     setRange('aLens', a.lens, a.lens > 0 ? a.lens + '%' : 'Off');
     $('#aFlip').classList.toggle('on', a.flip < 0);
+    $('#aResetXf').disabled = affineIdentity();
     const d = a.lens > 0 ? lensDistanceCm(a.lens) : 0;
+    const dTxt = d < 100 ? Math.round(d) + ' cm' : (d / 100).toFixed(1) + ' m';
     setText($('#aLensNote'), a.lens > 0
-      ? `Re-projects the face as if shot from far away, assuming the camera was ≈ ${d < 100 ? Math.round(d) + ' cm' : (d / 100).toFixed(1) + ' m'} from the face. Drag the dashed outline to fit the face.`
-      : 'Close selfies make the nose and face centre look bigger. Raise this to see the face as it looks from a distance.');
+      ? `Re-shoots the face from far away, assuming the camera was ≈ ${dTxt} away: the nose and chin shrink, the face gets less long, and the head outline widens while the cheekbone width stays fixed. Drag the face outline (centre, cheekbone, chin handles) to fit.`
+      : 'Close-up selfies enlarge the nose and chin, narrow the cheekbones and lengthen the face. Raise this to see the face as it looks from a normal distance.');
     $('#aLevel').disabled = !eyePair();
   }
 }
@@ -2122,16 +2388,28 @@ function levelEyes() {
   syncPts(); syncToolOpts(); syncUI();
   toast(`Rotated ${(-ang).toFixed(1)}° to level the eyes`);
 }
-/** Estimate the face outline (U space) from landmarks, falling back to a centred default. */
+/**
+ * Estimate the face frame on the original photo (P space): origin midway between nasion and menton,
+ * ax = half the bizygomatic width, ay = half the nasion–menton height. Uses landmarks when available,
+ * otherwise typical proportions (nasion–menton ≈ 0.88 × bizygomatic width).
+ */
 function guessFace() {
-  const U = p => p && vToU(p);
-  const zl = U(landmark('Zygion · left', 'Face edge · left')), zr = U(landmark('Zygion · right', 'Face edge · right'));
-  const top = U(landmark('Trichion', 'Glabella', 'Nasion')), bot = U(landmark('Menton', 'Gnathion'));
-  const nose = U(landmark('Subnasale', 'Pronasale')) || (() => { const a = U(landmark('Alare · left')), b = U(landmark('Alare · right')); return a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : null; })();
-  let cx = S.iw / 2, cy = S.ih * .47, ax = Math.min(S.iw * .28, S.ih * .22), ay = ax * 1.35;
-  if (zl && zr) { ax = dist(zl, zr) / 2 * 1.04; cx = (zl.x + zr.x) / 2; cy = (zl.y + zr.y) / 2 + ax * .25; ay = ax * 1.35; }
-  if (top && bot) { ay = Math.abs(bot.y - top.y) / 2 * 1.02; cy = (top.y + bot.y) / 2; }
-  if (nose) { cx = nose.x; cy = nose.y - ay * .05; }
+  const P_ = v => v && uToP(vToU(v));
+  const mid = (a, b) => a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : null;
+  const zl = P_(landmark('Zygion · left', 'Face edge · left')), zr = P_(landmark('Zygion · right', 'Face edge · right'));
+  let n = P_(landmark('Nasion'));
+  const g = P_(landmark('Glabella')), tr = P_(landmark('Trichion'));
+  const me = P_(landmark('Menton', 'Gnathion'));
+  if (!n && g) n = g;
+  if (!n && tr && me) n = { x: tr.x + (me.x - tr.x) * .36, y: tr.y + (me.y - tr.y) * .36 };
+  const nose = P_(landmark('Subnasale')) || mid(P_(landmark('Alare · left')), P_(landmark('Alare · right')));
+  let cx = S.iw / 2, cy = S.ih * .5, ax = Math.min(S.iw * .27, S.ih * .2), ay = ax * .88;
+  if (zl && zr) {
+    ax = dist(zl, zr) / 2; ay = ax * .88;
+    cx = (zl.x + zr.x) / 2; cy = (zl.y + zr.y) / 2 + ay * .55;   // zygions sit ≈ 0.6 above the frame centre
+  }
+  if (n && me) { ay = dist(n, me) / 2; cx = (n.x + me.x) / 2; cy = (n.y + me.y) / 2; }
+  else if (nose) { cx = nose.x; cy = nose.y + ay * .13; }
   return { cx, cy, ax: Math.max(10, ax), ay: Math.max(10, ay) };
 }
 async function fitFace(announce) {
@@ -2141,8 +2419,8 @@ async function fitFace(announce) {
     try {
       const [f] = await new window.FaceDetector({ fastMode: false, maxDetectedFaces: 1 }).detect(S.img);
       if (f) {
-        const b = f.boundingBox;
-        ell = { cx: b.x + b.width / 2, cy: b.y + b.height * .55, ax: b.width * .5, ay: b.height * .62 };
+        const b = f.boundingBox;   // roughly brow-to-chin, cheek-to-cheek
+        ell = { cx: b.x + b.width / 2, cy: b.y + b.height * .58, ax: b.width * .46, ay: b.height * .36 };
         how = 'face detection';
       }
     } catch (e) { /* not supported here */ }
@@ -2428,7 +2706,7 @@ function renderHint() {
       const mode = { push: 'Push', bloat: 'Bloat', pinch: 'Pinch', restore: 'Restore' }[cfg.mMode];
       html = `<b>Morph · ${mode}</b><span class="h-desc">${cfg.mMode === 'push' ? 'Drag' : 'Hold'} on the photo · <kbd>[</kbd> <kbd>]</kbd> size · hold <kbd>B</kbd> to compare · right-drag pans</span>`;
     } else if (S.tool === 'adjust') {
-      html = `<b>Adjust image</b><span class="h-desc">Use the panel to straighten, zoom or correct lens distortion${S.adj.lens > 0 ? ' · drag the outline to fit the face' : ''}</span>`;
+      html = `<b>Adjust image</b><span class="h-desc">Corners stretch (<kbd>Shift</kbd> keep ratio) · outside a corner rotates · inside moves${S.adj.lens > 0 ? ' · blue dots fit the face' : ''}</span>`;
     } else if (tgt && tgt.preset) {
       const it = P[tgt.preset], i = d ? d.pts.length : 0, name = it.pts[i] || '';
       const desc = LANDMARKS[name.split(' · ')[0]] || '';
