@@ -15,7 +15,7 @@ const PRESET_IDS = Object.keys(P);
 const KIND_N = { ruler: 2, ratio: 4, angle: 3, tilt: 2, segments: 0, calib: 2 };
 const KIND_LABEL = { ruler: 'Ruler', ratio: 'Ratio', angle: 'Angle', tilt: 'Tilt', segments: 'Proportions', calib: 'Scale' };
 const TOOLS = {
-  move:     { title: 'Select',      help: 'Click a line to select it and drag it to move. Drag points to fine-tune, drag empty space to pan. Shift-click adds to the selection, Ctrl A selects everything visible.' },
+  move:     { title: 'Select',      help: 'Click a line to select it, or drag on empty space to box-select. Drag a selected line to move it and drag points to fine-tune. Right-drag or Space-drag pans; Ctrl A selects everything visible.' },
   ruler:    { title: 'Ruler',       help: 'Click two points to draw a line. With two or more rulers, each one shows its length as a multiple of the reference line (1.00x).' },
   angle:    { title: 'Angle',       help: 'Click three points — the middle one is the vertex.' },
   tilt:     { title: 'Tilt',        help: 'Click two points. The angle is read against the horizontal; positive means the second point sits higher.' },
@@ -28,7 +28,8 @@ const FONT = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto
 const MONO = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 const TAU = Math.PI * 2, DEG = 180 / Math.PI;
 const LOUPE = 132, LOUPE_ZOOM = 3;
-const LEAVE_MS = 560, PAINT_MS = 680;
+const LEAVE_MS = 300, PAINT_MS = 260;
+const HIT_NODE = 12, HIT_LINE = 9;
 
 const I = {
   reset: '<svg class="ic" viewBox="0 0 20 20"><path d="M4 10a6 6 0 1 0 1.8-4.3"/><path d="M4 4v3.5h3.5"/></svg>',
@@ -132,7 +133,6 @@ const imgcv = $('#imgcv'), ictx = imgcv.getContext('2d');
 const ov = $('#overlay'), octx = ov.getContext('2d');
 const bg = $('#bg'), bctx = bg.getContext('2d');
 const loupe = $('#loupe'), lctx = loupe.getContext('2d');
-const glow = $('#glow');
 const panel = $('#panel'), listEl = $('#list'), readoutEl = $('#readout');
 const hintEl = $('#hint'), hintIn = $('.hint-in');
 const toastEl = $('#toast');
@@ -160,12 +160,12 @@ const S = {
   draft: null, draftM: null,
   cursor: null, cursorIn: false,
   hover: null, listHover: null,
-  drag: null, mdrag: null, press: null, pan: null,
+  drag: null, mdrag: null, press: null, pan: null, rpress: null, box: null,
   space: false, shift: false,
   refId: null, calibId: null, calibMM: 11.7,
   seq: 0,
   undo: [], redo: [],
-  leaving: [], motes: [],
+  leaving: [],
   awakeUntil: 0,
 };
 const wake = (ms = 1200) => { S.awakeUntil = Math.max(S.awakeUntil, now() + ms); };
@@ -182,10 +182,10 @@ function applyTheme() {
   const t = cfg.theme === 'system' ? (mqDark.matches ? 'dark' : 'light') : cfg.theme;
   root.dataset.theme = t;
   const meta = $('meta[name="theme-color"]');
-  if (meta) meta.content = t === 'dark' ? '#0A0B0D' : '#F2F2F0';
-  grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '255,255,255';
-  grid.a0 = t === 'dark' ? .075 : .12;
-  grid.a1 = t === 'dark' ? .2 : .22;
+  if (meta) meta.content = t === 'dark' ? '#080A0F' : '#EFF2F7';
+  grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '175,195,255';
+  grid.a0 = t === 'dark' ? .085 : .13;
+  grid.a1 = t === 'dark' ? .32 : .3;
   grid.dirty = true;
 }
 mqDark.addEventListener && mqDark.addEventListener('change', () => { if (cfg.theme === 'system') applyTheme(); });
@@ -501,78 +501,50 @@ function screenSegs(m) {
   }
   return topo(m.kind).filter(([, j]) => j < s.length).map(([i, j, ci]) => [s[i], s[j], colorIdx(m, ci)]);
 }
-/** Removal: the shape retracts toward its centre and fades, shedding a few soft motes. */
+/** Removal: the shape gets eaten away in chunks, quickly, until nothing is left. */
 function startLeave(m) {
   if (!cfg.motion || !S.img || m.alpha < .05) return;
-  const ghost = { ...m, pts: m.pts.map(p => ({ ...p })), disp: { ...m.disp }, painted: 0 };
+  const ghost = { ...m, pts: m.pts.map(p => ({ ...p })), disp: { ...m.disp }, painted: 0, seed: Math.random() * 1000 };
   S.leaving.push({ m: ghost, t0: now(), alpha: m.alpha });
-  if (S.motes.length < 400) {
-    for (const [a, b, c] of screenSegs(m)) {
-      const len = dist(a, b), n = Math.min(10, Math.floor(len / 22));
-      for (let i = 1; i < n; i++) {
-        const f = (i + (Math.random() - .5) * .6) / n;
-        S.motes.push({
-          x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, c,
-          delay: 2 * Math.min(f, 1 - f) * LEAVE_MS * .75,
-          age: 0, life: 900 + Math.random() * 700,
-          r: .8 + Math.random() * .9,
-          vx: (Math.random() - .5) * 12, vy: -(10 + Math.random() * 18),
-        });
-      }
-    }
-  }
-  wake(2400);
+  wake(800);
 }
-function drawMotes(ctx, dt) {
-  const ms = S.motes;
-  let w = 0;
-  for (let i = 0; i < ms.length; i++) {
-    const p = ms[i];
-    p.age += dt * 1000;
-    const k = (p.age - p.delay) / p.life;
-    if (k >= 1) continue;
-    ms[w++] = p;
-    if (k < 0) continue;
-    p.x += p.vx * dt; p.y += p.vy * dt; p.vy *= 1 - dt * .8;
-    const a = (k < .15 ? k / .15 : 1 - (k - .15) / .85) * .6;
-    ctx.globalAlpha = a * .18;
-    ctx.fillStyle = p.c;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 3.2, 0, TAU); ctx.fill();
-    ctx.globalAlpha = a;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
-  }
-  ms.length = w;
-  ctx.globalAlpha = 1;
-}
+/** Deterministic 0..1 noise per chunk, so chunks vanish in a stable random order. */
+const hash = (a, b) => { const s = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return s - Math.floor(s); };
 
 /* -------------------------------------------------------------- drawing -- */
 
 /**
  * Stroke a → b between fractions f0..f1.
- * fx: { halo, gh (paint-gleam head fraction or null), ga (gleam alpha), head }
+ * fx: { halo, pulse (0..1 creation flash), head (draw-in tip), eat: { e, seed } (chunked removal) }
  */
 function seg(ctx, a, b, col, lw, u, f0, f1, fx) {
   if (f1 - f0 <= 0.0005) return;
-  const dx = b.x - a.x, dy = b.y - a.y;
+  const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
   const x0 = a.x + dx * f0, y0 = a.y + dy * f0, x1 = a.x + dx * f1, y1 = a.y + dy * f1;
-  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
+  ctx.beginPath();
+  if (fx && fx.eat) {
+    // split into ~9px chunks; each disappears at its own random moment
+    const n = Math.max(3, Math.min(80, Math.round(L / (9 * u))));
+    let any = false;
+    for (let k = 0; k < n; k++) {
+      if (hash(fx.eat.seed, k) * .92 < fx.eat.e) continue;
+      ctx.moveTo(a.x + dx * k / n, a.y + dy * k / n);
+      ctx.lineTo(a.x + dx * (k + 1) / n, a.y + dy * (k + 1) / n);
+      any = true;
+    }
+    if (!any) return;
+    ctx.save(); ctx.lineCap = 'butt';
+    ctx.strokeStyle = 'rgba(0,0,0,.34)'; ctx.lineWidth = lw + 1.8 * u; ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.stroke();
+    ctx.restore();
+    return;
+  }
+  ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
   if (fx && fx.halo) { ctx.strokeStyle = rgba(col, .2); ctx.lineWidth = lw + 7 * u; ctx.stroke(); }
+  if (fx && fx.pulse > 0) { ctx.strokeStyle = rgba(col, .4 * fx.pulse); ctx.lineWidth = lw + (1 - fx.pulse) * 9 * u + 2 * u; ctx.stroke(); }
   ctx.strokeStyle = 'rgba(0,0,0,.34)'; ctx.lineWidth = lw + 1.8 * u; ctx.stroke();
   ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.stroke();
   if (!fx) return;
-  const L = Math.hypot(dx, dy);
-  if (fx.gh != null && L > 2) {
-    const span = Math.min(.5, 80 * u / L);
-    const h = clamp(fx.gh, f0, f1), tl = clamp(fx.gh - span, f0, f1);
-    if (h - tl > .002) {
-      const hx = a.x + dx * h, hy = a.y + dy * h, tx = a.x + dx * tl, ty = a.y + dy * tl;
-      const gr = ctx.createLinearGradient(tx, ty, hx, hy);
-      gr.addColorStop(0, 'rgba(255,255,255,0)');
-      gr.addColorStop(1, `rgba(255,255,255,${fx.ga.toFixed(3)})`);
-      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx, hy);
-      ctx.strokeStyle = gr; ctx.lineWidth = lw + .5 * u; ctx.stroke();
-    }
-  }
   if (fx.head) {
     const r = 7 * u, gr = ctx.createRadialGradient(x1, y1, 0, x1, y1, r);
     gr.addColorStop(0, rgba(col, .55)); gr.addColorStop(1, rgba(col, 0));
@@ -671,13 +643,14 @@ function drawMeas(ctx, m, o) {
   const u = o.u, d = o.disp || m.disp, t = o.t, fin = !!o.final;
   const lv = o.leave == null ? -1 : o.leave;
   const age = fin ? 1e9 : t - m.shown;
-  const prog = fin || lv >= 0 ? 1 : easeInOut(age / 480);
-  const f0 = lv >= 0 ? lv / 2 : 0, f1 = lv >= 0 ? 1 - lv / 2 : prog;
-  const sweep = lv >= 0 ? 1 - lv : prog;
-  const la = fin ? 1 : lv >= 0 ? clamp(1 - lv * 2, 0, 1) : ease((age - 200) / 320);
-  const pg = fin || lv >= 0 || !m.painted ? -1 : (t - m.painted) / PAINT_MS;
-  const gh = pg >= 0 && pg < 1 ? -0.1 + 1.3 * easeInOut(pg) : null;
-  const fx = { halo: !fin && !!o.picked, gh, ga: .85 * (1 - Math.max(0, pg) * .4), head: !fin && lv < 0 && prog < 1 };
+  const prog = fin || lv >= 0 ? 1 : ease(age / 280);
+  const f0 = 0, f1 = prog;
+  const sweep = lv >= 0 ? 1 - ease(lv * 1.4) : prog;
+  const la = fin ? 1 : lv >= 0 ? clamp(1 - lv * 3, 0, 1) : ease((age - 60) / 200);
+  const pg = fin || lv >= 0 || !m.painted ? 1 : (t - m.painted) / PAINT_MS;
+  const seed = m.seed || 1;
+  const fx = { halo: !fin && !!o.picked, pulse: pg < 1 ? 1 - ease(pg) : 0, head: !fin && lv < 0 && prog < 1, eat: lv >= 0 ? { e: lv, seed } : null };
+  const fxAt = i => fx.eat ? { ...fx, eat: { e: lv, seed: seed + i * 7.13 } } : fx;
   const lw = cfg.width * u * (o.hl && !fin ? 1.25 : 1);
   const blur = fin ? 0 : (d._b || 0);
   ctx.save();
@@ -685,9 +658,9 @@ function drawMeas(ctx, m, o) {
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
   if (m.kind === 'segments') {
-    if (n >= 2) drawSegments(ctx, m, pts, d, o, { f0, f1, prog, lv, la, lw, blur, fx, pg });
+    if (n >= 2) drawSegments(ctx, m, pts, d, o, { f0, f1, prog, lv, la, lw, blur, fx, fxAt });
   } else {
-    for (const [i, j, ci] of topo(m.kind)) if (j < n) seg(ctx, pts[i], pts[j], colorIdx(m, ci), lw, u, f0, f1, fx);
+    topo(m.kind).forEach(([i, j, ci], k) => { if (j < n) seg(ctx, pts[i], pts[j], colorIdx(m, ci), lw, u, f0, f1, fxAt(k)); });
 
     if (m.kind === 'ratio' && n >= 4 && d.v != null) {
       lineLabel(ctx, pts[0], pts[1], d.v.toFixed(2) + 'x', cfg.c1, o, la, blur);
@@ -744,14 +717,13 @@ function drawMeas(ctx, m, o) {
 
   // nodes
   const hov = S.hover, drag = S.drag;
-  const leaveScale = lv >= 0 ? 1 - easeIn(clamp(lv * 1.3, 0, 1)) : null;
   for (let i = 0; i < n; i++) {
     let s = 1;
     if (!fin) {
-      if (leaveScale != null) s = leaveScale;
+      if (lv >= 0) s = clamp((.12 + hash(seed, 100 + i) * .7 - lv) / .05, 0, 1);   // each point blinks out at its own moment
       else {
-        const base = Math.max(m.times && m.times[i] != null ? m.times[i] : -1e9, m.shown + i * 40);
-        s = ease((t - base) / 260);
+        const base = Math.max(m.times && m.times[i] != null ? m.times[i] : -1e9, m.shown + i * 25);
+        s = ease((t - base) / 180);
       }
     }
     const isHov = !fin && lv < 0 && ((hov && hov.id === m.id && hov.node === i) || (drag && drag.id === m.id && drag.i === i));
@@ -767,12 +739,11 @@ function drawSegments(ctx, m, pts, d, o, s) {
   const fade = s.lv >= 0 ? 1 - s.lv : s.prog;
   for (let i = 0; i < pts.length; i++) if (dist(pts[i], q[i]) > 2 * u) dashed(ctx, pts[i], q[i], u, .4 * fade);
   const T = lens.reduce((a, b) => a + b, 0) || 1;
-  const gHead = s.fx.gh;
   let acc = 0;
   for (let i = 0; i < lens.length; i++) {
     const col = i % 2 ? cfg.c2 : cfg.c1, len = lens[i] || 1e-6;
-    const fx = { ...s.fx, gh: gHead == null ? null : (gHead * T - acc) / len };
-    if (s.lv >= 0) seg(ctx, q[i], q[i + 1], col, s.lw, u, s.f0, s.f1, fx);
+    const fx = s.fxAt(i);
+    if (s.lv >= 0) seg(ctx, q[i], q[i + 1], col, s.lw, u, 0, 1, fx);
     else {
       const sp = clamp((s.prog * T - acc) / len, 0, 1);
       seg(ctx, q[i], q[i + 1], col, s.lw, u, 0, sp, { ...fx, head: fx.head && sp > 0 && sp < 1 });
@@ -838,8 +809,7 @@ function drawOverlay(t, dt) {
   for (let i = S.leaving.length - 1; i >= 0; i--) {
     const L = S.leaving[i], e = (t - L.t0) / LEAVE_MS;
     if (e >= 1) { S.leaving.splice(i, 1); continue; }
-    const lv = easeInOut(e);
-    drawMeas(ctx, L.m, { ...base, labels: [], alpha: L.alpha * (1 - lv * lv), leave: lv });
+    drawMeas(ctx, L.m, { ...base, labels: [], alpha: L.alpha, leave: e });
     busy = true;
   }
 
@@ -873,7 +843,15 @@ function drawOverlay(t, dt) {
     busy = true;
   }
 
-  if (S.motes.length) { busy = true; drawMotes(ctx, dt); }
+  if (S.box && S.box.moved) {
+    const b = S.box, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1), w = Math.abs(b.x1 - b.x0), h = Math.abs(b.y1 - b.y0);
+    const blue = getComputedStyle(root).getPropertyValue('--blue').trim() || '#7EA6FF';
+    ctx.save();
+    roundRect(ctx, x + .5, y + .5, w, h, 3);
+    ctx.fillStyle = rgba(blue, .08); ctx.fill();
+    ctx.strokeStyle = rgba(blue, .7); ctx.lineWidth = 1; ctx.stroke();
+    ctx.restore();
+  }
 
   const overNode = S.hover && S.hover.node >= 0 && !S.draft;
   const placing = S.cursorIn && S.cursor && canPlace() && !S.drag && !S.pan && !(S.press && S.press.moved) && !overNode;
@@ -993,16 +971,6 @@ function drawGrid(dt) {
   }
 }
 
-const gl = { x: 0, y: 0, tx: 0, ty: 0, on: false };
-function stepGlow(dt) {
-  if (!gl.on) return;
-  const k = 1 - Math.exp(-dt * 10);
-  const dx = gl.tx - gl.x, dy = gl.ty - gl.y;
-  if (Math.abs(dx) < .2 && Math.abs(dy) < .2) return;
-  gl.x += dx * k; gl.y += dy * k;
-  glow.style.transform = `translate3d(${gl.x.toFixed(1)}px,${gl.y.toFixed(1)}px,0)`;
-}
-
 /* ---------------------------------------------------------------- view -- */
 
 function stepView(dt) {
@@ -1016,7 +984,7 @@ function stepView(dt) {
 function setViewNow(v) { S.view = { ...v }; S.viewT = { ...v }; wake(); }
 function safeRect() {
   const mob = W <= 860;
-  const l = mob ? 12 : 76, r = mob ? 12 : 352, t = mob ? 120 : 80, b = mob ? 60 : 68;
+  const l = mob ? 12 : 92, r = mob ? 12 : 356, t = mob ? 72 : 24, b = mob ? 48 : 48;
   return { x: l, y: t, w: Math.max(120, W - l - r), h: Math.max(120, H - t - b) };
 }
 function fitView(intro) {
@@ -1044,20 +1012,46 @@ const zoomCenter = f => { const r = safeRect(); zoomAt(r.x + r.w / 2, r.y + r.h 
 
 function hitTest(sx, sy) {
   const arr = [...S.meas.values()].filter(m => isVisible(m) && m.alpha > .4);
-  let best = null, bd = 10;
+  let best = null, bd = HIT_NODE;
   for (const m of arr) m.pts.forEach((pt, i) => {
     const p = toS(pt), d = Math.hypot(p.x - sx, p.y - sy);
     if (d <= bd) { bd = d; best = { id: m.id, node: i }; }
   });
   if (best) return best;
   for (let j = arr.length - 1; j >= 0; j--) {
-    for (const [a, b] of screenSegs(arr[j])) if (segDist(sx, sy, a, b) <= 6) return { id: arr[j].id, node: -1 };
+    for (const [a, b] of screenSegs(arr[j])) if (segDist(sx, sy, a, b) <= HIT_LINE) return { id: arr[j].id, node: -1 };
   }
   return null;
 }
+/** Measurements touched by the selection box (any point inside, or any line crossing it). */
+function boxHits(b) {
+  const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
+  const inside = p => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  const out = [];
+  for (const m of S.meas.values()) {
+    if (!isVisible(m) || m.alpha < .4) continue;
+    let hit = m.pts.some(p => inside(toS(p)));
+    if (!hit) {
+      for (const [a, c] of screenSegs(m)) {
+        const n = Math.max(2, Math.ceil(dist(a, c) / 4));
+        for (let i = 0; i <= n && !hit; i++) hit = inside({ x: a.x + (c.x - a.x) * i / n, y: a.y + (c.y - a.y) * i / n });
+        if (hit) break;
+      }
+    }
+    if (hit) out.push(m.id);
+  }
+  return out;
+}
+/** Cheap refresh of selection highlights while box-selecting. */
+function syncPicks() {
+  for (const [id, el] of itemEls) el.classList.toggle('picked', S.picked.has(id));
+  renderHint();
+  wake();
+}
 function refreshCursor() {
   let c;
-  if (S.drag || S.pan || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved)) c = 'grabbing';
+  if (S.drag || S.pan || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
+  else if (S.box) c = 'crosshair';
   else if (S.space) c = 'grab';
   else if (S.hover && S.hover.node >= 0) c = 'grab';
   else if (S.hover && selectMode()) c = 'move';
@@ -1086,7 +1080,7 @@ ov.addEventListener('pointerdown', e => {
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   wake();
   if (pointers.size === 2) {
-    S.press = null; S.pan = null; S.mdrag = null;
+    S.press = null; S.pan = null; S.mdrag = null; S.box = null; S.rpress = null;
     if (S.drag) endDrag();
     const [a, b] = [...pointers.values()];
     pinch = { d: dist(a, b) || 1, c: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, view: { ...S.view } };
@@ -1100,7 +1094,11 @@ ov.addEventListener('pointerdown', e => {
     refreshCursor();
     return;
   }
-  if (e.button === 2) { onRightClick(sx, sy); return; }
+  if (e.button === 2) {
+    // right-click deletes; right-drag pans
+    S.rpress = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };
+    return;
+  }
   if (e.button !== 0) return;
   const sel = selectMode();
   const hit = S.draft ? null : hitTest(sx, sy);
@@ -1116,6 +1114,11 @@ ov.addEventListener('pointerdown', e => {
     pickOnPress(hit.id, e.shiftKey);
     S.mdrag = { sx, sy, last: toI(sx, sy), snap: snapshot(), moved: false, toggle: e.shiftKey && was ? hit.id : null };
     syncUI();
+    return;
+  }
+  if (sel) {
+    // select mode: dragging on empty space draws a selection box
+    S.box = { x0: sx, y0: sy, x1: sx, y1: sy, moved: false, add: e.shiftKey, base: new Set(e.shiftKey ? S.picked : []) };
     return;
   }
   S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };
@@ -1158,6 +1161,23 @@ ov.addEventListener('pointermove', e => {
     return;
   }
   if (S.pan) { setViewNow({ k: S.view.k, x: S.pan.vx + sx - S.pan.x, y: S.pan.vy + sy - S.pan.y }); return; }
+  if (S.rpress) {
+    const r = S.rpress;
+    if (!r.moved && Math.hypot(sx - r.x, sy - r.y) > 4) { r.moved = true; refreshCursor(); }
+    if (r.moved) setViewNow({ k: S.view.k, x: r.vx + sx - r.x, y: r.vy + sy - r.y });
+    return;
+  }
+  if (S.box) {
+    const b = S.box;
+    b.x1 = sx; b.y1 = sy;
+    if (!b.moved && Math.hypot(sx - b.x0, sy - b.y0) > 4) b.moved = true;
+    if (b.moved) {
+      const hits = boxHits(b);
+      S.picked = new Set([...b.base, ...hits]);
+      syncPicks();
+    }
+    return;
+  }
   if (S.press) {
     if (!S.press.moved && Math.hypot(sx - S.press.x, sy - S.press.y) > 4) { S.press.moved = true; refreshCursor(); }
     if (S.press.moved) { setViewNow({ k: S.view.k, x: S.press.vx + sx - S.press.x, y: S.press.vy + sy - S.press.y }); return; }
@@ -1182,6 +1202,17 @@ function pointerUp(e) {
     syncUI();
   }
   else if (S.pan) S.pan = null;
+  else if (S.rpress) {
+    const r = S.rpress;
+    S.rpress = null;
+    if (!r.moved) onRightClick(e.clientX, e.clientY);
+  }
+  else if (S.box) {
+    const b = S.box;
+    S.box = null;
+    if (!b.moved && !b.add && S.picked.size) S.picked.clear();   // plain click on empty space clears
+    syncUI();
+  }
   else if (S.press) {
     const p = S.press;
     S.press = null;
@@ -1191,7 +1222,7 @@ function pointerUp(e) {
 }
 ov.addEventListener('pointerup', pointerUp);
 ov.addEventListener('pointercancel', pointerUp);
-ov.addEventListener('pointerleave', () => { if (!S.drag && !S.pan && !S.mdrag) { S.cursorIn = false; S.hover = null; wake(); } });
+ov.addEventListener('pointerleave', () => { if (!S.drag && !S.pan && !S.mdrag && !S.box && !S.rpress) { S.cursorIn = false; S.hover = null; wake(); } });
 ov.addEventListener('contextmenu', e => e.preventDefault());
 ov.addEventListener('wheel', e => {
   e.preventDefault();
@@ -1253,12 +1284,8 @@ addEventListener('pointermove', e => {
   grid.tx = e.clientX; grid.ty = e.clientY;
   if (grid.inf < .01) { grid.x = grid.tx; grid.y = grid.ty; }
   grid.infT = 1;
-  gl.tx = e.clientX; gl.ty = e.clientY;
-  if (!gl.on) { gl.on = true; gl.x = gl.tx; gl.y = gl.ty; glow.style.transform = `translate3d(${gl.x}px,${gl.y}px,0)`; glow.classList.add('on'); }
 }, { passive: true });
-document.addEventListener('pointerout', e => {
-  if (!e.relatedTarget) { grid.infT = 0; gl.on = false; glow.classList.remove('on'); }
-});
+document.addEventListener('pointerout', e => { if (!e.relatedTarget) grid.infT = 0; });
 
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
@@ -1328,7 +1355,7 @@ function loadFile(file) {
 function setImageState(rec) {
   Object.assign(S, {
     sel: [], active: null, showAll: false, draft: null, draftM: null, hover: null,
-    drag: null, mdrag: null, press: null, leaving: [], motes: [],
+    drag: null, mdrag: null, press: null, rpress: null, box: null, leaving: [],
   });
   S.picked = new Set();
   customSig = null;
@@ -1787,7 +1814,7 @@ function renderHint() {
     } else if (S.picked.size) {
       html = `<b>${S.picked.size} selected</b><span class="h-desc">Drag to move · <kbd>Del</kbd> delete · <kbd>Esc</kbd> clear</span>`;
     } else {
-      html = `<b>Select</b><span class="h-desc">Click a line to select · drag to move · <kbd>Ctrl</kbd> <kbd>A</kbd> all</span>`;
+      html = `<b>Select</b><span class="h-desc">Click or drag a box to select · right-drag to pan · <kbd>Ctrl</kbd> <kbd>A</kbd> all</span>`;
     }
   }
   hintEl.classList.toggle('show', !!html);
@@ -1934,9 +1961,8 @@ function frame(t) {
   stepView(dt);
   drawImageLayer(dt);
   drawGrid(dt);
-  stepGlow(dt);
   if (S.img && t < S.awakeUntil) { drawOverlay(t, dt); updateValues(); }
-  else if (!S.img && (S.leaving.length || S.motes.length)) { S.leaving = []; S.motes = []; }
+  else if (!S.img && S.leaving.length) S.leaving = [];
   requestAnimationFrame(frame);
 }
 
