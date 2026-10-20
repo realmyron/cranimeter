@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '10';   // must match <meta name="cranimeter-build"> in index.html and warp.js
+const BUILD = '11';   // must match <meta name="cranimeter-build"> in index.html, warp.js and facemap.js
 const { GROUPS, LANDMARKS } = window.CRANI;
 const P = {};
 GROUPS.forEach(g => g.items.forEach(it => { it.group = g.name; P[it.id] = it; }));
@@ -22,7 +22,7 @@ const TOOLS = {
   tilt:     { title: 'Tilt',        help: 'Click two points. The angle is read against the horizontal; positive means the second point sits higher.' },
   segments: { title: 'Proportions', help: 'Click points along a feature, then press Enter, double-click or right-click to finish. Each segment is shown relative to the first.' },
   calib:    { title: 'Scale',       help: 'Draw across something of known size — the iris is about 11.7 mm — so rulers can also show millimetres.' },
-  morph:    { title: 'Morph',       help: 'Drag on the photo to reshape it. Landmarks stay attached to the face, so every ratio updates live as you morph.' },
+  morph:    { title: 'Morph',       help: 'Map the face once, then reshape it by layer — face, eyes, nose, lips and the head behind. Landmarks stay attached, so every ratio updates live.' },
   adjust:   { title: 'Adjust image', help: 'Straighten, zoom and correct close-range lens distortion. Measurements stay attached to the face.' },
 };
 const TOOL_KEYS = { v: 'move', r: 'ruler', a: 'angle', t: 'tilt', s: 'segments', c: 'calib', m: 'morph', e: 'adjust' };
@@ -120,7 +120,7 @@ const DEFAULTS = {
   width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
   mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
-  mLevels: false, mLevelStrict: .5, mShowLevels: true,
+  mSub: 'map', mSmooth: 2.5, mShowLayers: true,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -142,9 +142,9 @@ glcv.id = 'glcv'; glcv.setAttribute('aria-hidden', 'true');
 imgcv.after(glcv);
 let GLR = null, GL_REASON = null;
 const pageBuild = (document.querySelector('meta[name="cranimeter-build"]') || {}).content;
-const STALE = pageBuild !== BUILD || (window.CraniWarp && window.CraniWarp.build !== BUILD);
+const STALE = pageBuild !== BUILD || (window.CraniWarp && window.CraniWarp.build !== BUILD) || (window.CraniMap && window.CraniMap.build !== BUILD);
 if (STALE) GL_REASON = 'stale';
-else if (!window.CraniWarp) GL_REASON = 'missing';
+else if (!window.CraniWarp || !window.CraniMap) GL_REASON = 'missing';
 else {
   try { GLR = window.CraniWarp.createRenderer(glcv); } catch (e) { console.error(e); }
   if (!GLR) GL_REASON = 'webgl';
@@ -207,6 +207,8 @@ const S = {
   // morph displacement field over the photo (P space); field === null means no morph
   warp: { field: null, gw: 1, gh: 1, cs: 1 },
   scratch: null, stroke: null, hdrag: null, compare: false, adjSnap: null,
+  // face map (Morph → Map face / Reshape)
+  map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBrush: null, mapBox: null, qfit: null,
   glDirty: true, fieldDirty: false,
 };
 const wake = (ms = 1200) => { S.awakeUntil = Math.max(S.awakeUntil, now() + ms); };
@@ -277,25 +279,8 @@ function pToU(p) {
   const e = S.adj.ell, g = lensG(p);
   return { x: e.cx + (p.x - e.cx) / g, y: e.cy + (p.y - e.cy) / g };
 }
-const isIdentity = () => affineIdentity() && !lensD() && !S.warp.field;
+const isIdentity = () => affineIdentity() && !lensD() && !S.warp.field && !mapActive();
 
-/* ---- morph "levels" — keep in sync with levelAt() in warp.js ----
-   The head is treated as layers so a brush mostly moves what's on the layer it starts on:
-   0 sides / hair behind the head / background · 1 front surface (face, forehead, hairline, crown)
-   2.2 eyes · 3 nose · 3.8 lips. Feature regions snap to measured landmarks when available. */
-const softIn = r => 1 - smooth01(.92, 1.08, r);
-function levelAt(s, L) {
-  const e = S.adj.ell;
-  if (!e || !L) return 1;
-  const qx = (s.x - e.cx) / e.ax, qy = (s.y - e.cy) / e.ay;
-  const ox = Math.abs(qx / 1.12), oy = Math.abs((qy + .1) / 1.18);
-  const oval = softIn(Math.pow(ox ** 4 + oy ** 4, .25));   // squarish face: full width brow → jaw
-  const cap = softIn(Math.hypot(qx / 1.3, (qy + .95) / 2)) * (1 - smooth01(-1, -.7, qy));
-  const front = Math.max(oval, cap);
-  const r = (v) => softIn(Math.hypot((s.x - v.cx) / v.rx, (s.y - v.cy) / v.ry));
-  const eye = Math.max(r(L.eyeL), r(L.eyeR)), nose = r(L.nose), mouth = r(L.mouth);
-  return front * (1 + Math.max(eye * 1.2, nose * 2, mouth * 2.8));
-}
 /** Source-space position of a measured landmark (by exact preset label). */
 function landmarkS(...names) {
   for (const n of names) for (const m of S.meas.values()) {
@@ -304,30 +289,6 @@ function landmarkS(...names) {
     if (i >= 0) return m.src[i];
   }
   return null;
-}
-/** Eye / nose / mouth regions in source px — from landmarks when measured, else typical face proportions. */
-function levelRegions() {
-  const e = S.adj.ell;
-  if (!e) return null;
-  const F = (X, Y, rx, ry) => ({ cx: e.cx + X * e.ax, cy: e.cy + Y * e.ay, rx: rx * e.ax, ry: ry * e.ay });
-  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-  const eye = side => {
-    const en = landmarkS('Endocanthion · ' + side), ex = landmarkS('Exocanthion · ' + side), pu = landmarkS('Pupil · ' + side);
-    const def = F(side === 'left' ? -.47 : .47, -.9, .22, .15);
-    if (en && ex) { const c = mid(en, ex), w = dist(en, ex); return { cx: c.x, cy: c.y, rx: Math.max(6, w * .66), ry: Math.max(5, w * .36) }; }
-    if (pu) return { ...def, cx: pu.x, cy: pu.y };
-    return def;
-  };
-  let nose = F(0, -.5, .2, .48);
-  const alL = landmarkS('Alare · left'), alR = landmarkS('Alare · right'), sn = landmarkS('Subnasale'), n = landmarkS('Nasion');
-  if (alL && alR) { const c = mid(alL, alR); nose = { ...nose, cx: c.x, rx: Math.max(6, dist(alL, alR) * .62) }; }
-  if (sn && n) { const top = n.y + (sn.y - n.y) * .12; nose = { ...nose, cx: alL && alR ? nose.cx : (sn.x + n.x) / 2, cy: (top + sn.y) / 2 + (sn.y - top) * .04, ry: Math.max(6, (sn.y - top) / 2 * 1.12) }; }
-  let mouth = F(0, .3, .38, .16);
-  const chL = landmarkS('Cheilion · left'), chR = landmarkS('Cheilion · right'), sto = landmarkS('Stomion');
-  const ls = landmarkS('Labrale superius'), li = landmarkS('Labrale inferius');
-  if (chL && chR) { const c = mid(chL, chR), w = dist(chL, chR); mouth = { cx: c.x, cy: sto ? sto.y : c.y, rx: Math.max(6, w * .6), ry: Math.max(5, w * .22) }; }
-  if (ls && li) mouth = { ...mouth, cy: (ls.y + li.y) / 2, ry: Math.max(mouth.ry, Math.abs(li.y - ls.y) / 2 * 1.25) };
-  return { eyeL: eye('left'), eyeR: eye('right'), nose, mouth };
 }
 function fieldAt(f, x, y) {
   const W_ = S.warp, cs = W_.cs, gw = W_.gw, gh = W_.gh;
@@ -357,8 +318,253 @@ function sToP(s) {
   return p;
 }
 const vToP = v => uToP(vToU(v));
-const fwdMap = v => isIdentity() ? { x: v.x, y: v.y } : pToS(vToP(v));
-const invMap = s => isIdentity() ? { x: s.x, y: s.y } : uToV(pToU(sToP(s)));
+
+/* ------------------------------------------------- face map (Morph) --
+   Pipeline after the free brush:  P′ ──(two thin-plate-spline layers)──▶ S.
+   S.map.p = where each map point sits on the original photo (S),
+   S.map.q = where it is now (P′). q = p everywhere means no reshape.
+   The face layer is composited over the head / background layer. */
+const FM = window.CraniMap || null;
+const NMAP = FM ? FM.POINTS.length : 0;
+const OUTLINE = FM ? FM.CONTOURS.find(c => c.id === 'outline').ids.map(id => FM.INDEX[id]) : [];
+const EARS = FM ? ['earLb', 'earLt', 'earRb', 'earRt'].map(id => FM.INDEX[id]) : [];
+/** Spacing of the dense contour controls (≈ 2% of the photo — the spline is smooth in between). */
+const mapGap = () => .02 * Math.max(S.iw, S.ih);
+/** Smoothing radius² for the moving-least-squares template fit. */
+const mlsEps = () => Math.pow(.004 * Math.max(S.iw, S.ih), 2);
+/** While mapping (Map face sub-mode) the photo is shown un-reshaped so you align to the original. */
+const mapping = () => S.tool === 'morph' && cfg.mSub === 'map';
+const mapActive = () => !!(S.map && S.map.moved && !mapping());
+function recalcMoved() {
+  const m = S.map;
+  let mv = false;
+  for (let i = 0; i < m.p.length; i++) if (Math.abs(m.p[i] - m.q[i]) > .01) { mv = true; break; }
+  m.moved = mv; m.ver++;
+}
+function borderAnchors() {
+  const w = S.iw, h = S.ih, out = [];
+  for (const fx of [0, .25, .5, .75, 1]) out.push({ x: fx * w, y: 0 }, { x: fx * w, y: h });
+  out.push({ x: 0, y: h / 3 }, { x: 0, y: 2 * h / 3 }, { x: w, y: h / 3 }, { x: w, y: 2 * h / 3 });
+  return out.slice(0, 14);
+}
+/** Outward unit normal of the face outline at each outline dot (on the original photo). */
+function outlineNormals() {
+  const m = S.map, n = OUTLINE.length;
+  let cx = 0, cy = 0;
+  OUTLINE.forEach(i => { cx += m.p[2 * i] / n; cy += m.p[2 * i + 1] / n; });
+  return OUTLINE.map((i, k) => {
+    const a = OUTLINE[(k + n - 1) % n], b = OUTLINE[(k + 1) % n];
+    let nx = m.p[2 * b + 1] - m.p[2 * a + 1], ny = -(m.p[2 * b] - m.p[2 * a]);
+    const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;
+    if (nx * (m.p[2 * i] - cx) + ny * (m.p[2 * i + 1] - cy) < 0) { nx = -nx; ny = -ny; }
+    return [nx, ny];
+  });
+}
+/**
+ * Control arrays for the two layers (cached per map version). Every contour is densified along
+ * its spline so it moves as one smooth curve. The back layer only follows the outline where the
+ * face shrinks (to fill the gap); where the face grows it stays put and the face covers it.
+ */
+function mapCtrl() {
+  const m = S.map;
+  if (m.ctrl && m.ctrl.ver === m.ver) return m.ctrl;
+  const F = [], B = [], qb = m.q.slice();
+  outlineNormals().forEach(([nx, ny], k) => {
+    const i = OUTLINE[k];
+    const dn = Math.min(0, (m.q[2 * i] - m.p[2 * i]) * nx + (m.q[2 * i + 1] - m.p[2 * i + 1]) * ny);
+    qb[2 * i] = m.p[2 * i] + nx * dn; qb[2 * i + 1] = m.p[2 * i + 1] + ny * dn;
+  });
+  // The ears shift in part of the way with a narrowed face, so the revealed gap is filled
+  // from the whole side of the head instead of stretching the ear.
+  const sig = .35 * mapScale();
+  for (const i of EARS) {
+    let sw = 0, fx = 0, fy = 0;
+    for (const o of OUTLINE) {
+      const d2 = (m.p[2 * o] - m.p[2 * i]) ** 2 + (m.p[2 * o + 1] - m.p[2 * i + 1]) ** 2, w = Math.exp(-d2 / (2 * sig * sig));
+      sw += w; fx += w * (qb[2 * o] - m.p[2 * o]); fy += w * (qb[2 * o + 1] - m.p[2 * o + 1]);
+    }
+    if (sw > 1e-6) { qb[2 * i] += .6 * fx / sw; qb[2 * i + 1] += .6 * fy / sw; }
+  }
+  FM.POINTS.forEach((pt, i) => {
+    if (pt.field !== 'back') F.push(m.q[2 * i], m.q[2 * i + 1], m.p[2 * i], m.p[2 * i + 1]);
+    if (pt.field !== 'face') B.push(qb[2 * i], qb[2 * i + 1], m.p[2 * i], m.p[2 * i + 1]);
+  });
+  // Dense samples along each contour (same spline parameters before and after), so every
+  // contour moves as one smooth curve. The back layer needs less detail than the face.
+  const densify = (arr, q, field, gap) => {
+    for (const c of FM.CONTOURS) {
+      const idx = c.ids.map(id => FM.INDEX[id]), f = FM.POINTS[idx[0]].field;
+      if (f !== 'both' && f !== field) continue;
+      const P_ = idx.map(i => ({ x: m.p[2 * i], y: m.p[2 * i + 1] })), N_ = P_.length;
+      const steps = s => { const a = P_[s], b = P_[(s + 1) % N_]; return Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / gap)); };
+      const knots = new Set();
+      for (let s = 0, k = 0; s < (c.closed ? N_ : N_ - 1); s++) { knots.add(k); k += steps(s); if (!c.closed && s === N_ - 2) knots.add(k); }
+      const sp = FM.spline(P_, c.closed, steps), sq = FM.spline(idx.map(i => ({ x: q[2 * i], y: q[2 * i + 1] })), c.closed, steps);
+      sp.forEach((s, k) => { if (!knots.has(k)) arr.push(sq[k].x, sq[k].y, s.x, s.y); });
+    }
+  };
+  const gap = mapGap();
+  densify(F, m.q, 'face', gap);
+  densify(B, qb, 'back', gap * 1.8);
+  // the photo border stays put (keeps far-away areas still in both layers)
+  for (const b of borderAnchors()) { B.push(b.x, b.y, b.x, b.y); F.push(b.x, b.y, b.x, b.y); }
+  const s = Math.max(S.iw, S.ih);
+  m.ctrl = { ver: m.ver, front: FM.tpsFit(F, F.length / 4, s), back: FM.tpsFit(B, B.length / 4, s) };
+  return m.ctrl;
+}
+/** Bring the GPU's face-map grid up to date (computed on the GPU, or on the CPU as a fallback). */
+let glMapKey = '';
+function syncMapGrid() {
+  const c = mapCtrl(), key = `${S.imgSeq}|${S.map.ver}`;
+  if (key === glMapKey) return;
+  glMapKey = key;
+  const big = Math.max(S.iw, S.ih);
+  const cell = big / (GLR.gpuMap ? 320 : 96), gw = Math.ceil(S.iw / cell) + 1, gh = Math.ceil(S.ih / cell) + 1;
+  if (GLR.gpuMap) { GLR.computeMap(c.front, c.back, gw, gh, cell); return; }
+  const g = new Float32Array(gw * gh * 4);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    const x = i * cell, y = j * cell, k = (j * gw + i) * 4;
+    const f = FM.tpsEval(c.front, x, y), b = FM.tpsEval(c.back, x, y);
+    g[k] = f[0]; g[k + 1] = f[1]; g[k + 2] = b[0]; g[k + 3] = b[1];
+  }
+  GLR.setMapGrid(g, gw, gh, cell);
+}
+function maskAt(x, y) {
+  const k = S.map && S.map.mask;
+  if (!k) return 0;
+  const i = clamp(Math.round(x * k.sc), 0, k.w - 1), j = clamp(Math.round(y * k.sc), 0, k.h - 1);
+  return k.data[(j * k.w + i) * 4] / 255;
+}
+/** P′ → S: which source pixel ends up here (face layer wins where its mask says so). */
+function mapSrc(x) {
+  if (!mapActive()) return { x: x.x, y: x.y };
+  const c = mapCtrl();
+  const [fx, fy] = FM.tpsEval(c.front, x.x, x.y);
+  if (maskAt(fx, fy) >= .5) return { x: fx, y: fy };
+  const [bx, by] = FM.tpsEval(c.back, x.x, x.y);
+  return { x: bx, y: by };
+}
+/** S → P′: where a source point is shown now (used to keep measurements on the face). */
+function mapInv(s) {
+  if (!mapActive()) return { x: s.x, y: s.y };
+  const c = mapCtrl(), T = maskAt(s.x, s.y) >= .5 ? c.front : c.back;
+  // solve f(x) = s: start from the reflected guess, then fixed-point steps
+  let [fx, fy] = FM.tpsEval(T, s.x, s.y), x = 2 * s.x - fx, y = 2 * s.y - fy;
+  for (let it = 0; it < 12; it++) {
+    [fx, fy] = FM.tpsEval(T, x, y);
+    const ex = s.x - fx, ey = s.y - fy;
+    x += ex; y += ey;
+    if (ex * ex + ey * ey < 1e-4) break;
+  }
+  return { x, y };
+}
+/** Rasterise the face layer (inside the outline) from the map's original positions. */
+function buildMask() {
+  const m = S.map, sc = Math.min(1, 1024 / Math.max(S.iw, S.ih));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(S.iw * sc)); c.height = Math.max(1, Math.round(S.ih * sc));
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+  const pts = FM.spline(OUTLINE.map(i => ({ x: m.p[2 * i] * sc, y: m.p[2 * i + 1] * sc })), true, 10);
+  g.filter = 'blur(1.5px)';
+  g.fillStyle = '#fff';
+  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.closePath(); g.fill();
+  g.filter = 'none';
+  m.mask = { canvas: c, data: g.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, sc };
+  m.maskVer = (m.maskVer || 0) + 1;
+}
+/** Similarity MLS (allows scaling) — used to fit the template onto the photo. */
+function simFit(pairs, x, y) {
+  let sw = 0, qx = 0, qy = 0, px = 0, py = 0;
+  const e = mlsEps();
+  for (const c of pairs) { const dx = c.a.x - x, dy = c.a.y - y, w = 1 / (dx * dx + dy * dy + e); sw += w; qx += w * c.a.x; qy += w * c.a.y; px += w * c.b.x; py += w * c.b.y; }
+  qx /= sw; qy /= sw; px /= sw; py /= sw;
+  if (pairs.length < 2) return { x: x + px - qx, y: y + py - qy };
+  let mr = 0, mi = 0, mu = 0;
+  for (const c of pairs) {
+    const dx = c.a.x - x, dy = c.a.y - y, w = 1 / (dx * dx + dy * dy + e);
+    const hx = c.a.x - qx, hy = c.a.y - qy, gx = c.b.x - px, gy = c.b.y - py;
+    mr += w * (hx * gx + hy * gy); mi += w * (hx * gy - hy * gx); mu += w * (hx * hx + hy * hy);
+  }
+  const cr = mr / (mu || 1), ci = mi / (mu || 1), vx = x - qx, vy = y - qy;
+  return { x: px + cr * vx - ci * vy, y: py + cr * vy + ci * vx };
+}
+/**
+ * Fit the face map to the photo: template in the face frame, then pulled onto every measured
+ * landmark it shares a name with (and any quick-fit clicks), so matched points land exactly.
+ */
+function fitMap(extraPairs = []) {
+  const f = guessFace();
+  const T = FM.POINTS.map(pt => ({ x: f.cx + pt.x * f.ax, y: f.cy + pt.y * f.ay }));
+  const pairs = extraPairs.map(c => ({ i: c.i, a: T[c.i], b: c.b }));
+  FM.POINTS.forEach((pt, i) => {
+    if (!pt.landmark || pairs.some(c => c.i === i)) return;
+    const s = landmarkS(pt.landmark) || (pt.landmark === 'Menton' ? landmarkS('Gnathion') : null);
+    if (s) pairs.push({ i, a: T[i], b: s });
+  });
+  const pos = pairs.length ? T.map(t => simFit(pairs, t.x, t.y)) : T;
+  for (const c of pairs) if (c.i != null) pos[c.i] = { x: c.b.x, y: c.b.y };
+  const p = new Float32Array(NMAP * 2);
+  pos.forEach((v, i) => { p[2 * i] = v.x; p[2 * i + 1] = v.y; });
+  S.map = { p, q: p.slice(), base: p.slice(), moved: false, ver: 1, snapped: pairs.length };
+  buildMask();
+  return pairs.length;
+}
+/**
+ * Slide each outline dot along its normal onto the nearest strong edge (skin → hair or background).
+ * A dot that disagrees with both neighbours takes their median instead. Returns how many dots moved.
+ */
+function snapOutline() {
+  const m = S.map, sc = Math.min(1, 640 / Math.max(S.iw, S.ih));
+  const w = Math.max(2, Math.round(S.iw * sc)), h = Math.max(2, Math.round(S.ih * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.filter = 'blur(1px)'; g.drawImage(S.img, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data, L = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) L[i] = .299 * d[4 * i] + .587 * d[4 * i + 1] + .114 * d[4 * i + 2];
+  const lum = (x, y) => {
+    const fx = clamp(x * sc, 0, w - 1.001), fy = clamp(y * sc, 0, h - 1.001), i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j, k = j * w + i;
+    return (L[k] * (1 - tx) + L[k + 1] * tx) * (1 - ty) + (L[k + w] * (1 - tx) + L[k + w + 1] * tx) * ty;
+  };
+  const R = .15 * mapScale(), step = 1 / sc, e = 1.5 / sc, moved = new Set();
+  // two passes, so a dot that starts a little far from the edge can walk onto it
+  for (let pass = 0; pass < 2; pass++) {
+    const N = outlineNormals();
+    const offs = N.map(([nx, ny], k) => {
+      const i = OUTLINE[k], px = m.p[2 * i], py = m.p[2 * i + 1];
+      let best = 0, bestT = 0;
+      for (let t = -R; t <= R; t += step) {
+        const x = px + nx * t, y = py + ny * t;
+        const gd = Math.abs(lum(x + nx * e, y + ny * e) - lum(x - nx * e, y - ny * e));
+        const score = gd * (1 - .4 * (t / R) * (t / R));   // prefer edges close to where the dot is
+        if (score > best) { best = score; bestT = t; }
+      }
+      return best > 10 ? bestT : 0;
+    });
+    // an offset far from both neighbours' is probably a wrong catch (a shadow, a strand): use the median
+    const n = offs.length, tol = .12 * mapScale();
+    const fixed = offs.map((v, k) => {
+      const a = offs[(k + n - 1) % n], b = offs[(k + 1) % n];
+      return Math.abs(v - a) > tol && Math.abs(v - b) > tol ? [a, v, b].sort((x, y) => x - y)[1] : v;
+    });
+    N.forEach(([nx, ny], k) => {
+      const i = OUTLINE[k], t = fixed[k];
+      if (Math.abs(t) < .5) return;
+      for (const arr of [m.p, m.q, m.base]) { arr[2 * i] += nx * t; arr[2 * i + 1] += ny * t; }
+      moved.add(i);
+    });
+  }
+  if (moved.size) { buildMask(); recalcMoved(); }
+  return moved.size;
+}
+const mapPt = (i, which = 'q') => ({ x: S.map[which][2 * i], y: S.map[which][2 * i + 1] });
+/** Map space (P′, or S while mapping) → screen, and back. */
+const mapToScreen = x => toS(uToV(pToU(sToP(x))));
+const screenToMap = (sx, sy) => pToS(vToP(toI(sx, sy)));
+const mapPending = () => { const m = S.map; if (!m) return false; for (let i = 0; i < m.q.length; i++) if (Math.abs(m.q[i] - m.base[i]) > .01) return true; return false; };
+
+const fwdMap = v => isIdentity() ? { x: v.x, y: v.y } : mapSrc(pToS(vToP(v)));
+const invMap = s => isIdentity() ? { x: s.x, y: s.y } : uToV(pToU(sToP(mapInv(s))));
 
 /** Record where each point sits on the source photo. */
 function anchor(m) { m.src = m.pts.map(fwdMap); }
@@ -376,7 +582,7 @@ function initWarp() {
   S.scratch = null;
 }
 /** True when there are morph changes since the last Confirm. */
-const morphPending = () => (S.warp.field || null) !== (S.warp.base || null);
+const morphPending = () => (S.warp.field || null) !== (S.warp.base || null) || mapPending();
 /** Copy-on-write: a stroke edits a fresh copy so undo snapshots stay intact. */
 function beginStroke() {
   const W_ = S.warp, n = W_.gw * W_.gh * 2;
@@ -398,20 +604,7 @@ function morphDab(pc, d, R, mode, amt) {
   if (i1 < i0 || j1 < j0) return;
   const hard = clamp(cfg.mHard, 0, 1) * .85, R2 = R * R;
   const nw = i1 - i0 + 1, nh = j1 - j0 + 1;
-  // Beta · stay on level: weight each node by how close its layer is to the layer the stroke started on
-  let mask = null;
-  const st = S.stroke;
-  if (cfg.mLevels && mode !== 'restore' && st && st.lvl != null && st.regions) {
-    const tol = .6 - .45 * clamp(cfg.mLevelStrict, 0, 1), t2 = 2 * tol * tol;
-    mask = new Float32Array(nw * nh);
-    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-      const idx = (j * gw + i) * 2;
-      const l = levelAt({ x: i * cs + old[idx], y: j * cs + old[idx + 1] }, st.regions);   // follows the content
-      const dl = l - st.lvl;
-      mask[(j - j0) * nw + (i - i0)] = .03 + .97 * Math.exp(-dl * dl / t2);
-    }
-    blurGrid(mask, nw, nh); blurGrid(mask, nw, nh);
-  }
+  const mask = null;
   for (let j = j0; j <= j1; j++) {
     const y = j * cs, dy = y - pc.y;
     for (let i = i0; i <= i1; i++) {
@@ -696,6 +889,7 @@ function snapshot() {
     img: S.imgRec,
     adj: { ...S.adj, ell: S.adj.ell ? { ...S.adj.ell } : null },
     warp: S.warp,   // field arrays are copy-on-write, so sharing the reference is safe
+    map: S.map ? { p: S.map.p.slice(), q: S.map.q.slice(), base: S.map.base.slice(), snapped: S.map.snapped } : null,
     list: [...S.meas.values()].map(m => ({ id: m.id, preset: m.preset, kind: m.kind, name: m.name, pts: m.pts.map(cp), src: m.src ? m.src.map(cp) : null })),
     refId: S.refId, calibId: S.calibId, calibMM: S.calibMM, seq: S.seq,
   };
@@ -713,6 +907,15 @@ function restore(s) {
   if (imgChanged) setImageState(s.img);
   if (s.adj) S.adj = { ...DEFAULT_ADJ(), ...s.adj, ell: s.adj.ell ? { ...s.adj.ell } : null };
   if (s.warp) { S.warp = s.warp; S.fieldDirty = true; }
+  if ('map' in s) {
+    const outlineChanged = !S.map || !s.map || OUTLINE.some(i => S.map.p[2 * i] !== s.map.p[2 * i] || S.map.p[2 * i + 1] !== s.map.p[2 * i + 1]);
+    const keepMask = S.map && S.map.mask;
+    S.map = s.map ? { p: s.map.p.slice(), q: s.map.q.slice(), base: s.map.base.slice(), snapped: s.map.snapped, ver: (S.map ? S.map.ver : 0) + 1, moved: false, maskVer: S.map ? S.map.maskVer : 0 } : null;
+    if (S.map) {
+      recalcMoved();
+      if (outlineChanged || !keepMask) buildMask(); else S.map.mask = keepMask;
+    } else S.mapSel.clear();
+  }
   S.glDirty = true;
   const old = S.meas;
   S.meas = new Map();
@@ -1115,7 +1318,7 @@ function drawSegments(ctx, m, pts, d, o, s) {
 /* ------------------------------------------------------------ image layer -- */
 
 let imgKey = '';
-let glImgRec = null;
+let glImgRec = null, glMaskVer = -1;
 /** Upload the photo to the GPU (once per image), downscaling only if it exceeds the GPU limit. */
 function ensureGLImage() {
   if (!GLR || !S.imgRec || glImgRec === S.imgRec) return;
@@ -1129,8 +1332,20 @@ function ensureGLImage() {
   GLR.setImage(c, c.width, c.height);
   S.fieldDirty = true;
 }
-const levelsActive = () => S.tool === 'morph' && cfg.mLevels && !!S.adj.ell && !!GLR;
-const showLevelsNow = () => levelsActive() && cfg.mShowLevels && !S.compare && !S.stroke;
+/** Upload whatever changed (photo, free-brush field, face mask) before the GPU draws. */
+function syncGLData() {
+  ensureGLImage();
+  if (S.fieldDirty) { S.fieldDirty = false; GLR.setField(S.warp.field, S.warp.gw, S.warp.gh); S.glDirty = true; }
+  if (S.map && S.map.mask && S.map.maskVer !== glMaskVer) { glMaskVer = S.map.maskVer; GLR.setMask(S.map.mask.canvas); S.glDirty = true; }
+}
+/** Map parameters for the GPU — the two face-map layers, plus the layer tint while mapping. */
+function mapParams(forExport) {
+  if (!S.map || S.compare) return null;
+  const tint = !forExport && mapping() && cfg.mShowLayers && !S.qfit;
+  if (!mapActive() && !tint) return null;
+  if (mapActive()) syncMapGrid();
+  return { moved: mapActive(), showLayers: tint };
+}
 function glParams(view, d, cw, ch, alpha) {
   const a = S.adj, e = a.ell;
   return {
@@ -1138,7 +1353,7 @@ function glParams(view, d, cw, ch, alpha) {
     rot: a.rot / DEG, scale: scaleXY(a), trans: [a.tx, a.ty],
     ell: e ? [e.cx, e.cy, e.ax, e.ay] : null, lensD: lensD(), zref: ZREF,
     morph: !!S.warp.field && !S.compare, cell: S.warp.cs, alpha,
-    levels: showLevelsNow() ? levelRegions() : null,
+    map: mapParams(false),
   };
 }
 function drawImageLayer(dt) {
@@ -1148,8 +1363,7 @@ function drawImageLayer(dt) {
     try {
       if (!S.img) { if (imgKey !== 'none') { imgKey = 'none'; GLR.clear(); } return; }
       if (GLR.isLost()) { disableGL('broken'); return; }
-      ensureGLImage();
-      if (S.fieldDirty) { S.fieldDirty = false; GLR.setField(S.warp.field, S.warp.gw, S.warp.gh); S.glDirty = true; }
+      syncGLData();
       const key = `${v.x.toFixed(2)}|${v.y.toFixed(2)}|${v.k.toFixed(6)}|${S.imgA.toFixed(3)}|${S.imgSeq}|${ov.width}x${ov.height}`;
       if (key === imgKey && !S.glDirty) return;
       imgKey = key; S.glDirty = false;
@@ -1182,6 +1396,53 @@ function drawImageLayer(dt) {
 }
 
 /* --------------------------------------------------- edit-tool overlays -- */
+
+const MAP_COLORS = { surface: '#7EA6FF', brows: '#A8D88F', eyes: '#F0CD6E', nose: '#F2A7C6', lips: '#BCAEF7', head: '#6ED8CB' };
+const QFIT_STEPS = [
+  { id: 'puL', label: 'Click the pupil on the left' },
+  { id: 'puR', label: 'Click the pupil on the right' },
+  { id: 'sto', label: 'Click the middle of the mouth' },
+  { id: 'me', label: 'Click the bottom of the chin' },
+];
+/** Screen positions of every map point (current shape, or original while mapping). */
+function mapScreenPts() {
+  const which = mapping() ? 'p' : 'q';
+  return FM.POINTS.map((_, i) => mapToScreen(mapPt(i, which)));
+}
+function drawMap(ctx) {
+  const P_ = mapScreenPts(), busy = S.mapDrag || S.mapBrush;
+  // while reshaping the guides stay quiet so the result is easy to judge
+  const quiet = !mapping(), lineA = busy ? .3 : quiet ? .38 : .8;
+  ctx.save();
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  // contours
+  for (const c of FM.CONTOURS) {
+    const pts = FM.spline(c.ids.map(id => P_[FM.INDEX[id]]), c.closed, 8);
+    const col = MAP_COLORS[FM.POINTS[FM.INDEX[c.ids[0]]].group];
+    ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); if (c.closed) ctx.closePath();
+    if (!quiet) { ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 3; ctx.stroke(); }
+    ctx.strokeStyle = rgba(col, lineA); ctx.lineWidth = quiet ? 1 : 1.2; ctx.stroke();
+  }
+  // points
+  FM.POINTS.forEach((pt, i) => {
+    const p = P_[i], sel = S.mapSel.has(i), hov = S.mapHover === i, col = MAP_COLORS[pt.group];
+    const r = sel || hov ? 4.6 : quiet ? 2.6 : 3.3;
+    if (!sel && !hov) ctx.globalAlpha = busy ? .5 : quiet ? .75 : 1;
+    ctx.beginPath(); ctx.arc(p.x, p.y, r + 1.5, 0, TAU); ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fillStyle = sel ? '#FFFFFF' : col; ctx.fill();
+    if (sel) { ctx.beginPath(); ctx.arc(p.x, p.y, r - 1.6, 0, TAU); ctx.fillStyle = col; ctx.fill(); }
+    if (pt.landmark && !sel) { ctx.beginPath(); ctx.arc(p.x, p.y, 1.1, 0, TAU); ctx.fillStyle = '#0B0E14'; ctx.fill(); }
+    ctx.globalAlpha = 1;
+  });
+  if (S.mapBox && S.mapBox.moved) {
+    const b = S.mapBox, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1);
+    ctx.strokeStyle = rgba(MAP_COLORS.surface, .8); ctx.fillStyle = rgba(MAP_COLORS.surface, .08);
+    ctx.fillRect(x, y, Math.abs(b.x1 - b.x0), Math.abs(b.y1 - b.y0));
+    ctx.strokeRect(x + .5, y + .5, Math.abs(b.x1 - b.x0), Math.abs(b.y1 - b.y0));
+  }
+  ctx.restore();
+  if (S.mapHover != null && !busy) { const p = P_[S.mapHover]; tag(ctx, FM.POINTS[S.mapHover].name, p.x, p.y); }
+}
 
 function drawBrush(ctx, c) {
   const r = brushV() * S.view.k, hard = clamp(cfg.mHard, 0, 1) * .85;
@@ -1351,8 +1612,10 @@ function drawOverlay(t, dt) {
   }
 
   if (S.tool === 'adjust') drawAdjustGuides(ctx);
-  if (S.tool === 'morph' && levelsActive() && !S.stroke) drawFaceFrame(ctx);
-  if (S.tool === 'morph' && S.cursorIn && S.cursor && !S.pan && !S.hdrag && !S.hoverHandle && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
+  if (S.tool === 'morph' && cfg.mSub !== 'free' && S.map && !S.compare) drawMap(ctx);
+  const brushOn = S.tool === 'morph' && (cfg.mSub === 'free' || (cfg.mSub === 'reshape' && S.mapHover == null && !S.mapDrag && !S.mapBox));
+  if (brushOn && !S.qfit && S.cursorIn && S.cursor && !S.pan && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
+  if (S.qfit && S.cursorIn && S.cursor) tag(ctx, QFIT_STEPS[S.qfit.step].label + `  ${S.qfit.step + 1}/4`, S.cursor.x, S.cursor.y);
 
   const overNode = S.hover && S.hover.node >= 0 && !S.draft;
   const placing = S.cursorIn && S.cursor && canPlace() && !S.drag && !S.pan && !(S.press && S.press.moved) && !overNode;
@@ -1578,10 +1841,10 @@ function refreshCursor() {
   let c;
   const xz = S.tdrag ? S.tdrag.zone : S.hoverXf;
   if (S.tool === 'adjust' && xz && !S.space && !S.pan && !(S.press && S.press.moved)) c = xfCursor(xz);
-  else if (S.drag || S.pan || S.hdrag || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
-  else if (S.box) c = 'crosshair';
+  else if (S.drag || S.pan || S.hdrag || (S.mapDrag && S.mapDrag.moved) || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
+  else if (S.box || S.mapBox || S.qfit) c = 'crosshair';
   else if (S.space) c = 'grab';
-  else if (S.tool === 'morph') c = S.hoverHandle ? 'grab' : 'none';
+  else if (S.tool === 'morph') c = S.mapHover != null ? 'grab' : (mapping() ? 'crosshair' : 'none');
   else if (S.tool === 'adjust') c = S.hoverHandle ? 'grab' : 'default';
   else if (S.hover && S.hover.node >= 0) c = 'grab';
   else if (S.hover && selectMode()) c = 'move';
@@ -1590,7 +1853,7 @@ function refreshCursor() {
   if (ov._c !== c) { ov._c = c; ov.style.cursor = c; }
 }
 function handleAt(sx, sy) {
-  if (!((S.tool === 'adjust' && S.adj.lens > 0) || levelsActive())) return null;
+  if (!(S.tool === 'adjust' && S.adj.lens > 0)) return null;
   for (const h of ellHandles()) if (Math.hypot(h.p.x - sx, h.p.y - sy) <= 11) return h.id;
   return null;
 }
@@ -1626,6 +1889,8 @@ function xfCursor(z) {
 function updateHover(sx, sy) {
   const hh = handleAt(sx, sy);
   if (hh !== (S.hoverHandle || null)) { S.hoverHandle = hh; wake(); }
+  const mh = S.tool === 'morph' && !S.mapDrag && !S.mapBrush && !S.mapBox ? mapHitAt(sx, sy) : null;
+  if (mh !== S.mapHover && !S.mapDrag) { S.mapHover = mh; wake(); }
   const xz = hh ? null : xfZoneAt(sx, sy);
   if (JSON.stringify(xz) !== JSON.stringify(S.hoverXf || null)) { S.hoverXf = xz; wake(); }
   const h = S.draft || !S.img || EDIT_TOOLS.has(S.tool) ? null : hitTest(sx, sy);
@@ -1651,6 +1916,7 @@ ov.addEventListener('pointerdown', e => {
     S.press = null; S.pan = null; S.mdrag = null; S.box = null; S.rpress = null;
     if (S.drag) endDrag();
     if (S.stroke) endStroke();
+    if (S.mapDrag || S.mapBrush || S.mapBox) morphUp(e);
     if (S.hdrag) endHandle();
     if (S.tdrag) endXf();
     const [a, b] = [...pointers.values()];
@@ -1675,12 +1941,7 @@ ov.addEventListener('pointerdown', e => {
     S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // tools unavailable: drag just pans
     return;
   }
-  if (S.tool === 'morph') {
-    const h = handleAt(sx, sy);
-    if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
-    startStroke(sx, sy);
-    return;
-  }
+  if (S.tool === 'morph') { morphDown(sx, sy, e); return; }
   if (S.tool === 'adjust') {
     const h = handleAt(sx, sy);
     if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
@@ -1729,6 +1990,7 @@ ov.addEventListener('pointermove', e => {
   S.cursor = { x: sx, y: sy }; S.cursorIn = true;
   wake();
   const fine = e.shiftKey ? .25 : 1;
+  if (S.mapDrag || S.mapBrush || S.mapBox) { morphMove(sx, sy, e); return; }
   if (S.stroke) {
     const v = toI(sx, sy);
     if (cfg.mMode === 'push' && dist(S.stroke.last, v) > 0) { morphPush(S.stroke.last, v); S.stroke.changed = true; }
@@ -1782,18 +2044,240 @@ ov.addEventListener('pointermove', e => {
   updateHover(sx, sy);
 });
 
+/* ---- face map interaction (Morph → Map face / Reshape) ---- */
+function mapHitAt(sx, sy) {
+  if (!S.map || cfg.mSub === 'free' || S.qfit) return null;
+  const P_ = mapScreenPts();
+  let best = null, bd = 9;
+  P_.forEach((p, i) => { const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+/** A new map changes nothing on the photo (every dot is where it came from), so it isn't an undo step. */
+function ensureMap(quiet) {
+  if (S.map || !FM || !S.img) return;
+  const n = fitMap();
+  syncPts();
+  if (!quiet) toast(n ? `Face map placed from ${n} of your landmarks — check it in Map face` : 'Face map placed on a guess — use Map face to fit it', 5000);
+}
+function setMorphSub(v) {
+  if (v === cfg.mSub) return;
+  cfg.mSub = v; saveCfg();
+  S.qfit = null;
+  if (v !== 'free') ensureMap(v === 'map');
+  if (v === 'free') S.mapSel.clear();
+  syncPts();               // the reshape is hidden while mapping, so points move
+  syncToolOpts(); renderHint(); refreshCursor();
+}
+/** Half the cheekbone width of the mapped face (the map's unit of size). */
+const mapScale = () => { const m = S.map, a = FM.INDEX.zyL, b = FM.INDEX.zyR; return Math.hypot(m.p[2 * a] - m.p[2 * b], m.p[2 * a + 1] - m.p[2 * b + 1]) / 2 || 100; };
+/**
+ * How much each map dot follows the selection: 1 for selected dots, falling off with distance —
+ * but only on the same layer, so dragging the forehead brings the hairline along and never the eyes.
+ */
+const PAIRED = new Set(['eyes', 'brows']);   // left and right are separate features
+const sideOf = i => Math.sign(Math.round(FM.POINTS[i].x * 20));
+const sameFeature = (i, j) => {
+  const a = FM.POINTS[i], b = FM.POINTS[j];
+  return a.group === b.group && (!PAIRED.has(a.group) || sideOf(i) * sideOf(j) >= 0);
+};
+/** Interior skin dots (forehead, cheeks, chin): handles for pushing skin, not part of an outline. */
+const INTERIOR = FM ? ['fhC', 'fhL', 'fhR', 'ckL', 'ckR', 'mcL', 'mcR', 'chinC'].map(id => FM.INDEX[id]) : [];
+const IS_INTERIOR = new Set(INTERIOR);
+/** Where each interior dot would sit if it simply rode along with the outline and the features. */
+function naturalInterior() {
+  const m = S.map, ctrl = [];
+  FM.POINTS.forEach((pt, i) => { if (pt.field !== 'back' && !IS_INTERIOR.has(i)) ctrl.push(m.q[2 * i], m.q[2 * i + 1], m.p[2 * i], m.p[2 * i + 1]); });
+  return INTERIOR.map(i => FM.mls(ctrl, ctrl.length / 4, m.p[2 * i], m.p[2 * i + 1], mlsEps(), true));
+}
+/**
+ * Run a change, then carry the interior dots along with it (keeping any push you gave them), so
+ * the skin between the outline and the features always stays smooth. Dots in `own` were moved
+ * by the change itself.
+ */
+function carryInterior(change, own) {
+  const before = naturalInterior();
+  change();
+  const after = naturalInterior(), q = S.map.q;
+  INTERIOR.forEach((i, k) => {
+    if (own.has(i)) return;
+    q[2 * i] += after[k][0] - before[k][0]; q[2 * i + 1] += after[k][1] - before[k][1];
+  });
+}
+function spreadWeights() {
+  const m = S.map, w = new Float32Array(NMAP), sel = [...S.mapSel];
+  sel.forEach(i => { w[i] = 1; });
+  for (let j = 0; j < NMAP; j++) {
+    if (w[j] || IS_INTERIOR.has(j)) continue;   // interior dots ride along instead (carryInterior)
+    // the face surface and the head spread wide; eyes, brows, nose and lips stay local
+    const g = FM.POINTS[j].group, sig = cfg.mSmooth * (g === 'surface' || g === 'head' ? .25 : .1) * mapScale();
+    if (sig < 1) continue;
+    let d2 = Infinity;
+    for (const i of sel) {
+      if (!sameFeature(i, j)) continue;
+      const dx = m.q[2 * j] - m.q[2 * i], dy = m.q[2 * j + 1] - m.q[2 * i + 1];
+      d2 = Math.min(d2, dx * dx + dy * dy);
+    }
+    const v = Math.exp(-d2 / (2 * sig * sig));
+    if (v > .05) w[j] = v;
+  }
+  return w;
+}
+/** Layer of the map point nearest the cursor — the brush only moves points on that layer. */
+function groupNear(x, R) {
+  let best = 'surface', bd = R * 1.4;
+  FM.POINTS.forEach((pt, i) => { const d = Math.hypot(S.map.q[2 * i] - x.x, S.map.q[2 * i + 1] - x.y); if (d < bd) { bd = d; best = pt.group; } });
+  return best;
+}
+const brushMapR = (sx, sy) => { const v = toI(sx, sy), a = pToS(vToP(v)), b = pToS(vToP({ x: v.x + brushV(), y: v.y })); return Math.max(2, dist(a, b)); };
+function mapChanged(outline) {
+  recalcMoved();
+  if (outline && mapping()) {
+    S.map.maskDirty = true;
+    if (now() - (S.map.maskT || 0) > 120) { buildMask(); S.map.maskT = now(); S.map.maskDirty = false; }
+  }
+  syncPts();
+}
+function moveMapPoints(dx, dy, w) {
+  const m = S.map;
+  let outline = false;
+  if (mapping()) {
+    // aligning: the dot marks a new spot on the original photo — no reshape
+    S.mapSel.forEach(i => {
+      for (const arr of [m.p, m.q, m.base]) { arr[2 * i] += dx; arr[2 * i + 1] += dy; }
+      if (OUTLINE.includes(i)) outline = true;
+    });
+  } else {
+    carryInterior(() => {
+      for (let i = 0; i < NMAP; i++) if (w[i] > 0) { m.q[2 * i] += dx * w[i]; m.q[2 * i + 1] += dy * w[i]; }
+    }, S.mapSel);
+  }
+  mapChanged(outline);
+}
+/** Reshape brush: moves the map points of one layer under the brush. */
+function mapBrushDab(c, d, dt) {
+  const m = S.map, b = S.mapBrush, R = b.R, hard = clamp(cfg.mHard, 0, 1) * .85;
+  const own = new Set();
+  // which dots sit under the brush (only on the layer the stroke started on)
+  let hits = [];
+  FM.POINTS.forEach((pt, i) => {
+    if (pt.group !== b.group) return;
+    const r = Math.hypot(m.q[2 * i] - c.x, m.q[2 * i + 1] - c.y) / R;
+    if (r < 1) hits.push([i, (1 - smooth01(hard, 1, r)) * cfg.mStrength]);
+  });
+  // over the face edge the brush reshapes the outline and the skin inside rides along;
+  // the interior dots are only pushed directly when no outline is under the brush
+  if (hits.some(([i]) => !IS_INTERIOR.has(i))) hits = hits.filter(([i]) => !IS_INTERIOR.has(i));
+  if (!hits.length) return;
+  carryInterior(() => {
+    for (const [i, w] of hits) {
+      const qx = m.q[2 * i], qy = m.q[2 * i + 1];
+      if (cfg.mMode === 'push' && d) { m.q[2 * i] += d.x * w; m.q[2 * i + 1] += d.y * w; }
+      else if (cfg.mMode === 'bloat' || cfg.mMode === 'pinch') {
+        const k = 1 + (cfg.mMode === 'bloat' ? 1 : -1) * w * dt * 1.2;
+        m.q[2 * i] = c.x + (qx - c.x) * k; m.q[2 * i + 1] = c.y + (qy - c.y) * k;
+      } else if (cfg.mMode === 'restore') {
+        const k = Math.min(1, w * dt * 3);
+        m.q[2 * i] += (m.p[2 * i] - qx) * k; m.q[2 * i + 1] += (m.p[2 * i + 1] - qy) * k;
+      }
+      own.add(i);
+    }
+  }, own);
+  b.changed = true;
+  mapChanged(false);
+}
+function morphDown(sx, sy, e) {
+  if (S.qfit) { quickFitClick(sx, sy); return; }
+  if (cfg.mSub === 'free') { startStroke(sx, sy); return; }
+  ensureMap();
+  const hit = mapHitAt(sx, sy), x = screenToMap(sx, sy);
+  if (hit != null) {
+    if (e.shiftKey) { if (S.mapSel.has(hit)) S.mapSel.delete(hit); else S.mapSel.add(hit); }
+    else if (!S.mapSel.has(hit)) S.mapSel = new Set([hit]);
+    S.mapDrag = { last: x, sx, sy, snap: snapshot(), moved: false, w: mapping() ? null : spreadWeights() };
+    S.glDirty = true; wake(); refreshCursor();
+    return;
+  }
+  if (e.shiftKey || mapping()) {
+    S.mapBox = { x0: sx, y0: sy, x1: sx, y1: sy, moved: false, base: new Set(e.shiftKey ? S.mapSel : []) };
+    return;
+  }
+  const R = brushMapR(sx, sy);
+  S.mapBrush = { last: x, R, snap: snapshot(), changed: false, group: groupNear(x, R) };
+  S.glDirty = true; wake();
+}
+function morphMove(sx, sy, e) {
+  const x = screenToMap(sx, sy);
+  if (S.mapDrag) {
+    const d = S.mapDrag;
+    if (!d.moved && Math.hypot(sx - d.sx, sy - d.sy) < 2) return;
+    d.moved = true;
+    const fine = e.altKey ? .25 : 1;
+    moveMapPoints((x.x - d.last.x) * fine, (x.y - d.last.y) * fine, d.w);
+    d.last = x;
+  } else if (S.mapBrush) {
+    const b = S.mapBrush;
+    b.R = brushMapR(sx, sy);
+    if (cfg.mMode === 'push') mapBrushDab(b.last, { x: x.x - b.last.x, y: x.y - b.last.y }, 0);
+    b.last = x;
+  } else if (S.mapBox) {
+    const b = S.mapBox;
+    b.x1 = sx; b.y1 = sy;
+    if (!b.moved && Math.hypot(sx - b.x0, sy - b.y0) > 4) b.moved = true;
+    if (b.moved) {
+      const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
+      S.mapSel = new Set(b.base);
+      mapScreenPts().forEach((p, i) => { if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) S.mapSel.add(i); });
+    }
+  }
+  wake();
+}
+function morphUp(e) {
+  if (S.mapDrag) {
+    const d = S.mapDrag;
+    S.mapDrag = null;
+    if (d.moved) { if (S.map.maskDirty || mapping()) { buildMask(); S.map.maskDirty = false; } pushUndo(d.snap); }
+  } else if (S.mapBrush) {
+    const b = S.mapBrush;
+    S.mapBrush = null;
+    if (b.changed) pushUndo(b.snap);
+    else if (!e.shiftKey && S.mapSel.size) S.mapSel.clear();
+  } else if (S.mapBox) {
+    const b = S.mapBox;
+    S.mapBox = null;
+    if (!b.moved && !e.shiftKey) S.mapSel.clear();
+  }
+  S.glDirty = true;
+  syncUI();
+}
+/* quick fit: four clicks place the whole map */
+function startQuickFit() {
+  if (cfg.mSub !== 'map') setMorphSub('map');
+  S.qfit = { step: 0, clicks: [] };
+  S.mapSel.clear();
+  renderHint(); refreshCursor(); syncToolOpts(); wake();
+}
+function quickFitClick(sx, sy) {
+  const q = S.qfit;
+  q.clicks.push(fwdMap(toI(sx, sy)));   // position on the original photo
+  q.step++;
+  if (q.step < QFIT_STEPS.length) { renderHint(); syncToolOpts(); wake(); return; }
+  const snap = snapshot();
+  S.qfit = null;
+  fitMap(QFIT_STEPS.map((st, k) => ({ i: FM.INDEX[st.id], b: q.clicks[k] })));
+  pushUndo(snap);
+  // then pull the outline onto the face edge (its own undo step)
+  const snap2 = snapshot();
+  if (snapOutline()) pushUndo(snap2);
+  syncPts(); syncUI();
+  toast('Mapped and snapped to the face edge — check the outline and hairline dots', 5000);
+}
+
 /* morph strokes */
 function startStroke(sx, sy) {
   const snap = snapshot();
   beginStroke();
   const v = toI(sx, sy);
-  S.stroke = { last: v, snap, changed: false, lvl: null, regions: null };
-  if (cfg.mLevels && S.adj.ell) {
-    // remember which layer the stroke starts on (read from the content under the brush centre)
-    const regions = levelRegions();
-    S.stroke.regions = regions;
-    S.stroke.lvl = levelAt(pToS(brushAt(v).pc), regions);
-  }
+  S.stroke = { last: v, snap, changed: false };
   if (cfg.mMode !== 'push') dabHere(1 / 60);
   S.glDirty = true;
   wake();
@@ -1886,7 +2370,8 @@ function endDrag() {
 function pointerUp(e) {
   pointers.delete(e.pointerId);
   if (pinch) { if (pointers.size < 2) pinch = null; S.press = null; return; }
-  if (S.stroke) endStroke();
+  if (S.mapDrag || S.mapBrush || S.mapBox) morphUp(e);
+  else if (S.stroke) endStroke();
   else if (S.hdrag) endHandle();
   else if (S.tdrag) endXf();
   else if (S.drag) endDrag();
@@ -2004,10 +2489,31 @@ addEventListener('keydown', e => {
     return;
   }
   if (k === 'b') { if (!e.repeat) setCompare(true); return; }
+  if (S.tool === 'morph' && S.map && S.mapSel.size && e.key.startsWith('Arrow')) {
+    // nudge the selected map dots (1 px on screen, Shift = 10)
+    e.preventDefault();
+    const st = (e.shiftKey ? 10 : 1) / S.view.k, dx = { ArrowLeft: -st, ArrowRight: st }[e.key] || 0, dy = { ArrowUp: -st, ArrowDown: st }[e.key] || 0;
+    if (!S.nudge || now() - S.nudge.t > 900) { pushUndo(); S.nudge = {}; }
+    S.nudge.t = now();
+    moveMapPoints(dx, dy, mapping() ? null : spreadWeights());
+    if (mapping()) { buildMask(); S.map.maskDirty = false; }
+    syncUI();
+    return;
+  }
+  if (S.tool === 'morph' && S.map && S.mapSel.size && (e.key === 'Delete' || e.key === 'Backspace') && !mapping()) {
+    // restore the selected dots to their original place
+    e.preventDefault();
+    pushUndo();
+    carryInterior(() => S.mapSel.forEach(i => { S.map.q[2 * i] = S.map.p[2 * i]; S.map.q[2 * i + 1] = S.map.p[2 * i + 1]; }), S.mapSel);
+    mapChanged(false); syncUI();
+    return;
+  }
   switch (e.key) {
     case 'Escape':
       if (newPop.classList.contains('open')) closeNewPop();
       else if (calibCtx) closeCalib(false);
+      else if (S.qfit) { S.qfit = null; renderHint(); refreshCursor(); syncToolOpts(); wake(); }
+      else if (S.tool === 'morph' && S.mapSel.size) { S.mapSel.clear(); wake(); }
       else if (S.draft) cancelDraft(true);
       else if (S.tool !== 'move') setTool('move');
       else if (S.picked.size) { S.picked.clear(); syncUI(); }
@@ -2036,7 +2542,7 @@ addEventListener('keyup', e => {
   if (e.key.toLowerCase() === 'b') setCompare(false);
   if (e.key === 'Shift') { S.shift = false; wake(); }
 });
-addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); });
+addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); if (S.mapDrag || S.mapBrush || S.mapBox) morphUp({}); });
 addEventListener('resize', () => { resize(); if (S.img) fitView(); });
 
 /* --------------------------------------------------------- image input -- */
@@ -2064,6 +2570,8 @@ function setImageState(rec) {
     drag: null, mdrag: null, press: null, rpress: null, box: null, leaving: [],
   });
   S.picked = new Set();
+  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBrush: null, mapBox: null, qfit: null });
+  glMaskVer = -1; glMapKey = '';
   customSig = null;
   S.imgRec = rec || null;
   S.imgSeq++;
@@ -2081,6 +2589,7 @@ function setImageState(rec) {
   S.fieldDirty = true; S.glDirty = true;
   body.classList.add('has-img');
   fitView(true);
+  if (S.tool === 'morph' && GLR && cfg.mSub !== 'free') ensureMap(true);
   toolOptsFor = null;
   renderToolOpts();
 }
@@ -2146,6 +2655,18 @@ document.addEventListener('paste', e => {
 
 /* --------------------------------------------------------------- export -- */
 
+/** The edited photo at full resolution (scaled only if the GPU can't fit it). */
+function drawEditedPhoto(ctx) {
+  const iw = S.iw, ih = S.ih;
+  if (GLR && !isIdentity()) {
+    syncGLData();
+    const sc = Math.min(1, GLR.maxView[0] / iw, GLR.maxView[1] / ih, 8192 / Math.max(iw, ih));
+    const cw = Math.round(iw * sc), ch = Math.round(ih * sc);
+    GLR.render({ ...glParams({ x: 0, y: 0, k: sc }, 1, cw, ch, 1), morph: !!S.warp.field, map: mapParams(true) });
+    ctx.drawImage(glcv, 0, 0, cw, ch, 0, 0, iw, ih);
+    imgKey = ''; S.glDirty = true;   // restore the on-screen render next frame
+  } else ctx.drawImage(S.img, 0, 0);
+}
 async function exportPNG() {
   if (!S.img) return;
   try { await Promise.all([document.fonts.load(`500 12px 'JetBrains Mono'`), document.fonts.load('600 12px Inter')]); } catch (e) { /* system fonts */ }
@@ -2159,14 +2680,7 @@ async function exportPNG() {
   const c = document.createElement('canvas');
   c.width = iw; c.height = Math.round(ih + legendH);
   const ctx = c.getContext('2d');
-  if (GLR && !isIdentity()) {
-    // render the edited photo at full resolution (scaled only if the GPU can't fit it)
-    const sc = Math.min(1, GLR.maxView[0] / iw, GLR.maxView[1] / ih, 8192 / Math.max(iw, ih));
-    const cw = Math.round(iw * sc), ch = Math.round(ih * sc);
-    GLR.render({ ...glParams({ x: 0, y: 0, k: sc }, 1, cw, ch, 1), morph: !!S.warp.field, levels: null });
-    ctx.drawImage(glcv, 0, 0, cw, ch, 0, 0, iw, ih);
-    imgKey = ''; S.glDirty = true;   // restore the on-screen render next frame
-  } else ctx.drawImage(S.img, 0, 0);
+  drawEditedPhoto(ctx);
   const labels = [];
   for (const m of vis) drawMeas(ctx, m, { toS: p => p, u, t: 0, alpha: 1, labels, final: true, disp: targets(m) });
   if (rows.length) {
@@ -2280,11 +2794,15 @@ function toggleShowAll() {
 function setTool(t) {
   if (S.draft) { S.draft = null; S.draftM = null; }
   if (S.stroke) endStroke();
+  if (S.mapDrag || S.mapBrush || S.mapBox) morphUp({});
   if (EDIT_TOOLS.has(t) && !GLR) toast(GL_MESSAGES[GL_REASON] || GL_MESSAGES.webgl, 7000);
   S.tool = t;
+  S.qfit = null; S.mapHover = null;
+  if (t !== 'morph') S.mapSel.clear();
+  if (t === 'morph' && GLR && cfg.mSub !== 'free') ensureMap(true);
   if (t !== 'move' && !EDIT_TOOLS.has(t) && S.sel.length) { S.sel = []; S.active = null; }
   if (EDIT_TOOLS.has(t)) S.picked.clear();
-  S.glDirty = true;
+  syncPts();               // the reshape is hidden while mapping
   renderToolOpts();
   syncUI();
 }
@@ -2313,15 +2831,44 @@ function renderToolOpts() {
     return;
   }
   if (t === 'morph') {
+    const dot = g => `<i class="mdot" style="--c:${MAP_COLORS[g]}"></i>`;
     toolOptsBody.innerHTML = `
       <div class="to-head"><span class="to-title">Morph</span><span class="to-sub">landmarks follow the face</span></div>
-      <div class="seg full" id="mMode">
-        <button type="button" data-v="push">Push</button><button type="button" data-v="bloat">Bloat</button>
-        <button type="button" data-v="pinch">Pinch</button><button type="button" data-v="restore">Restore</button>
+      <div class="seg full msub" id="mSub">
+        <button type="button" data-v="map" title="Fit the face map to the photo"><b>1</b>Map</button><button type="button" data-v="reshape" title="Reshape the face layer by layer"><b>2</b>Reshape</button><button type="button" data-v="free" title="Classic liquify brush">Free brush</button>
       </div>
-      ${sliderRow('mSize', 'Size', 1, 50, .1)}
-      ${sliderRow('mStrength', 'Strength', 1, 100, 1)}
-      ${sliderRow('mHard', 'Hardness', 0, 100, 1)}
+      <div id="mPaneMap">
+        <p class="to-note" id="mMapStatus"></p>
+        <div class="to-actions" style="margin:2px 0 10px">
+          <button type="button" class="btn sm" id="mQuick">Quick fit · 4 clicks</button>
+          <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the map from your measured landmarks">Fit to landmarks</button>
+        </div>
+        <ol class="to-steps">
+          <li>${dot('surface')}<span><b>Face outline</b> — drag the blue dots onto the edge of the face. The top dots go on the <b>hairline</b>, so the hairline moves with the forehead.
+            <button type="button" class="btn ghost sm to-inline" id="mSnap">Snap outline to edges</button></span></li>
+          <li>${dot('brows')}${dot('eyes')}${dot('nose')}${dot('lips')}<span><b>Features</b> — line up the brows, eyes, nose and lips. Each is its own layer.</span></li>
+          <li>${dot('head')}<span><b>Head</b> — put the teal dots around the hair, ears and neck. That layer sits behind the face.</span></li>
+        </ol>
+        <p class="to-note">Drag a box or <kbd>Shift</kbd>-click to move several dots · arrow keys nudge</p>
+        <label class="tg sm"><span>Show layers<small>Teal = the face layer (forehead and hairline included), blue = hair, ears, neck and background behind it</small></span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
+      </div>
+      <div id="mPaneBrush">
+        <div class="seg full" id="mMode">
+          <button type="button" data-v="push">Push</button><button type="button" data-v="bloat">Bloat</button>
+          <button type="button" data-v="pinch">Pinch</button><button type="button" data-v="restore">Restore</button>
+        </div>
+        ${sliderRow('mSize', 'Size', 1, 50, .1)}
+        ${sliderRow('mStrength', 'Strength', 1, 100, 1)}
+        ${sliderRow('mHard', 'Hardness', 0, 100, 1)}
+        <div id="mPaneReshape">
+          ${sliderRow('mSmooth', 'Neighbours', 0, 40, 1, 'How far a dragged dot pulls the nearby dots of the same layer')}
+          <p class="to-note">Drag a <b>dot</b> to reshape — nearby dots of the same layer follow. The brush only moves the layer you start on: the forehead never drags the eyes, and the hair behind the head stays put. <kbd>Del</kbd> puts selected dots back.</p>
+        </div>
+        <div id="mPaneFree">
+          <label class="tg sm"><span>Limit stretching<small>Stops a push once any area would stretch or squash past ≈ 1.7× — never smears, but moves less</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>
+          <p class="to-note">Classic liquify — moves every pixel under the brush, whatever it belongs to.</p>
+        </div>
+      </div>
       <div class="to-confirm" id="mPending">
         <span class="to-status" id="mStatus"></span>
         <div class="to-actions" style="margin-top:8px">
@@ -2330,31 +2877,28 @@ function renderToolOpts() {
           <button type="button" class="btn ghost sm" id="mCompare">Hold to compare</button>
         </div>
       </div>
-      <div class="to-group">
-        <div class="to-beta"><span>Beta</span>for bigger reshapes</div>
-        <label class="tg sm"><span>Stay on level<small>Treats the head as layers — face &amp; forehead with the hairline, eyes, nose, lips, and the sides / hair behind — and mainly moves the layer you start on</small></span><input type="checkbox" class="sw-toggle" id="mLevels"></label>
-        <div id="mLevelOpts">
-          ${sliderRow('mStrict', 'Strictness', 0, 100, 1, 'How strongly other layers are protected')}
-          <label class="tg sm"><span>Show levels<small>Tint the layers on the photo. Drag the blue dots to fit the face; eyes, nose and lips snap to your landmarks</small></span><input type="checkbox" class="sw-toggle" id="mShowLevels"></label>
-          <div class="to-actions" style="margin-top:2px"><button type="button" class="btn ghost sm" id="mFit">Fit levels to face</button></div>
-        </div>
-        <label class="tg sm"><span>Limit stretching<small>Stops a push once any area would stretch or squash past ≈ 1.7× — never smears, but moves less</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>
-      </div>
-      <p class="to-note" style="margin-top:10px">Drag on the photo · <kbd>[</kbd> <kbd>]</kbd> brush size · hold <kbd>B</kbd> to compare</p>`;
+      <p class="to-note" style="margin-top:10px"><kbd>[</kbd> <kbd>]</kbd> brush size · hold <kbd>B</kbd> to compare</p>`;
+    $('#mSub').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) setMorphSub(b.dataset.v); });
     $('#mMode').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mMode = b.dataset.v; saveCfg(); syncToolOpts(); renderHint(); } });
     $('#mLimit').addEventListener('change', e => { cfg.mLimit = e.target.checked; saveCfg(); });
-    $('#mLevels').addEventListener('change', e => {
-      cfg.mLevels = e.target.checked; saveCfg();
-      if (cfg.mLevels && !S.adj.ell) S.adj.ell = guessFace();   // levels need a face frame
-      S.glDirty = true; syncToolOpts(); wake();
+    $('#mShowLayers').addEventListener('change', e => { cfg.mShowLayers = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
+    $('#mQuick').addEventListener('click', () => { if (S.qfit) { S.qfit = null; renderHint(); wake(); } else startQuickFit(); syncToolOpts(); });
+    $('#mSnap').addEventListener('click', () => {
+      if (!S.map) return;
+      const snap = snapshot(), n = snapOutline();
+      if (n) { pushUndo(snap); syncPts(); syncUI(); }
+      toast(n ? `Snapped ${n} outline dot${n === 1 ? '' : 's'} to the face edge — check them` : 'No clear edges found near the outline — drag the dots instead', 4000);
     });
-    $('#mShowLevels').addEventListener('change', e => { cfg.mShowLevels = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
-    $('#mFit').addEventListener('click', () => { pushUndo(); S.adj.ell = guessFace(); S.glDirty = true; syncPts(); syncUI(); toast(landmark('Zygion · left', 'Face edge · left') ? 'Levels fitted from your landmarks' : 'Levels centred — drag the blue dots to fit the face'); });
+    $('#mAuto').addEventListener('click', () => {
+      const snap = snapshot(), n = fitMap();
+      pushUndo(snap); S.mapSel.clear(); syncPts(); syncUI();
+      toast(n ? `Map placed from ${n} of your landmarks` : 'No landmarks measured yet — use Quick fit instead', 4000);
+    });
     const bind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncToolOpts(); wake(); });
     bind('mSize', 'mSize', v => v / 100);
     bind('mStrength', 'mStrength', v => v / 100);
     bind('mHard', 'mHard', v => v / 100);
-    bind('mStrict', 'mLevelStrict', v => v / 100);
+    bind('mSmooth', 'mSmooth', v => v / 10);
     const cmp = $('#mCompare');
     cmp.addEventListener('pointerdown', () => setCompare(true));
     ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => cmp.addEventListener(ev, () => setCompare(false)));
@@ -2363,6 +2907,7 @@ function renderToolOpts() {
       if (!morphPending()) return;
       pushUndo();
       S.warp = { ...S.warp, base: S.warp.field };
+      if (S.map) S.map.base = S.map.q.slice();
       syncUI();
       toast('Morph confirmed');
     });
@@ -2371,6 +2916,7 @@ function renderToolOpts() {
       pushUndo();
       S.warp = { ...S.warp, field: S.warp.base || null };
       S.fieldDirty = true;
+      if (S.map) { S.map.q = S.map.base.slice(); recalcMoved(); }
       syncPts(); syncUI();
       toast('Unconfirmed changes discarded');
     });
@@ -2446,17 +2992,29 @@ function syncToolOpts() {
     setRange('mSize', +(cfg.mSize * 100).toFixed(1), Math.round(brushV()) + ' px');
     setRange('mStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
     setRange('mHard', Math.round(cfg.mHard * 100), Math.round(cfg.mHard * 100) + '%');
-    const pending = morphPending();
+    const pending = morphPending(), sub = cfg.mSub;
     $('#mConfirm').disabled = !pending;
     $('#mReset').disabled = !pending;
     $('#mPending').classList.toggle('pending', pending);
-    setText($('#mStatus'), pending ? 'Unconfirmed changes' : S.warp.field ? 'All changes confirmed' : 'No morph yet');
-    $('#mLevels').checked = !!cfg.mLevels;
-    $('#mShowLevels').checked = !!cfg.mShowLevels;
-    $('#mLevelOpts').hidden = !cfg.mLevels;
-    const sv = Math.round(cfg.mLevelStrict * 100);
-    setRange('mStrict', sv, sv < 34 ? 'loose' : sv < 67 ? 'medium' : 'strict');
+    setText($('#mStatus'), pending ? 'Unconfirmed changes' : (S.warp.field || (S.map && S.map.moved)) ? 'All changes confirmed' : 'No morph yet');
+    $$('#mSub [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === sub));
+    $('#mPaneMap').hidden = sub !== 'map';
+    $('#mPaneBrush').hidden = sub === 'map';
+    $('#mPaneReshape').hidden = sub !== 'reshape';
+    $('#mPaneFree').hidden = sub !== 'free';
+    $('#mShowLayers').checked = !!cfg.mShowLayers;
     $('#mLimit').checked = !!cfg.mLimit;
+    const sm = Math.round(cfg.mSmooth * 10);
+    setRange('mSmooth', sm, sm < 3 ? 'off' : sm < 15 ? 'small' : sm < 30 ? 'medium' : 'wide');
+    const qb = $('#mQuick');
+    qb.textContent = S.qfit ? `Cancel quick fit (${S.qfit.step + 1}/4)` : 'Quick fit · 4 clicks';
+    qb.classList.toggle('on', !!S.qfit);
+    $('#mAuto').disabled = !FM.POINTS.some(pt => pt.landmark && landmarkS(pt.landmark));
+    $('#mSnap').disabled = !S.map || !!S.qfit;
+    setText($('#mMapStatus'), !S.map ? 'Not mapped yet.'
+      : S.qfit ? QFIT_STEPS[S.qfit.step].label + '.'
+      : S.map.snapped ? `Mapped — ${S.map.snapped} dot${S.map.snapped === 1 ? '' : 's'} placed from your landmarks or clicks. Check the outline.`
+      : 'Map centred on a guess — use Quick fit, then drag the dots onto the face.');
   } else if (toolOptsFor === 'adjust') {
     const a = S.adj;
     setRange('aRot', clamp(a.rot, -45, 45), (a.rot > 0 ? '+' : '') + a.rot.toFixed(1) + '°');
@@ -2823,9 +3381,16 @@ function renderHint() {
   if (S.img) {
     const d = S.draft;
     const tgt = d ? { preset: d.preset, kind: d.kind } : placeTarget();
-    if (S.tool === 'morph') {
+    if (S.tool === 'morph' && S.qfit) {
+      html = `<b>Quick fit · ${S.qfit.step + 1}/4</b><span class="h-desc">${QFIT_STEPS[S.qfit.step].label} · <kbd>Esc</kbd> cancels</span>`;
+    } else if (S.tool === 'morph' && cfg.mSub === 'map') {
+      html = `<b>Morph · Map</b><span class="h-desc">Drag the dots onto the face (shown un-morphed) · box or <kbd>Shift</kbd> selects several · then <b>Reshape</b></span>`;
+    } else if (S.tool === 'morph') {
       const mode = { push: 'Push', bloat: 'Bloat', pinch: 'Pinch', restore: 'Restore' }[cfg.mMode];
-      html = `<b>Morph · ${mode}</b><span class="h-desc">${cfg.mMode === 'push' ? 'Drag' : 'Hold'} on the photo · <kbd>[</kbd> <kbd>]</kbd> size · hold <kbd>B</kbd> to compare · right-drag pans</span>`;
+      const act = cfg.mMode === 'push' ? 'Drag' : 'Hold';
+      html = cfg.mSub === 'reshape'
+        ? `<b>Morph · Reshape</b><span class="h-desc">Drag a dot, or ${act.toLowerCase()} to ${mode.toLowerCase()} one layer · <kbd>[</kbd> <kbd>]</kbd> size · hold <kbd>B</kbd> to compare</span>`
+        : `<b>Morph · ${mode}</b><span class="h-desc">${act} on the photo · <kbd>[</kbd> <kbd>]</kbd> size · hold <kbd>B</kbd> to compare · right-drag pans</span>`;
     } else if (S.tool === 'adjust') {
       html = `<b>Adjust image</b><span class="h-desc">Corners stretch (<kbd>Shift</kbd> keep ratio) · outside a corner rotates · inside moves${S.adj.lens > 0 ? ' · blue dots fit the face' : ''}</span>`;
     } else if (tgt && tgt.preset) {
@@ -2991,6 +3556,11 @@ function frame(t) {
   try {
     stepView(dt);
     if (S.stroke && cfg.mMode !== 'push') dabHere(dt);
+    if (S.mapBrush && cfg.mMode !== 'push' && S.cursor) {
+      S.mapBrush.last = screenToMap(S.cursor.x, S.cursor.y);
+      mapBrushDab(S.mapBrush.last, null, dt);
+    }
+    if (S.map && S.map.maskDirty && !S.mapDrag) { buildMask(); S.map.maskDirty = false; }
     drawImageLayer(dt);
     drawGrid(dt);
     if (S.img && t < S.awakeUntil) { drawOverlay(t, dt); updateValues(); }
@@ -3013,6 +3583,6 @@ requestAnimationFrame(frame);
 if (STALE) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, gpu: () => (GLR ? 'webgl2' : GL_REASON), levelAt: s => levelAt(s, levelRegions()) };
+window.cranimeter = { loadFile, state: S, build: BUILD, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto };
 
 })();
