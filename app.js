@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '9';   // must match <meta name="cranimeter-build"> in index.html and warp.js
+const BUILD = '10';   // must match <meta name="cranimeter-build"> in index.html and warp.js
 const { GROUPS, LANDMARKS } = window.CRANI;
 const P = {};
 GROUPS.forEach(g => g.items.forEach(it => { it.group = g.name; P[it.id] = it; }));
@@ -119,7 +119,8 @@ const DEFAULTS = {
   c1: '#7CCBF5', c2: '#F2A7C6', c3: '#F0CD6E',
   width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
-  mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mProtect: false, mLimit: false,
+  mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
+  mLevels: false, mLevelStrict: .5, mShowLevels: true,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -277,6 +278,57 @@ function pToU(p) {
   return { x: e.cx + (p.x - e.cx) / g, y: e.cy + (p.y - e.cy) / g };
 }
 const isIdentity = () => affineIdentity() && !lensD() && !S.warp.field;
+
+/* ---- morph "levels" — keep in sync with levelAt() in warp.js ----
+   The head is treated as layers so a brush mostly moves what's on the layer it starts on:
+   0 sides / hair behind the head / background · 1 front surface (face, forehead, hairline, crown)
+   2.2 eyes · 3 nose · 3.8 lips. Feature regions snap to measured landmarks when available. */
+const softIn = r => 1 - smooth01(.92, 1.08, r);
+function levelAt(s, L) {
+  const e = S.adj.ell;
+  if (!e || !L) return 1;
+  const qx = (s.x - e.cx) / e.ax, qy = (s.y - e.cy) / e.ay;
+  const ox = Math.abs(qx / 1.12), oy = Math.abs((qy + .1) / 1.18);
+  const oval = softIn(Math.pow(ox ** 4 + oy ** 4, .25));   // squarish face: full width brow → jaw
+  const cap = softIn(Math.hypot(qx / 1.3, (qy + .95) / 2)) * (1 - smooth01(-1, -.7, qy));
+  const front = Math.max(oval, cap);
+  const r = (v) => softIn(Math.hypot((s.x - v.cx) / v.rx, (s.y - v.cy) / v.ry));
+  const eye = Math.max(r(L.eyeL), r(L.eyeR)), nose = r(L.nose), mouth = r(L.mouth);
+  return front * (1 + Math.max(eye * 1.2, nose * 2, mouth * 2.8));
+}
+/** Source-space position of a measured landmark (by exact preset label). */
+function landmarkS(...names) {
+  for (const n of names) for (const m of S.meas.values()) {
+    if (!m.preset || !m.src) continue;
+    const i = P[m.preset].pts.indexOf(n);
+    if (i >= 0) return m.src[i];
+  }
+  return null;
+}
+/** Eye / nose / mouth regions in source px — from landmarks when measured, else typical face proportions. */
+function levelRegions() {
+  const e = S.adj.ell;
+  if (!e) return null;
+  const F = (X, Y, rx, ry) => ({ cx: e.cx + X * e.ax, cy: e.cy + Y * e.ay, rx: rx * e.ax, ry: ry * e.ay });
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const eye = side => {
+    const en = landmarkS('Endocanthion · ' + side), ex = landmarkS('Exocanthion · ' + side), pu = landmarkS('Pupil · ' + side);
+    const def = F(side === 'left' ? -.47 : .47, -.9, .22, .15);
+    if (en && ex) { const c = mid(en, ex), w = dist(en, ex); return { cx: c.x, cy: c.y, rx: Math.max(6, w * .66), ry: Math.max(5, w * .36) }; }
+    if (pu) return { ...def, cx: pu.x, cy: pu.y };
+    return def;
+  };
+  let nose = F(0, -.5, .2, .48);
+  const alL = landmarkS('Alare · left'), alR = landmarkS('Alare · right'), sn = landmarkS('Subnasale'), n = landmarkS('Nasion');
+  if (alL && alR) { const c = mid(alL, alR); nose = { ...nose, cx: c.x, rx: Math.max(6, dist(alL, alR) * .62) }; }
+  if (sn && n) { const top = n.y + (sn.y - n.y) * .12; nose = { ...nose, cx: alL && alR ? nose.cx : (sn.x + n.x) / 2, cy: (top + sn.y) / 2 + (sn.y - top) * .04, ry: Math.max(6, (sn.y - top) / 2 * 1.12) }; }
+  let mouth = F(0, .3, .38, .16);
+  const chL = landmarkS('Cheilion · left'), chR = landmarkS('Cheilion · right'), sto = landmarkS('Stomion');
+  const ls = landmarkS('Labrale superius'), li = landmarkS('Labrale inferius');
+  if (chL && chR) { const c = mid(chL, chR), w = dist(chL, chR); mouth = { cx: c.x, cy: sto ? sto.y : c.y, rx: Math.max(6, w * .6), ry: Math.max(5, w * .22) }; }
+  if (ls && li) mouth = { ...mouth, cy: (ls.y + li.y) / 2, ry: Math.max(mouth.ry, Math.abs(li.y - ls.y) / 2 * 1.25) };
+  return { eyeL: eye('left'), eyeR: eye('right'), nose, mouth };
+}
 function fieldAt(f, x, y) {
   const W_ = S.warp, cs = W_.cs, gw = W_.gw, gh = W_.gh;
   const fx = x / cs, fy = y / cs, i = Math.floor(fx), j = Math.floor(fy), tx = fx - i, ty = fy - j;
@@ -320,9 +372,11 @@ function syncPts() {
 /* ---- morph field ---- */
 function initWarp() {
   const cs = Math.max(1, Math.max(S.iw, S.ih) / 400);
-  S.warp = { field: null, gw: Math.ceil(S.iw / cs) + 1, gh: Math.ceil(S.ih / cs) + 1, cs };
+  S.warp = { field: null, base: null, gw: Math.ceil(S.iw / cs) + 1, gh: Math.ceil(S.ih / cs) + 1, cs };
   S.scratch = null;
 }
+/** True when there are morph changes since the last Confirm. */
+const morphPending = () => (S.warp.field || null) !== (S.warp.base || null);
 /** Copy-on-write: a stroke edits a fresh copy so undo snapshots stay intact. */
 function beginStroke() {
   const W_ = S.warp, n = W_.gw * W_.gh * 2;
@@ -344,20 +398,19 @@ function morphDab(pc, d, R, mode, amt) {
   if (i1 < i0 || j1 < j0) return;
   const hard = clamp(cfg.mHard, 0, 1) * .85, R2 = R * R;
   const nw = i1 - i0 + 1, nh = j1 - j0 + 1;
-  // Beta · protect hair & background: weight each node by how much its colour matches the skin under the brush
+  // Beta · stay on level: weight each node by how close its layer is to the layer the stroke started on
   let mask = null;
-  if (cfg.mProtect && mode !== 'restore' && S.stroke && S.stroke.ref) {
-    const ref = S.stroke.ref, sg2 = 2 * 34 * 34;
+  const st = S.stroke;
+  if (cfg.mLevels && mode !== 'restore' && st && st.lvl != null && st.regions) {
+    const tol = .6 - .45 * clamp(cfg.mLevelStrict, 0, 1), t2 = 2 * tol * tol;
     mask = new Float32Array(nw * nh);
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-      const idx = (j * gw + i) * 2, col = colorAt(i * cs + old[idx], j * cs + old[idx + 1]);
-      const dr = col[0] - ref[0], dg = col[1] - ref[1], db = col[2] - ref[2];
-      const d2 = (2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9;
-      mask[(j - j0) * nw + (i - i0)] = .06 + .94 * Math.exp(-d2 / sg2);
+      const idx = (j * gw + i) * 2;
+      const l = levelAt({ x: i * cs + old[idx], y: j * cs + old[idx + 1] }, st.regions);   // follows the content
+      const dl = l - st.lvl;
+      mask[(j - j0) * nw + (i - i0)] = .03 + .97 * Math.exp(-dl * dl / t2);
     }
-    // feather the edge in proportion to the brush so skin/hair borders bend smoothly instead of tearing
-    const passes = clamp(Math.round(R / cs / 6), 2, 10);
-    for (let k = 0; k < passes; k++) blurGrid(mask, nw, nh);
+    blurGrid(mask, nw, nh); blurGrid(mask, nw, nh);
   }
   for (let j = j0; j <= j1; j++) {
     const y = j * cs, dy = y - pc.y;
@@ -431,34 +484,6 @@ function blurGrid(a, w, h) {
     t[j * w + i] = s / n;
   }
   a.set(t);
-}
-/** A small CPU copy of the photo, used to read colours for “Protect hair & background”. */
-function ensurePix() {
-  if (S.pix && S.pix.rec === S.imgRec) return S.pix;
-  const sc = Math.min(1, 768 / Math.max(S.iw, S.ih));
-  const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.round(S.iw * sc)); c.height = Math.max(1, Math.round(S.ih * sc));
-  const g = c.getContext('2d', { willReadFrequently: true });
-  g.drawImage(S.img, 0, 0, c.width, c.height);
-  S.pix = { rec: S.imgRec, data: g.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, sc };
-  return S.pix;
-}
-function colorAt(x, y) {
-  const P_ = S.pix;
-  if (!P_) return [0, 0, 0];
-  const i = clamp(Math.round(x * P_.sc), 0, P_.w - 1), j = clamp(Math.round(y * P_.sc), 0, P_.h - 1), k = (j * P_.w + i) * 4;
-  return [P_.data[k], P_.data[k + 1], P_.data[k + 2]];
-}
-/** Average skin colour under the brush centre at the start of a stroke. */
-function strokeRef(v) {
-  ensurePix();
-  const { pc, R } = brushAt(v), acc = [0, 0, 0];
-  const pts = [[0, 0], ...Array.from({ length: 8 }, (_, i) => [Math.cos(i / 8 * TAU) * .18, Math.sin(i / 8 * TAU) * .18])];
-  for (const [ox, oy] of pts) {
-    const s = pToS({ x: pc.x + ox * R, y: pc.y + oy * R }), c = colorAt(s.x, s.y);
-    acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2];
-  }
-  return acc.map(v_ => v_ / pts.length);
 }
 const brushV = () => cfg.mSize * Math.max(S.iw, S.ih);   // brush radius in view px
 function brushAt(v) {
@@ -1104,6 +1129,8 @@ function ensureGLImage() {
   GLR.setImage(c, c.width, c.height);
   S.fieldDirty = true;
 }
+const levelsActive = () => S.tool === 'morph' && cfg.mLevels && !!S.adj.ell && !!GLR;
+const showLevelsNow = () => levelsActive() && cfg.mShowLevels && !S.compare && !S.stroke;
 function glParams(view, d, cw, ch, alpha) {
   const a = S.adj, e = a.ell;
   return {
@@ -1111,6 +1138,7 @@ function glParams(view, d, cw, ch, alpha) {
     rot: a.rot / DEG, scale: scaleXY(a), trans: [a.tx, a.ty],
     ell: e ? [e.cx, e.cy, e.ax, e.ay] : null, lensD: lensD(), zref: ZREF,
     morph: !!S.warp.field && !S.compare, cell: S.warp.cs, alpha,
+    levels: showLevelsNow() ? levelRegions() : null,
   };
 }
 function drawImageLayer(dt) {
@@ -1173,15 +1201,41 @@ function drawBrush(ctx, c) {
 /* Face frame lives in P (original photo) space: origin between nasion and menton,
    ax = half the bizygomatic width, ay = half the nasion–menton height. */
 const pToScreen = p => toS(uToV(pToU(p)));
+// In Morph the frame follows the photo content (source space); in Adjust it lives in lens space.
+const frameToScreen = p => S.tool === 'morph' ? toS(invMap(p)) : pToScreen(p);
+const viewToFrame = v => S.tool === 'morph' ? fwdMap(v) : uToP(vToU(v));
 /** Screen positions of the face-frame handles (centre, cheekbone side, chin). */
 function ellHandles() {
   const e = S.adj.ell;
   if (!e) return [];
   return [
-    { id: 'c', p: pToScreen({ x: e.cx, y: e.cy }) },
-    { id: 'x', p: pToScreen({ x: e.cx + e.ax, y: e.cy }) },
-    { id: 'y', p: pToScreen({ x: e.cx, y: e.cy + e.ay }) },
+    { id: 'c', p: frameToScreen({ x: e.cx, y: e.cy }) },
+    { id: 'x', p: frameToScreen({ x: e.cx + e.ax, y: e.cy }) },
+    { id: 'y', p: frameToScreen({ x: e.cx, y: e.cy + e.ay }) },
   ];
+}
+/** Face outline, modelled head outline and the three handles. */
+function drawFaceFrame(ctx) {
+  const e = S.adj.ell;
+  if (!e) return;
+  const blue = getComputedStyle(root).getPropertyValue('--blue').trim() || '#7EA6FF';
+  const fr = (X, Y) => frameToScreen({ x: e.cx + X * e.ax, y: e.cy + Y * e.ay });
+  ctx.save();
+  outline(ctx, t => fr(1.3 * Math.cos(t), -.95 + 2 * Math.sin(t)));
+  ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(blue, .4); ctx.lineWidth = 1; ctx.stroke();
+  outline(ctx, t => fr(Math.cos(t), Math.sin(t)));
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = rgba(blue, .9); ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.setLineDash([]);
+  for (const h of ellHandles()) {
+    const hov = S.hdrag ? S.hdrag.id === h.id : (S.hoverHandle === h.id);
+    ctx.beginPath(); ctx.arc(h.p.x, h.p.y, hov ? 6 : 4.5, 0, TAU);
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(h.p.x, h.p.y, hov ? 5 : 3.6, 0, TAU);
+    ctx.fillStyle = h.id === 'c' ? '#FFFFFF' : blue; ctx.fill();
+  }
+  ctx.restore();
 }
 /** Image-transform handles in screen space: the four corners and the rotate knob. */
 function xfHandles() {
@@ -1214,24 +1268,7 @@ function drawAdjustGuides(ctx) {
   ctx.setLineDash([]);
 
   // face + modelled head outline used by the lens correction
-  const e = S.adj.ell;
-  if (e && S.adj.lens > 0) {
-    const fr = (X, Y) => pToScreen({ x: e.cx + X * e.ax, y: e.cy + Y * e.ay });
-    outline(ctx, t => fr(1.3 * Math.cos(t), -.95 + 2 * Math.sin(t)));
-    ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(blue, .4); ctx.lineWidth = 1; ctx.stroke();
-    outline(ctx, t => fr(Math.cos(t), Math.sin(t)));
-    ctx.setLineDash([5, 5]);
-    ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 3; ctx.stroke();
-    ctx.strokeStyle = rgba(blue, .9); ctx.lineWidth = 1.3; ctx.stroke();
-    ctx.setLineDash([]);
-    for (const h of ellHandles()) {
-      const hov = S.hdrag ? S.hdrag.id === h.id : (S.hoverHandle === h.id);
-      ctx.beginPath(); ctx.arc(h.p.x, h.p.y, hov ? 6 : 4.5, 0, TAU);
-      ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fill();
-      ctx.beginPath(); ctx.arc(h.p.x, h.p.y, hov ? 5 : 3.6, 0, TAU);
-      ctx.fillStyle = h.id === 'c' ? '#FFFFFF' : blue; ctx.fill();
-    }
-  }
+  if (S.adj.ell && S.adj.lens > 0) drawFaceFrame(ctx);
 
   // transform frame: corners stretch, knob / outside a corner rotates
   const { C, top, knob } = xfHandles(), hz = S.tdrag ? S.tdrag.zone : S.hoverXf;
@@ -1314,7 +1351,8 @@ function drawOverlay(t, dt) {
   }
 
   if (S.tool === 'adjust') drawAdjustGuides(ctx);
-  if (S.tool === 'morph' && S.cursorIn && S.cursor && !S.pan && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
+  if (S.tool === 'morph' && levelsActive() && !S.stroke) drawFaceFrame(ctx);
+  if (S.tool === 'morph' && S.cursorIn && S.cursor && !S.pan && !S.hdrag && !S.hoverHandle && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
 
   const overNode = S.hover && S.hover.node >= 0 && !S.draft;
   const placing = S.cursorIn && S.cursor && canPlace() && !S.drag && !S.pan && !(S.press && S.press.moved) && !overNode;
@@ -1543,7 +1581,7 @@ function refreshCursor() {
   else if (S.drag || S.pan || S.hdrag || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
   else if (S.box) c = 'crosshair';
   else if (S.space) c = 'grab';
-  else if (S.tool === 'morph') c = 'none';
+  else if (S.tool === 'morph') c = S.hoverHandle ? 'grab' : 'none';
   else if (S.tool === 'adjust') c = S.hoverHandle ? 'grab' : 'default';
   else if (S.hover && S.hover.node >= 0) c = 'grab';
   else if (S.hover && selectMode()) c = 'move';
@@ -1552,7 +1590,7 @@ function refreshCursor() {
   if (ov._c !== c) { ov._c = c; ov.style.cursor = c; }
 }
 function handleAt(sx, sy) {
-  if (S.tool !== 'adjust' || !(S.adj.lens > 0)) return null;
+  if (!((S.tool === 'adjust' && S.adj.lens > 0) || levelsActive())) return null;
   for (const h of ellHandles()) if (Math.hypot(h.p.x - sx, h.p.y - sy) <= 11) return h.id;
   return null;
 }
@@ -1637,7 +1675,12 @@ ov.addEventListener('pointerdown', e => {
     S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // tools unavailable: drag just pans
     return;
   }
-  if (S.tool === 'morph') { startStroke(sx, sy); return; }
+  if (S.tool === 'morph') {
+    const h = handleAt(sx, sy);
+    if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
+    startStroke(sx, sy);
+    return;
+  }
   if (S.tool === 'adjust') {
     const h = handleAt(sx, sy);
     if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
@@ -1744,8 +1787,15 @@ function startStroke(sx, sy) {
   const snap = snapshot();
   beginStroke();
   const v = toI(sx, sy);
-  S.stroke = { last: v, snap, changed: false, ref: cfg.mProtect ? strokeRef(v) : null };
+  S.stroke = { last: v, snap, changed: false, lvl: null, regions: null };
+  if (cfg.mLevels && S.adj.ell) {
+    // remember which layer the stroke starts on (read from the content under the brush centre)
+    const regions = levelRegions();
+    S.stroke.regions = regions;
+    S.stroke.lvl = levelAt(pToS(brushAt(v).pc), regions);
+  }
   if (cfg.mMode !== 'push') dabHere(1 / 60);
+  S.glDirty = true;
   wake();
 }
 /** Bloat / pinch / restore build up while the button is held. */
@@ -1762,13 +1812,14 @@ function endStroke() {
   if (!st) return;
   if (st.changed) pushUndo(st.snap);
   else { S.warp = st.snap.warp; S.fieldDirty = true; }
+  S.glDirty = true;
   syncUI();
 }
 /* face-outline handles (Adjust → lens) */
 function moveHandle(v) {
   const e = S.adj.ell;
   if (!e) return;
-  const p = uToP(vToU(v));   // the face frame lives on the original photo
+  const p = viewToFrame(v);
   if (S.hdrag.id === 'c') { e.cx = p.x; e.cy = p.y; }
   else if (S.hdrag.id === 'x') e.ax = Math.max(8, Math.hypot(p.x - e.cx, p.y - e.cy));
   else e.ay = Math.max(8, Math.hypot(p.x - e.cx, p.y - e.cy));
@@ -1955,7 +2006,8 @@ addEventListener('keydown', e => {
   if (k === 'b') { if (!e.repeat) setCompare(true); return; }
   switch (e.key) {
     case 'Escape':
-      if (calibCtx) closeCalib(false);
+      if (newPop.classList.contains('open')) closeNewPop();
+      else if (calibCtx) closeCalib(false);
       else if (S.draft) cancelDraft(true);
       else if (S.tool !== 'move') setTool('move');
       else if (S.picked.size) { S.picked.clear(); syncUI(); }
@@ -1994,7 +2046,10 @@ function loadFile(file) {
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => {
-    pushUndo();   // loading an image is undoable — the previous image and its measurements come back
+    // Swapping images is undoable (the previous image and its measurements come back),
+    // but the very first image is the starting point — Ctrl+Z never takes you back to the empty page.
+    if (S.img) pushUndo();
+    closeNewPop();
     setImageState({ img, url, iw: img.naturalWidth, ih: img.naturalHeight });
     S.meas = new Map();
     S.refId = null; S.calibId = null;
@@ -2023,7 +2078,6 @@ function setImageState(rec) {
   Object.assign(S, { img: rec.img, iw: rec.iw, ih: rec.ih, imgA: 0, stroke: null, hdrag: null, compare: false });
   S.adj = DEFAULT_ADJ();
   initWarp();
-  S.pix = null;
   S.fieldDirty = true; S.glDirty = true;
   body.classList.add('has-img');
   fitView(true);
@@ -2034,12 +2088,46 @@ function setImageState(rec) {
 $('#btnBrowse').addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
 $('#dropZone').addEventListener('click', () => fileInput.click());
 $('#dropZone').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
-$('#btnNew').addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => { if (fileInput.files[0]) loadFile(fileInput.files[0]); fileInput.value = ''; });
+
+/* "New" — a small panel with drop zone, browse and paste */
+const newPop = $('#newPop');
+function openNewPop() {
+  const r = $('#btnNew').getBoundingClientRect();
+  newPop.style.top = (r.bottom + 8) + 'px';
+  newPop.style.left = clamp(r.right - 280, 8, W - 288) + 'px';
+  newPop.classList.add('open');
+}
+function closeNewPop() { if (newPop) newPop.classList.remove('open'); }
+$('#btnNew').addEventListener('click', e => { e.stopPropagation(); newPop.classList.contains('open') ? closeNewPop() : openNewPop(); });
+document.addEventListener('pointerdown', e => { if (newPop.classList.contains('open') && !e.target.closest('#newPop, #btnNew')) closeNewPop(); });
+$('#newDrop').addEventListener('click', () => fileInput.click());
+$('#newDrop').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
+$('#newBrowse').addEventListener('click', () => fileInput.click());
+$('#newPaste').addEventListener('click', pasteFromClipboard);
+$('#btnPaste').addEventListener('click', e => { e.stopPropagation(); pasteFromClipboard(); });
+/** Read an image straight from the clipboard (needs a click; the browser may ask for permission). */
+async function pasteFromClipboard() {
+  if (!navigator.clipboard || !navigator.clipboard.read) { toast('Press Ctrl V to paste — this browser can’t read the clipboard from a button'); return; }
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find(t => /^image\//.test(t));
+      if (type) { const blob = await item.getType(type); loadFile(new File([blob], 'pasted', { type })); return; }
+    }
+    toast('No image on the clipboard — copy one first');
+  } catch (err) {
+    toast('Clipboard access was blocked — press Ctrl V instead');
+  }
+}
 
 let dragDepth = 0;
 const hasFiles = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
-addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; body.classList.add('dragging'); });
+addEventListener('dragenter', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth++;
+  body.classList.add('dragging');
+  $('#newDrop').classList.toggle('over', !!(e.target.closest && e.target.closest('#newDrop')));
+});
 addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
 addEventListener('dragleave', e => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) body.classList.remove('dragging'); });
 addEventListener('drop', e => {
@@ -2075,7 +2163,7 @@ async function exportPNG() {
     // render the edited photo at full resolution (scaled only if the GPU can't fit it)
     const sc = Math.min(1, GLR.maxView[0] / iw, GLR.maxView[1] / ih, 8192 / Math.max(iw, ih));
     const cw = Math.round(iw * sc), ch = Math.round(ih * sc);
-    GLR.render({ ...glParams({ x: 0, y: 0, k: sc }, 1, cw, ch, 1), morph: !!S.warp.field });
+    GLR.render({ ...glParams({ x: 0, y: 0, k: sc }, 1, cw, ch, 1), morph: !!S.warp.field, levels: null });
     ctx.drawImage(glcv, 0, 0, cw, ch, 0, 0, iw, ih);
     imgKey = ''; S.glDirty = true;   // restore the on-screen render next frame
   } else ctx.drawImage(S.img, 0, 0);
@@ -2196,6 +2284,7 @@ function setTool(t) {
   S.tool = t;
   if (t !== 'move' && !EDIT_TOOLS.has(t) && S.sel.length) { S.sel = []; S.active = null; }
   if (EDIT_TOOLS.has(t)) S.picked.clear();
+  S.glDirty = true;
   renderToolOpts();
   syncUI();
 }
@@ -2233,33 +2322,57 @@ function renderToolOpts() {
       ${sliderRow('mSize', 'Size', 1, 50, .1)}
       ${sliderRow('mStrength', 'Strength', 1, 100, 1)}
       ${sliderRow('mHard', 'Hardness', 0, 100, 1)}
-      <div class="to-actions">
-        <button type="button" class="btn ghost sm" id="mCompare">Hold to compare</button>
-        <button type="button" class="btn ghost sm" id="mReset">Reset morph</button>
+      <div class="to-confirm" id="mPending">
+        <span class="to-status" id="mStatus"></span>
+        <div class="to-actions" style="margin-top:8px">
+          <button type="button" class="btn sm" id="mConfirm">Confirm</button>
+          <button type="button" class="btn ghost sm" id="mReset">Reset</button>
+          <button type="button" class="btn ghost sm" id="mCompare">Hold to compare</button>
+        </div>
       </div>
       <div class="to-group">
-        <div class="to-beta"><span>Beta</span>for big reshapes like pushing the cheekbones out</div>
-        <label class="tg sm"><span>Protect hair &amp; background<small>Only drags areas that match the skin under the brush, so hair and background stay put</small></span><input type="checkbox" class="sw-toggle" id="mProtect"></label>
-        <label class="tg sm"><span>Limit stretching<small>Stops a push once any area would stretch or squash past ≈ 1.7× — never smears, but moves less. With both on, the hair edge limits how far skin can push into it</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>
+        <div class="to-beta"><span>Beta</span>for bigger reshapes</div>
+        <label class="tg sm"><span>Stay on level<small>Treats the head as layers — face &amp; forehead with the hairline, eyes, nose, lips, and the sides / hair behind — and mainly moves the layer you start on</small></span><input type="checkbox" class="sw-toggle" id="mLevels"></label>
+        <div id="mLevelOpts">
+          ${sliderRow('mStrict', 'Strictness', 0, 100, 1, 'How strongly other layers are protected')}
+          <label class="tg sm"><span>Show levels<small>Tint the layers on the photo. Drag the blue dots to fit the face; eyes, nose and lips snap to your landmarks</small></span><input type="checkbox" class="sw-toggle" id="mShowLevels"></label>
+          <div class="to-actions" style="margin-top:2px"><button type="button" class="btn ghost sm" id="mFit">Fit levels to face</button></div>
+        </div>
+        <label class="tg sm"><span>Limit stretching<small>Stops a push once any area would stretch or squash past ≈ 1.7× — never smears, but moves less</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>
       </div>
       <p class="to-note" style="margin-top:10px">Drag on the photo · <kbd>[</kbd> <kbd>]</kbd> brush size · hold <kbd>B</kbd> to compare</p>`;
     $('#mMode').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mMode = b.dataset.v; saveCfg(); syncToolOpts(); renderHint(); } });
-    $('#mProtect').addEventListener('change', e => { cfg.mProtect = e.target.checked; saveCfg(); });
     $('#mLimit').addEventListener('change', e => { cfg.mLimit = e.target.checked; saveCfg(); });
+    $('#mLevels').addEventListener('change', e => {
+      cfg.mLevels = e.target.checked; saveCfg();
+      if (cfg.mLevels && !S.adj.ell) S.adj.ell = guessFace();   // levels need a face frame
+      S.glDirty = true; syncToolOpts(); wake();
+    });
+    $('#mShowLevels').addEventListener('change', e => { cfg.mShowLevels = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
+    $('#mFit').addEventListener('click', () => { pushUndo(); S.adj.ell = guessFace(); S.glDirty = true; syncPts(); syncUI(); toast(landmark('Zygion · left', 'Face edge · left') ? 'Levels fitted from your landmarks' : 'Levels centred — drag the blue dots to fit the face'); });
     const bind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncToolOpts(); wake(); });
     bind('mSize', 'mSize', v => v / 100);
     bind('mStrength', 'mStrength', v => v / 100);
     bind('mHard', 'mHard', v => v / 100);
+    bind('mStrict', 'mLevelStrict', v => v / 100);
     const cmp = $('#mCompare');
     cmp.addEventListener('pointerdown', () => setCompare(true));
     ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => cmp.addEventListener(ev, () => setCompare(false)));
-    $('#mReset').addEventListener('click', () => {
-      if (!S.warp.field) return;
+    // Confirm bakes the current morph; Reset only discards changes made since the last confirm.
+    $('#mConfirm').addEventListener('click', () => {
+      if (!morphPending()) return;
       pushUndo();
-      S.warp = { ...S.warp, field: null };
+      S.warp = { ...S.warp, base: S.warp.field };
+      syncUI();
+      toast('Morph confirmed');
+    });
+    $('#mReset').addEventListener('click', () => {
+      if (!morphPending()) return;
+      pushUndo();
+      S.warp = { ...S.warp, field: S.warp.base || null };
       S.fieldDirty = true;
       syncPts(); syncUI();
-      toast('Morph reset');
+      toast('Unconfirmed changes discarded');
     });
   } else {
     toolOptsBody.innerHTML = `
@@ -2333,8 +2446,16 @@ function syncToolOpts() {
     setRange('mSize', +(cfg.mSize * 100).toFixed(1), Math.round(brushV()) + ' px');
     setRange('mStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
     setRange('mHard', Math.round(cfg.mHard * 100), Math.round(cfg.mHard * 100) + '%');
-    $('#mReset').disabled = !S.warp.field;
-    $('#mProtect').checked = !!cfg.mProtect;
+    const pending = morphPending();
+    $('#mConfirm').disabled = !pending;
+    $('#mReset').disabled = !pending;
+    $('#mPending').classList.toggle('pending', pending);
+    setText($('#mStatus'), pending ? 'Unconfirmed changes' : S.warp.field ? 'All changes confirmed' : 'No morph yet');
+    $('#mLevels').checked = !!cfg.mLevels;
+    $('#mShowLevels').checked = !!cfg.mShowLevels;
+    $('#mLevelOpts').hidden = !cfg.mLevels;
+    const sv = Math.round(cfg.mLevelStrict * 100);
+    setRange('mStrict', sv, sv < 34 ? 'loose' : sv < 67 ? 'medium' : 'strict');
     $('#mLimit').checked = !!cfg.mLimit;
   } else if (toolOptsFor === 'adjust') {
     const a = S.adj;
@@ -2892,6 +3013,6 @@ requestAnimationFrame(frame);
 if (STALE) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, gpu: () => (GLR ? 'webgl2' : GL_REASON) };
+window.cranimeter = { loadFile, state: S, build: BUILD, gpu: () => (GLR ? 'webgl2' : GL_REASON), levelAt: s => levelAt(s, levelRegions()) };
 
 })();
