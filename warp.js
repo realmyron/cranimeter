@@ -4,7 +4,8 @@
    Draws the photo through the full geometric pipeline in one pass:
 
      screen → view space V → (rotate / zoom / flip)⁻¹ → U
-            → lens re-projection → P → morph displacement field → source S
+            → lens re-projection → P → free-brush displacement field
+            → face map (face layer over head / background layer) → source S
 
    Every frame samples the ORIGINAL photo, so edits never stack resampling
    blur. Magnified areas use a sharp Catmull-Rom bicubic filter; minified
@@ -39,32 +40,29 @@ uniform vec2  uTrans;       // translation (view px)
 uniform vec4  uEll;         // face frame: origin x, y, half bizygomatic, half nasion–menton (P space)
 uniform float uLensD;       // camera distance in cm (0 = off)
 uniform float uAlpha;
-uniform float uShowLevels;  // tint the morph "levels" (0 = off)
-uniform vec4  uEyeL, uEyeR, uNose, uMouth;   // feature regions (source px): cx, cy, rx, ry
+// ---- face map: two deformation layers, face composited over head/background ----
+uniform int   uMapOn;       // 0 off · 1 on · 2 layers shown but not moved (tint only)
+uniform sampler2D uMap;     // RGBA32F grid: source position for the face layer (rg) and the back layer (ba)
+uniform ivec2 uMapN;
+uniform float uMapCell;
+uniform sampler2D uMask;    // face-layer mask in source space
+uniform float uShowLayers;
 out vec4 outColor;
 
-// ---- morph levels (keep in sync with levelAt() in app.js) ----
-// 0 = sides / hair behind the head / background · 1 = front surface (face, forehead, hairline, crown)
-// 2.2 = eyes · 3 = nose · 3.8 = lips
-float softIn(float r) { return 1.0 - smoothstep(0.92, 1.08, r); }
-float levelAt(vec2 s) {
-  vec2 q = (s - uEll.xy) / uEll.zw;
-  // squarish face shape: full width from brow to jaw, tapering to the chin
-  vec2 o = abs(vec2(q.x / 1.12, (q.y + 0.1) / 1.18));
-  float oval = softIn(pow(pow(o.x, 4.0) + pow(o.y, 4.0), 0.25));
-  float cap = softIn(length(vec2(q.x / 1.3, (q.y + 0.95) / 2.0))) * (1.0 - smoothstep(-1.0, -0.7, q.y));
-  float front = max(oval, cap);
-  float eye = max(softIn(length((s - uEyeL.xy) / uEyeL.zw)), softIn(length((s - uEyeR.xy) / uEyeR.zw)));
-  float nose = softIn(length((s - uNose.xy) / uNose.zw));
-  float mouth = softIn(length((s - uMouth.xy) / uMouth.zw));
-  return front * (1.0 + max(eye * 1.2, max(nose * 2.0, mouth * 2.8)));
-}
-vec3 levelColor(float l) {
-  vec3 c0 = vec3(0.30, 0.38, 0.82), c1 = vec3(0.22, 0.80, 0.72), c2 = vec3(0.98, 0.78, 0.32), c3 = vec3(0.97, 0.47, 0.62), c4 = vec3(0.66, 0.50, 0.98);
-  if (l < 1.0) return mix(c0, c1, l);
-  if (l < 2.2) return mix(c1, c2, (l - 1.0) / 1.2);
-  if (l < 3.0) return mix(c2, c3, (l - 2.2) / 0.8);
-  return mix(c3, c4, clamp((l - 3.0) / 0.8, 0.0, 1.0));
+vec4 mapAt(vec2 x) {
+  vec2 f = x / uMapCell;
+  vec2 fl = floor(f);
+  vec2 t = f - fl;
+  ivec2 i0 = clamp(ivec2(fl), ivec2(0), uMapN - 1);
+  ivec2 i1 = clamp(ivec2(fl) + 1, ivec2(0), uMapN - 1);
+  vec4 a = texelFetch(uMap, ivec2(i0.x, i0.y), 0);
+  vec4 b = texelFetch(uMap, ivec2(i1.x, i0.y), 0);
+  vec4 c = texelFetch(uMap, ivec2(i0.x, i1.y), 0);
+  vec4 d = texelFetch(uMap, ivec2(i1.x, i1.y), 0);
+  // outside the grid, carry on with the edge's offset
+  vec4 r = mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+  vec2 xe = clamp(x, vec2(0.0), vec2(uMapN - 1) * uMapCell);
+  return r + vec4(x - xe, x - xe);
 }
 
 vec2 fieldAt(vec2 p) {
@@ -150,25 +148,67 @@ void main() {
   vec2 u = c0 + vec2(uRot.x * dv.x + uRot.y * dv.y, -uRot.y * dv.x + uRot.x * dv.y) / uScale;
 
   vec2 p = lensUP(u);
-  vec2 s = p;
-  if (uMorph == 1) s += fieldAt(p);
+  vec2 x = p;
+  if (uMorph == 1) x += fieldAt(p);           // free-brush field
 
-  vec2 uv = s / uSize;
+  // face map layers (identity when off)
+  vec2 sb = x, sf = x;
+  if (uMapOn == 1) { vec4 s = mapAt(x); sf = s.rg; sb = s.ba; }
+  bool layered = uMapOn != 0;
+
   // derivatives first (must be taken in uniform control flow)
-  vec2 dsx = dFdx(s), dsy = dFdy(s);
-  vec2 duvx = dFdx(uv), duvy = dFdy(uv);
-  float foot = max(length(dsx), length(dsy));                      // source px per screen px
-  float rho = max(length(duvx * uTexSize), length(duvy * uTexSize));
-  float lod = log2(max(rho, 1e-6));
+  vec2 uvb = sb / uSize, uvf = sf / uSize;
+  vec2 dbx = dFdx(uvb), dby = dFdy(uvb), dfx = dFdx(uvf), dfy = dFdy(uvf);
+  vec2 sbx = dFdx(sb), sby = dFdy(sb), sfx = dFdx(sf), sfy = dFdy(sf);
+  float lodb = log2(max(max(length(dbx * uTexSize), length(dby * uTexSize)), 1e-6));
+  float lodf = log2(max(max(length(dfx * uTexSize), length(dfy * uTexSize)), 1e-6));
+  float footb = max(length(sbx), length(sby)), footf = max(length(sfx), length(sfy));
 
-  float edge = min(min(s.x, s.y), min(uSize.x - s.x, uSize.y - s.y));
-  float a = clamp(edge / max(foot, 1e-4) + 0.5, 0.0, 1.0);          // anti-aliased photo border
+  float m = layered ? texture(uMask, uvf).r : 0.0;     // is the face layer here?
 
-  vec4 cubic = bicubic(uv);
-  vec4 tri = textureGrad(uImg, uv, duvx, duvy);
-  vec4 col = mix(cubic, tri, smoothstep(0.0, 0.7, lod));
-  if (uShowLevels > 0.0) col.rgb = mix(col.rgb, levelColor(levelAt(s)) * col.a, 0.42 * uShowLevels);
+  vec4 colb = mix(bicubic(uvb), textureGrad(uImg, uvb, dbx, dby), smoothstep(0.0, 0.7, lodb));
+  vec4 col = colb;
+  float edgeB = min(min(sb.x, sb.y), min(uSize.x - sb.x, uSize.y - sb.y));
+  float a = clamp(edgeB / max(footb, 1e-4) + 0.5, 0.0, 1.0);   // anti-aliased photo border
+  if (uMapOn == 1) {
+    vec4 colf = mix(bicubic(uvf), textureGrad(uImg, uvf, dfx, dfy), smoothstep(0.0, 0.7, lodf));
+    float edgeF = min(min(sf.x, sf.y), min(uSize.x - sf.x, uSize.y - sf.y));
+    float af = clamp(edgeF / max(footf, 1e-4) + 0.5, 0.0, 1.0);
+    col = mix(colb, colf, m);
+    a = mix(a, af, m);
+  }
+  if (layered && uShowLayers > 0.0) {
+    vec3 tint = mix(vec3(0.33, 0.42, 0.86), vec3(0.25, 0.82, 0.72), m);
+    col.rgb = mix(col.rgb, tint * col.a, 0.32 * uShowLayers);
+  }
   outColor = col * (a * uAlpha);
+}`;
+
+// Pre-pass: evaluates both face-map layers (thin-plate splines fitted in facemap.js) once per
+// grid node, so each frame only interpolates the grid.
+const MAP_FS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uCtrl;    // row 0: face layer, row 1: back layer — (centre x, y, weight x, y), in units of uS
+uniform int   uNF, uNB;
+uniform vec3  uAF[2], uAB[2];   // affine parts (x and y rows)
+uniform float uS;
+uniform float uMapCell;
+out vec4 outMap;
+vec2 tps(int row, int n, vec3 ax, vec3 ay, vec2 v) {
+  vec2 X = v / uS;
+  vec2 d = vec2(ax.x + ax.y * X.x + ax.z * X.y, ay.x + ay.y * X.x + ay.z * X.y);
+  for (int i = 0; i < 2048; i++) {
+    if (i >= n) break;
+    vec4 c = texelFetch(uCtrl, ivec2(i, row), 0);
+    vec2 e = X - c.xy; float r2 = dot(e, e);
+    if (r2 > 1e-12) d += c.zw * (0.5 * r2 * log(r2));
+  }
+  return v + d * uS;
+}
+void main() {
+  vec2 v = (gl_FragCoord.xy - 0.5) * uMapCell;
+  outMap = vec4(tps(0, uNF, uAF[0], uAF[1], v), tps(1, uNB, uAB[0], uAB[1], v));
 }`;
 
 function createRenderer(canvas) {
@@ -184,16 +224,26 @@ function createRenderer(canvas) {
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.warn(gl.getShaderInfoLog(s)); return null; }
     return s;
   };
-  const vs = sh(gl.VERTEX_SHADER, VS), fs = sh(gl.FRAGMENT_SHADER, FS);
-  if (!vs || !fs) return null;
-  const prog = gl.createProgram();
-  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.warn(gl.getProgramInfoLog(prog)); return null; }
+  const link = (vs, fs) => {
+    if (!vs || !fs) return null;
+    const pr = gl.createProgram();
+    gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) { console.warn(gl.getProgramInfoLog(pr)); return null; }
+    return pr;
+  };
+  const vs = sh(gl.VERTEX_SHADER, VS);
+  const prog = link(vs, sh(gl.FRAGMENT_SHADER, FS));
+  if (!prog) return null;
+  // rendering the map grid needs float render targets; without them app.js fills the grid on the CPU
+  const floatRT = !!gl.getExtension('EXT_color_buffer_float');
+  const mapProg = floatRT ? link(vs, sh(gl.FRAGMENT_SHADER, MAP_FS)) : null;
 
   const U = {};
   ['uImg', 'uTexSize', 'uSize', 'uField', 'uFieldN', 'uCell', 'uMorph', 'uView', 'uDpr', 'uCanvasH',
    'uRot', 'uScale', 'uTrans', 'uEll', 'uLensD', 'uZref', 'uAlpha',
-   'uShowLevels', 'uEyeL', 'uEyeR', 'uNose', 'uMouth'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+   'uMapOn', 'uMap', 'uMapN', 'uMapCell', 'uMask', 'uShowLayers'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+  const MU = {};
+  if (mapProg) ['uCtrl', 'uNF', 'uNB', 'uAF', 'uAB', 'uS', 'uMapCell'].forEach(n => { MU[n] = gl.getUniformLocation(mapProg, n); });
   const vao = gl.createVertexArray();
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
   const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
@@ -212,11 +262,60 @@ function createRenderer(canvas) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   };
   floatTex(zeroTex, 1, 1, new Float32Array(2));
+  const maskTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, maskTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const rgba32 = (tex, w, h, data) => {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  };
+  const mapTex = gl.createTexture(), ctrlTex = gl.createTexture(), mapFbo = gl.createFramebuffer();
+  rgba32(mapTex, 1, 1, new Float32Array(4));
+  let mapW = 1, mapH = 1, mapCell = 1;
 
   let texW = 1, texH = 1, fieldW = 0, fieldH = 0, hasField = false;
 
   return {
     canvas, maxTex, maxView,
+    /** True when the face-map grid can be computed on the GPU (computeMap); otherwise use setMapGrid. */
+    gpuMap: !!mapProg,
+    /**
+     * Evaluate both face-map layers on a gw × gh grid (cell = source px between nodes).
+     * F, B: thin-plate splines from CraniMap.tpsFit (same length unit s).
+     */
+    computeMap(F, B, gw, gh, cell) {
+      const n = Math.max(1, F.n, B.n), ctrl = new Float32Array(n * 2 * 4);
+      for (let i = 0; i < F.n; i++) ctrl.set([F.c[2 * i], F.c[2 * i + 1], F.w[2 * i], F.w[2 * i + 1]], 4 * i);
+      for (let i = 0; i < B.n; i++) ctrl.set([B.c[2 * i], B.c[2 * i + 1], B.w[2 * i], B.w[2 * i + 1]], 4 * (n + i));
+      rgba32(ctrlTex, n, 2, ctrl);
+      if (gw !== mapW || gh !== mapH) { rgba32(mapTex, gw, gh, null); mapW = gw; mapH = gh; }
+      mapCell = cell;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, mapFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, mapTex, 0);
+      gl.viewport(0, 0, gw, gh);
+      gl.useProgram(mapProg);
+      gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, ctrlTex); gl.uniform1i(MU.uCtrl, 3);
+      gl.uniform1i(MU.uNF, F.n); gl.uniform1i(MU.uNB, B.n);
+      gl.uniform3fv(MU.uAF, F.a); gl.uniform3fv(MU.uAB, B.a);
+      gl.uniform1f(MU.uS, F.s); gl.uniform1f(MU.uMapCell, cell);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    },
+    /** Upload a face-map grid computed elsewhere (Float32Array gw*gh*4: face x, y, back x, y). */
+    setMapGrid(data, gw, gh, cell) {
+      rgba32(mapTex, gw, gh, data);
+      mapW = gw; mapH = gh; mapCell = cell;
+    },
     /** Upload the photo (an image or canvas already scaled to fit maxTex). */
     setImage(src, w, h) {
       gl.bindTexture(gl.TEXTURE_2D, imgTex);
@@ -230,6 +329,12 @@ function createRenderer(canvas) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
       texW = w; texH = h;
+    },
+    /** Upload the face-layer mask (a canvas covering the photo, white = face). */
+    setMask(src) {
+      gl.bindTexture(gl.TEXTURE_2D, maskTex);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
     },
     /** Upload the morph field (Float32Array of gw*gh*2) — or null for none. */
     setField(data, gw, gh) {
@@ -272,9 +377,14 @@ function createRenderer(canvas) {
       gl.uniform4f(U.uEll, e[0], e[1], Math.max(1, e[2]), Math.max(1, e[3]));
       gl.uniform1f(U.uLensD, p.ell ? p.lensD : 0);
       gl.uniform1f(U.uZref, p.zref || 0);
-      const L = p.levels, r4 = (u, v) => gl.uniform4f(u, v.cx, v.cy, Math.max(1, v.rx), Math.max(1, v.ry));
-      gl.uniform1f(U.uShowLevels, L && p.ell ? 1 : 0);
-      if (L) { r4(U.uEyeL, L.eyeL); r4(U.uEyeR, L.eyeR); r4(U.uNose, L.nose); r4(U.uMouth, L.mouth); }
+      // face map: p.map = { moved (grid is current), showLayers } | null
+      const M = p.map;
+      gl.uniform1i(U.uMapOn, M ? (M.moved ? 1 : 2) : 0);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.uniform1i(U.uMask, 2);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, mapTex); gl.uniform1i(U.uMap, 3);
+      gl.uniform2i(U.uMapN, mapW, mapH);
+      gl.uniform1f(U.uMapCell, mapCell);
+      gl.uniform1f(U.uShowLayers, M && M.showLayers ? 1 : 0);
       gl.uniform1f(U.uAlpha, p.alpha == null ? 1 : p.alpha);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
@@ -283,5 +393,5 @@ function createRenderer(canvas) {
   };
 }
 
-window.CraniWarp = { createRenderer, build: '10' };
+window.CraniWarp = { createRenderer, build: '11' };
 })();
