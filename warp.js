@@ -39,7 +39,33 @@ uniform vec2  uTrans;       // translation (view px)
 uniform vec4  uEll;         // face frame: origin x, y, half bizygomatic, half nasion–menton (P space)
 uniform float uLensD;       // camera distance in cm (0 = off)
 uniform float uAlpha;
+uniform float uShowLevels;  // tint the morph "levels" (0 = off)
+uniform vec4  uEyeL, uEyeR, uNose, uMouth;   // feature regions (source px): cx, cy, rx, ry
 out vec4 outColor;
+
+// ---- morph levels (keep in sync with levelAt() in app.js) ----
+// 0 = sides / hair behind the head / background · 1 = front surface (face, forehead, hairline, crown)
+// 2.2 = eyes · 3 = nose · 3.8 = lips
+float softIn(float r) { return 1.0 - smoothstep(0.92, 1.08, r); }
+float levelAt(vec2 s) {
+  vec2 q = (s - uEll.xy) / uEll.zw;
+  // squarish face shape: full width from brow to jaw, tapering to the chin
+  vec2 o = abs(vec2(q.x / 1.12, (q.y + 0.1) / 1.18));
+  float oval = softIn(pow(pow(o.x, 4.0) + pow(o.y, 4.0), 0.25));
+  float cap = softIn(length(vec2(q.x / 1.3, (q.y + 0.95) / 2.0))) * (1.0 - smoothstep(-1.0, -0.7, q.y));
+  float front = max(oval, cap);
+  float eye = max(softIn(length((s - uEyeL.xy) / uEyeL.zw)), softIn(length((s - uEyeR.xy) / uEyeR.zw)));
+  float nose = softIn(length((s - uNose.xy) / uNose.zw));
+  float mouth = softIn(length((s - uMouth.xy) / uMouth.zw));
+  return front * (1.0 + max(eye * 1.2, max(nose * 2.0, mouth * 2.8)));
+}
+vec3 levelColor(float l) {
+  vec3 c0 = vec3(0.30, 0.38, 0.82), c1 = vec3(0.22, 0.80, 0.72), c2 = vec3(0.98, 0.78, 0.32), c3 = vec3(0.97, 0.47, 0.62), c4 = vec3(0.66, 0.50, 0.98);
+  if (l < 1.0) return mix(c0, c1, l);
+  if (l < 2.2) return mix(c1, c2, (l - 1.0) / 1.2);
+  if (l < 3.0) return mix(c2, c3, (l - 2.2) / 0.8);
+  return mix(c3, c4, clamp((l - 3.0) / 0.8, 0.0, 1.0));
+}
 
 vec2 fieldAt(vec2 p) {
   vec2 f = p / uCell;
@@ -141,6 +167,7 @@ void main() {
   vec4 cubic = bicubic(uv);
   vec4 tri = textureGrad(uImg, uv, duvx, duvy);
   vec4 col = mix(cubic, tri, smoothstep(0.0, 0.7, lod));
+  if (uShowLevels > 0.0) col.rgb = mix(col.rgb, levelColor(levelAt(s)) * col.a, 0.42 * uShowLevels);
   outColor = col * (a * uAlpha);
 }`;
 
@@ -165,7 +192,8 @@ function createRenderer(canvas) {
 
   const U = {};
   ['uImg', 'uTexSize', 'uSize', 'uField', 'uFieldN', 'uCell', 'uMorph', 'uView', 'uDpr', 'uCanvasH',
-   'uRot', 'uScale', 'uTrans', 'uEll', 'uLensD', 'uZref', 'uAlpha'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+   'uRot', 'uScale', 'uTrans', 'uEll', 'uLensD', 'uZref', 'uAlpha',
+   'uShowLevels', 'uEyeL', 'uEyeR', 'uNose', 'uMouth'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
   const vao = gl.createVertexArray();
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
   const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
@@ -244,6 +272,9 @@ function createRenderer(canvas) {
       gl.uniform4f(U.uEll, e[0], e[1], Math.max(1, e[2]), Math.max(1, e[3]));
       gl.uniform1f(U.uLensD, p.ell ? p.lensD : 0);
       gl.uniform1f(U.uZref, p.zref || 0);
+      const L = p.levels, r4 = (u, v) => gl.uniform4f(u, v.cx, v.cy, Math.max(1, v.rx), Math.max(1, v.ry));
+      gl.uniform1f(U.uShowLevels, L && p.ell ? 1 : 0);
+      if (L) { r4(U.uEyeL, L.eyeL); r4(U.uEyeR, L.eyeR); r4(U.uNose, L.nose); r4(U.uMouth, L.mouth); }
       gl.uniform1f(U.uAlpha, p.alpha == null ? 1 : p.alpha);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
@@ -252,5 +283,5 @@ function createRenderer(canvas) {
   };
 }
 
-window.CraniWarp = { createRenderer, build: '9' };
+window.CraniWarp = { createRenderer, build: '10' };
 })();
