@@ -348,8 +348,32 @@ body.has-img .panel { transform: none; opacity: 1; }
 .to-confirm.pending .to-status { color: var(--text); }
 .to-confirm.pending .to-status::before { background: var(--blue); box-shadow: 0 0 0 3px var(--sel); }
 .to-confirm .to-actions { margin-top: 8px; }
-#mLevelOpts { padding-left: 10px; margin: 0 0 4px; border-left: 1px solid var(--line); }
-#mLevelOpts[hidden] { display: none; }
+/* Morph sub-modes and the face-map steps */
+.seg.msub { margin-bottom: 12px; }
+.seg.msub button { white-space: nowrap; }
+.seg.msub button b {
+  display: inline-grid; place-items: center;
+  width: 15px; height: 15px; margin-right: 4px;
+  border-radius: 50%;
+  font: 600 9.5px var(--font);
+  color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-strong);
+  transition: color .2s, box-shadow .2s, background .2s;
+}
+.seg.msub button.on b { color: var(--blue); background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+#mPaneMap[hidden], #mPaneBrush[hidden], #mPaneReshape[hidden], #mPaneFree[hidden] { display: none; }
+#mMapStatus { margin: 0 0 8px; color: var(--text); }
+.to-steps { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 8px; }
+.to-steps li { display: flex; align-items: flex-start; gap: 3px; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.to-steps li span { margin-left: 5px; }
+.to-steps li b { color: var(--text); font-weight: 600; }
+.mdot {
+  flex: none; width: 9px; height: 9px; margin-top: 3px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .35);
+}
+.to-inline { display: inline-flex; margin-top: 6px; }
+#mQuick.on { background: var(--sel); color: var(--blue); box-shadow: inset 0 0 0 1px var(--sel-ring); }
 
 /* new-image popover */
 .popover.newpop { width: 280px; z-index: 35; }
