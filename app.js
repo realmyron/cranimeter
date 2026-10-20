@@ -7,6 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
+const BUILD = '8';   // must match <meta name="cranimeter-build"> in index.html and warp.js
 const { GROUPS, LANDMARKS } = window.CRANI;
 const P = {};
 GROUPS.forEach(g => g.items.forEach(it => { it.group = g.name; P[it.id] = it; }));
@@ -138,8 +139,31 @@ const imgcv = $('#imgcv'), ictx = imgcv.getContext('2d');
 const glcv = document.createElement('canvas');
 glcv.id = 'glcv'; glcv.setAttribute('aria-hidden', 'true');
 imgcv.after(glcv);
-const GLR = window.CraniWarp ? window.CraniWarp.createRenderer(glcv) : null;
+let GLR = null, GL_REASON = null;
+const pageBuild = (document.querySelector('meta[name="cranimeter-build"]') || {}).content;
+const STALE = pageBuild !== BUILD || (window.CraniWarp && window.CraniWarp.build !== BUILD);
+if (STALE) GL_REASON = 'stale';
+else if (!window.CraniWarp) GL_REASON = 'missing';
+else {
+  try { GLR = window.CraniWarp.createRenderer(glcv); } catch (e) { console.error(e); }
+  if (!GLR) GL_REASON = 'webgl';
+}
 if (GLR) imgcv.style.display = 'none'; else glcv.remove();
+const GL_MESSAGES = {
+  missing: 'warp.js didn’t load. Make sure warp.js is uploaded next to index.html, then hard-refresh (Ctrl + F5).',
+  stale: 'Your browser is mixing old and new files. Hard-refresh the page (Ctrl + F5, or ⌘ + Shift + R on a Mac).',
+  webgl: 'This browser couldn’t start WebGL 2. Turn on hardware acceleration (Chrome/Edge: Settings → System) or try another browser.',
+  broken: 'The GPU renderer stopped working for this image. Reload the page to try again.',
+};
+/** Turn the GPU path off (and keep the app running with plain 2D drawing). */
+function disableGL(reason) {
+  if (!GLR) return;
+  GLR = null; GL_REASON = reason;
+  glcv.remove(); imgcv.style.display = '';
+  imgKey = '';
+  if (EDIT_TOOLS.has(S.tool)) { toolOptsFor = null; renderToolOpts(); }
+  toast(GL_MESSAGES[reason], 7000);
+}
 const ov = $('#overlay'), octx = ov.getContext('2d');
 const bg = $('#bg'), bctx = bg.getContext('2d');
 const loupe = $('#loupe'), lctx = loupe.getContext('2d');
@@ -570,7 +594,7 @@ function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S
 /* -------------------------------------------------------- create/delete -- */
 
 function placeTarget() {
-  if (!S.img || EDIT_TOOLS.has(S.tool)) return null;
+  if (!S.img || EDIT_TOOLS.has(S.tool) || !(S.tool in KIND_N || S.tool === 'move')) return null;   // unknown tools never place points
   if (S.sel.length) {
     const pick = [S.active, ...S.sel].find(id => id && P[id] && S.sel.includes(id) && !S.meas.has(id));
     return pick ? { kind: P[pick].kind, preset: pick } : null;
@@ -976,15 +1000,21 @@ function drawImageLayer(dt) {
   if (S.img && S.imgA < 1) S.imgA = Math.min(1, S.imgA + dt * 2.4);
   const v = S.view;
   if (GLR) {
-    if (!S.img) { if (imgKey !== 'none') { imgKey = 'none'; GLR.clear(); } return; }
-    ensureGLImage();
-    if (S.fieldDirty) { S.fieldDirty = false; GLR.setField(S.warp.field, S.warp.gw, S.warp.gh); S.glDirty = true; }
-    const key = `${v.x.toFixed(2)}|${v.y.toFixed(2)}|${v.k.toFixed(6)}|${S.imgA.toFixed(3)}|${S.imgSeq}|${ov.width}x${ov.height}`;
-    if (key === imgKey && !S.glDirty) return;
-    imgKey = key; S.glDirty = false;
-    GLR.render(glParams(v, dpr, ov.width, ov.height, ease(S.imgA)));
-    if (S.imgA < 1) wake();
-    return;
+    try {
+      if (!S.img) { if (imgKey !== 'none') { imgKey = 'none'; GLR.clear(); } return; }
+      if (GLR.isLost()) { disableGL('broken'); return; }
+      ensureGLImage();
+      if (S.fieldDirty) { S.fieldDirty = false; GLR.setField(S.warp.field, S.warp.gw, S.warp.gh); S.glDirty = true; }
+      const key = `${v.x.toFixed(2)}|${v.y.toFixed(2)}|${v.k.toFixed(6)}|${S.imgA.toFixed(3)}|${S.imgSeq}|${ov.width}x${ov.height}`;
+      if (key === imgKey && !S.glDirty) return;
+      imgKey = key; S.glDirty = false;
+      GLR.render(glParams(v, dpr, ov.width, ov.height, ease(S.imgA)));
+      if (S.imgA < 1) wake();
+      return;
+    } catch (err) {
+      console.error(err);
+      disableGL('broken');
+    }
   }
   const key = S.img ? `${v.x.toFixed(2)}|${v.y.toFixed(2)}|${v.k.toFixed(6)}|${S.imgA.toFixed(3)}|${S.imgSeq}` : 'none';
   if (key === imgKey) return;
@@ -1416,6 +1446,10 @@ ov.addEventListener('pointerdown', e => {
     return;
   }
   if (e.button !== 0) return;
+  if (EDIT_TOOLS.has(S.tool) && !GLR) {
+    S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // tools unavailable: drag just pans
+    return;
+  }
   if (S.tool === 'morph') { startStroke(sx, sy); return; }
   if (S.tool === 'adjust') {
     const h = handleAt(sx, sy);
@@ -1918,7 +1952,7 @@ function toggleShowAll() {
 function setTool(t) {
   if (S.draft) { S.draft = null; S.draftM = null; }
   if (S.stroke) endStroke();
-  if (EDIT_TOOLS.has(t) && !GLR) { toast('Morph and Adjust need WebGL 2, which this browser doesn’t provide'); return; }
+  if (EDIT_TOOLS.has(t) && !GLR) toast(GL_MESSAGES[GL_REASON] || GL_MESSAGES.webgl, 7000);
   S.tool = t;
   if (t !== 'move' && !EDIT_TOOLS.has(t) && S.sel.length) { S.sel = []; S.active = null; }
   if (EDIT_TOOLS.has(t)) S.picked.clear();
@@ -1940,6 +1974,12 @@ function renderToolOpts() {
   if (t === toolOptsFor) { syncToolOpts(); return; }
   toolOptsFor = t;
   if (!t) return;
+  if (!GLR) {
+    toolOptsBody.innerHTML = `
+      <div class="to-head"><span class="to-title">${t === 'morph' ? 'Morph' : 'Adjust image'}</span><span class="to-sub">unavailable</span></div>
+      <p class="to-note">${esc(GL_MESSAGES[GL_REASON] || GL_MESSAGES.webgl)}</p>`;
+    return;
+  }
   if (t === 'morph') {
     toolOptsBody.innerHTML = `
       <div class="to-head"><span class="to-title">Morph</span><span class="to-sub">landmarks follow the face</span></div>
@@ -2413,11 +2453,11 @@ function renderHint() {
 }
 
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, ms = 2400) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2400);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms);
 }
 
 /* ---------------------------------------------------------------- sync -- */
@@ -2452,6 +2492,7 @@ function syncUI() {
   renderReadout();
   renderHint();
   refreshCursor();
+  if (toolOptsFor) syncToolOpts();
 }
 
 /* ------------------------------------------------------------- settings -- */
@@ -2544,15 +2585,20 @@ if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) $$('.mod-
 
 let lastT = now();
 function frame(t) {
+  // keep the loop alive no matter what — one bad frame must never freeze the app
+  requestAnimationFrame(frame);
   const dt = Math.min(0.05, Math.max(0, (t - lastT) / 1000));
   lastT = t;
-  stepView(dt);
-  if (S.stroke && cfg.mMode !== 'push') dabHere(dt);
-  drawImageLayer(dt);
-  drawGrid(dt);
-  if (S.img && t < S.awakeUntil) { drawOverlay(t, dt); updateValues(); }
-  else if (!S.img && S.leaving.length) S.leaving = [];
-  requestAnimationFrame(frame);
+  try {
+    stepView(dt);
+    if (S.stroke && cfg.mMode !== 'push') dabHere(dt);
+    drawImageLayer(dt);
+    drawGrid(dt);
+    if (S.img && t < S.awakeUntil) { drawOverlay(t, dt); updateValues(); }
+    else if (!S.img && S.leaving.length) S.leaving = [];
+  } catch (err) {
+    if (!frame.warned) { frame.warned = true; console.error(err); }
+  }
 }
 
 /* ---------------------------------------------------------------- init -- */
@@ -2565,8 +2611,9 @@ syncSettingsUI();
 syncUI();
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { wake(); if (settingsEl.classList.contains('open')) drawPreview(); });
 requestAnimationFrame(frame);
+if (STALE) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S };
+window.cranimeter = { loadFile, state: S, build: BUILD, gpu: () => (GLR ? 'webgl2' : GL_REASON) };
 
 })();
