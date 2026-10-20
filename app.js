@@ -21,8 +21,11 @@ const TOOLS = {
   tilt:     { title: 'Tilt',        help: 'Click two points. The angle is read against the horizontal; positive means the second point sits higher.' },
   segments: { title: 'Proportions', help: 'Click points along a feature, then press Enter, double-click or right-click to finish. Each segment is shown relative to the first.' },
   calib:    { title: 'Scale',       help: 'Draw across something of known size — the iris is about 11.7 mm — so rulers can also show millimetres.' },
+  morph:    { title: 'Morph',       help: 'Drag on the photo to reshape it. Landmarks stay attached to the face, so every ratio updates live as you morph.' },
+  adjust:   { title: 'Adjust image', help: 'Straighten, zoom and correct close-range lens distortion. Measurements stay attached to the face.' },
 };
-const TOOL_KEYS = { v: 'move', r: 'ruler', a: 'angle', t: 'tilt', s: 'segments', c: 'calib' };
+const TOOL_KEYS = { v: 'move', r: 'ruler', a: 'angle', t: 'tilt', s: 'segments', c: 'calib', m: 'morph', e: 'adjust' };
+const EDIT_TOOLS = new Set(['morph', 'adjust']);
 
 const FONT = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 const MONO = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
@@ -115,6 +118,7 @@ const DEFAULTS = {
   c1: '#7CCBF5', c2: '#F2A7C6', c3: '#F0CD6E',
   width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
+  mMode: 'push', mSize: .09, mStrength: .55, mHard: .25,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -130,6 +134,12 @@ const saveCfg = () => { try { localStorage.setItem(SKEY, JSON.stringify(cfg)); }
 const root = document.documentElement;
 const body = document.body;
 const imgcv = $('#imgcv'), ictx = imgcv.getContext('2d');
+// GPU renderer for the photo (needed for Morph and Adjust); falls back to plain 2D drawing.
+const glcv = document.createElement('canvas');
+glcv.id = 'glcv'; glcv.setAttribute('aria-hidden', 'true');
+imgcv.after(glcv);
+const GLR = window.CraniWarp ? window.CraniWarp.createRenderer(glcv) : null;
+if (GLR) imgcv.style.display = 'none'; else glcv.remove();
 const ov = $('#overlay'), octx = ov.getContext('2d');
 const bg = $('#bg'), bctx = bg.getContext('2d');
 const loupe = $('#loupe'), lctx = loupe.getContext('2d');
@@ -167,11 +177,164 @@ const S = {
   undo: [], redo: [],
   leaving: [],
   awakeUntil: 0,
+  // image edits: rotation (deg), zoom, flip, lens 0–100 and the face ellipse (U space)
+  adj: { rot: 0, zoom: 1, flip: 1, lens: 0, ell: null },
+  // morph displacement field over the photo (P space); field === null means no morph
+  warp: { field: null, gw: 1, gh: 1, cs: 1 },
+  scratch: null, stroke: null, hdrag: null, compare: false, adjSnap: null,
+  glDirty: true, fieldDirty: false,
 };
 const wake = (ms = 1200) => { S.awakeUntil = Math.max(S.awakeUntil, now() + ms); };
 
 const toS = p => ({ x: p.x * S.view.k + S.view.x, y: p.y * S.view.k + S.view.y });
 const toI = (sx, sy) => ({ x: (sx - S.view.x) / S.view.k, y: (sy - S.view.y) / S.view.k });
+
+/* ------------------------------------------------- geometry pipeline --
+   Mirrors warp.js exactly:  V (what you see) → U (un-rotated) → P (lens) → S (source photo).
+   Measurement points are anchored in S, so they ride along with every
+   rotation, lens correction and morph stroke. ---------------------------- */
+
+// Lens model: midline features sit ≈ 6 cm in front of the face outline. A camera at distance D
+// magnifies them by D / (D − 6 cm) relative to the outline; correction undoes that (k = 6 / D).
+const FACE_DEPTH_CM = 6;
+const lensDistanceCm = v => 20 / (v / 100);                 // slider 100 → 20 cm, 50 → 40 cm, 10 → 2 m
+const lensK = () => (S.adj.ell && S.adj.lens > 0) ? FACE_DEPTH_CM / lensDistanceCm(S.adj.lens) : 0;
+const isIdentity = () => !S.adj.rot && S.adj.zoom === 1 && S.adj.flip === 1 && !lensK() && !S.warp.field;
+
+function vToU(v) {
+  const a = S.adj, cx = S.iw / 2, cy = S.ih / 2, t = a.rot / DEG, c = Math.cos(t), s = Math.sin(t);
+  const dx = v.x - cx, dy = v.y - cy;
+  let ux = (c * dx + s * dy) / a.zoom, uy = (-s * dx + c * dy) / a.zoom;
+  return { x: cx + ux * a.flip, y: cy + uy };
+}
+function uToV(u) {
+  const a = S.adj, cx = S.iw / 2, cy = S.ih / 2, t = a.rot / DEG, c = Math.cos(t), s = Math.sin(t);
+  const dx = (u.x - cx) * a.flip, dy = u.y - cy;
+  return { x: cx + a.zoom * (c * dx - s * dy), y: cy + a.zoom * (s * dx + c * dy) };
+}
+function lensG(u) {
+  const k = lensK();
+  if (!k) return 1;
+  const e = S.adj.ell, rx = (u.x - e.cx) / e.ax, ry = (u.y - e.cy) / e.ay, r2 = rx * rx + ry * ry;
+  const h = r2 < 1 ? 1 - r2 : -.5 * (1 - Math.exp(-(r2 - 1) / .5));
+  return 1 / (1 - k * h);
+}
+function uToP(u) {
+  if (!lensK()) return { x: u.x, y: u.y };
+  const e = S.adj.ell, g = lensG(u);
+  return { x: e.cx + (u.x - e.cx) * g, y: e.cy + (u.y - e.cy) * g };
+}
+function pToU(p) {
+  if (!lensK()) return { x: p.x, y: p.y };
+  const e = S.adj.ell;
+  let u = { x: p.x, y: p.y };
+  for (let i = 0; i < 12; i++) {
+    const g = lensG(u);
+    u = { x: e.cx + (p.x - e.cx) / g, y: e.cy + (p.y - e.cy) / g };
+  }
+  return u;
+}
+function fieldAt(f, x, y) {
+  const W_ = S.warp, cs = W_.cs, gw = W_.gw, gh = W_.gh;
+  const fx = x / cs, fy = y / cs, i = Math.floor(fx), j = Math.floor(fy), tx = fx - i, ty = fy - j;
+  const i0 = clamp(i, 0, gw - 1), i1 = clamp(i + 1, 0, gw - 1), j0 = clamp(j, 0, gh - 1), j1 = clamp(j + 1, 0, gh - 1);
+  const a = (j0 * gw + i0) * 2, b = (j0 * gw + i1) * 2, c = (j1 * gw + i0) * 2, d = (j1 * gw + i1) * 2;
+  const top0 = f[a] + (f[b] - f[a]) * tx, bot0 = f[c] + (f[d] - f[c]) * tx;
+  const top1 = f[a + 1] + (f[b + 1] - f[a + 1]) * tx, bot1 = f[c + 1] + (f[d + 1] - f[c + 1]) * tx;
+  return [top0 + (bot0 - top0) * ty, top1 + (bot1 - top1) * ty];
+}
+function pToS(p) {
+  const f = S.warp.field;
+  if (!f) return { x: p.x, y: p.y };
+  const [dx, dy] = fieldAt(f, p.x, p.y);
+  return { x: p.x + dx, y: p.y + dy };
+}
+function sToP(s) {
+  const f = S.warp.field;
+  if (!f) return { x: s.x, y: s.y };
+  let p = { x: s.x, y: s.y };
+  for (let i = 0; i < 16; i++) {
+    const [dx, dy] = fieldAt(f, p.x, p.y);
+    const nx = s.x - dx, ny = s.y - dy;
+    if (Math.abs(nx - p.x) < .01 && Math.abs(ny - p.y) < .01) { p = { x: nx, y: ny }; break; }
+    p = { x: p.x + (nx - p.x) * .85, y: p.y + (ny - p.y) * .85 };
+  }
+  return p;
+}
+const vToP = v => uToP(vToU(v));
+const fwdMap = v => isIdentity() ? { x: v.x, y: v.y } : pToS(vToP(v));
+const invMap = s => isIdentity() ? { x: s.x, y: s.y } : uToV(pToU(sToP(s)));
+
+/** Record where each point sits on the source photo. */
+function anchor(m) { m.src = m.pts.map(fwdMap); }
+/** Re-place every point after the image geometry changed. */
+function syncPts() {
+  for (const m of S.meas.values()) if (m.src) m.pts = m.src.map(invMap);
+  S.glDirty = true;
+  wake();
+}
+
+/* ---- morph field ---- */
+function initWarp() {
+  const cs = Math.max(1, Math.max(S.iw, S.ih) / 400);
+  S.warp = { field: null, gw: Math.ceil(S.iw / cs) + 1, gh: Math.ceil(S.ih / cs) + 1, cs };
+  S.scratch = null;
+}
+/** Copy-on-write: a stroke edits a fresh copy so undo snapshots stay intact. */
+function beginStroke() {
+  const W_ = S.warp, n = W_.gw * W_.gh * 2;
+  const field = W_.field ? W_.field.slice() : new Float32Array(n);
+  S.warp = { ...W_, field };
+  if (!S.scratch || S.scratch.length !== n) S.scratch = new Float32Array(n);
+  S.scratch.set(field);
+}
+const smooth01 = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+/**
+ * One brush dab in P space.  push: content moves by d.  bloat / pinch: magnify / shrink
+ * around the centre.  restore: relax back toward the original photo.
+ */
+function morphDab(pc, d, R, mode, amt) {
+  const W_ = S.warp, f = W_.field, old = S.scratch, cs = W_.cs, gw = W_.gw, gh = W_.gh;
+  if (!f || R < 1) return;
+  const i0 = Math.max(0, Math.floor((pc.x - R) / cs)), i1 = Math.min(gw - 1, Math.ceil((pc.x + R) / cs));
+  const j0 = Math.max(0, Math.floor((pc.y - R) / cs)), j1 = Math.min(gh - 1, Math.ceil((pc.y + R) / cs));
+  if (i1 < i0 || j1 < j0) return;
+  const hard = clamp(cfg.mHard, 0, 1) * .85, R2 = R * R;
+  for (let j = j0; j <= j1; j++) {
+    const y = j * cs, dy = y - pc.y;
+    for (let i = i0; i <= i1; i++) {
+      const x = i * cs, dx = x - pc.x, r2 = dx * dx + dy * dy;
+      if (r2 >= R2) continue;
+      const w = (1 - smooth01(hard, 1, Math.sqrt(r2) / R)) * amt;
+      if (w <= 0) continue;
+      const idx = (j * gw + i) * 2;
+      if (mode === 'restore') { f[idx] = old[idx] * (1 - w); f[idx + 1] = old[idx + 1] * (1 - w); continue; }
+      let qx, qy;
+      if (mode === 'push') { qx = x - w * d.x; qy = y - w * d.y; }
+      else { const s = mode === 'bloat' ? 1 - w : 1 + w; qx = pc.x + dx * s; qy = pc.y + dy * s; }
+      const o = fieldAt(old, qx, qy);
+      f[idx] = o[0] + qx - x; f[idx + 1] = o[1] + qy - y;
+    }
+  }
+  for (let j = j0; j <= j1; j++) old.set(f.subarray((j * gw + i0) * 2, (j * gw + i1 + 1) * 2), (j * gw + i0) * 2);
+  S.fieldDirty = true;
+}
+const brushV = () => cfg.mSize * Math.max(S.iw, S.ih);   // brush radius in view px
+function brushAt(v) {
+  const pc = vToP(v), e = vToP({ x: v.x + brushV(), y: v.y });
+  return { pc, R: dist(pc, e) };
+}
+/** Push along the cursor path in small steps so drags read as natural, not smeared. */
+function morphPush(v0, v1) {
+  const R = brushV(), n = Math.max(1, Math.ceil(dist(v0, v1) / (R * .08)));
+  for (let s = 0; s < n; s++) {
+    const a = { x: v0.x + (v1.x - v0.x) * s / n, y: v0.y + (v1.y - v0.y) * s / n };
+    const b = { x: v0.x + (v1.x - v0.x) * (s + 1) / n, y: v0.y + (v1.y - v0.y) * (s + 1) / n };
+    const { pc, R: rp } = brushAt(a), pb = vToP(b);
+    morphDab(pc, { x: pb.x - pc.x, y: pb.y - pc.y }, rp, 'push', cfg.mStrength);
+  }
+  syncPts();
+}
 
 /* ---------------------------------------------------------------- theme -- */
 
@@ -348,6 +511,7 @@ function mkMeas(o) {
   return {
     id: o.id, preset: o.preset || null, kind: o.kind, name: o.name || null,
     pts: o.pts.map(p => ({ x: p.x, y: p.y })),
+    src: o.src ? o.src.map(p => ({ x: p.x, y: p.y })) : null,
     times: null, disp: {}, alpha: 0, shown: now(), wasVis: false, painted: 0,
   };
 }
@@ -361,27 +525,38 @@ function autoName(kind) {
 /* ---------------------------------------------------------- undo/redo -- */
 
 function snapshot() {
+  const cp = p => ({ x: p.x, y: p.y });
   return {
     img: S.imgRec,
-    list: [...S.meas.values()].map(m => ({ id: m.id, preset: m.preset, kind: m.kind, name: m.name, pts: m.pts.map(p => ({ x: p.x, y: p.y })) })),
+    adj: { ...S.adj, ell: S.adj.ell ? { ...S.adj.ell } : null },
+    warp: S.warp,   // field arrays are copy-on-write, so sharing the reference is safe
+    list: [...S.meas.values()].map(m => ({ id: m.id, preset: m.preset, kind: m.kind, name: m.name, pts: m.pts.map(cp), src: m.src ? m.src.map(cp) : null })),
     refId: S.refId, calibId: S.calibId, calibMM: S.calibMM, seq: S.seq,
   };
 }
 function pushUndo(s = snapshot()) {
   S.undo.push(s);
   if (S.undo.length > 150) S.undo.shift();
+  // morph fields are large — keep at most ~24 distinct ones in history
+  const fields = () => new Set(S.undo.map(u => u.warp && u.warp.field).filter(Boolean)).size;
+  while (S.undo.length > 1 && fields() > 24) S.undo.shift();
   S.redo = [];
 }
 function restore(s) {
   const imgChanged = s.img !== S.imgRec;
   if (imgChanged) setImageState(s.img);
+  if (s.adj) S.adj = { ...s.adj, ell: s.adj.ell ? { ...s.adj.ell } : null };
+  if (s.warp) { S.warp = s.warp; S.fieldDirty = true; }
+  S.glDirty = true;
   const old = S.meas;
   S.meas = new Map();
   for (const o of s.list) {
     const m = mkMeas(o), prev = imgChanged ? null : old.get(o.id);
     if (prev) Object.assign(m, { disp: prev.disp, alpha: prev.alpha, wasVis: prev.wasVis, shown: prev.shown, times: prev.times });
+    if (m.src) m.pts = m.src.map(invMap); else anchor(m);
     S.meas.set(o.id, m);
   }
+  syncToolOpts();
   if (!imgChanged) for (const [id, m] of old) if (!S.meas.has(id)) startLeave(m);
   Object.assign(S, { refId: s.refId, calibId: s.calibId, calibMM: s.calibMM, seq: Math.max(S.seq, s.seq), draft: null, draftM: null, drag: null, mdrag: null, hover: null });
   S.sel = S.sel.filter(id => P[id] || S.meas.has(id));
@@ -395,7 +570,7 @@ function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S
 /* -------------------------------------------------------- create/delete -- */
 
 function placeTarget() {
-  if (!S.img) return null;
+  if (!S.img || EDIT_TOOLS.has(S.tool)) return null;
   if (S.sel.length) {
     const pick = [S.active, ...S.sel].find(id => id && P[id] && S.sel.includes(id) && !S.meas.has(id));
     return pick ? { kind: P[pick].kind, preset: pick } : null;
@@ -405,7 +580,7 @@ function placeTarget() {
 }
 const canPlace = () => !!S.img && (!!S.draft || !!placeTarget());
 /** With nothing to place, the canvas behaves like the Select tool. */
-const selectMode = () => !!S.img && !S.draft && !placeTarget();
+const selectMode = () => !!S.img && !S.draft && !placeTarget() && !EDIT_TOOLS.has(S.tool);
 
 function startDraft(tgt) {
   S.draft = {
@@ -445,6 +620,7 @@ function commitDraft() {
   const id = d.preset || 'c' + (++S.seq);
   const m = mkMeas({ id, preset: d.preset, kind: d.kind, name: d.preset ? null : autoName(d.kind), pts: d.pts });
   Object.assign(m, { times: d.times, disp: d.disp, alpha: 1, shown: now() - 2000, wasVis: true, painted: now() });
+  anchor(m);
   S.meas.set(id, m);
   if (d.kind === 'ruler' && !(S.meas.get(S.refId) && S.meas.get(S.refId).kind === 'ruler')) S.refId = id;
   if (d.kind === 'calib') { S.calibId = id; openCalib(m, true); }
@@ -773,9 +949,43 @@ function drawSegments(ctx, m, pts, d, o, s) {
 /* ------------------------------------------------------------ image layer -- */
 
 let imgKey = '';
+let glImgRec = null;
+/** Upload the photo to the GPU (once per image), downscaling only if it exceeds the GPU limit. */
+function ensureGLImage() {
+  if (!GLR || !S.imgRec || glImgRec === S.imgRec) return;
+  glImgRec = S.imgRec;
+  const max = GLR.maxTex, sc = Math.min(1, max / Math.max(S.iw, S.ih));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(S.iw * sc)); c.height = Math.max(1, Math.round(S.ih * sc));
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(S.img, 0, 0, c.width, c.height);
+  GLR.setImage(c, c.width, c.height);
+  S.fieldDirty = true;
+}
+function glParams(view, d, cw, ch, alpha) {
+  const a = S.adj, e = a.ell;
+  return {
+    cw, ch, view, dpr: d, size: [S.iw, S.ih],
+    rot: a.rot / DEG, zoom: a.zoom, flip: a.flip,
+    ell: e ? [e.cx, e.cy, e.ax, e.ay] : null, lensK: lensK(),
+    morph: !!S.warp.field && !S.compare, cell: S.warp.cs, alpha,
+  };
+}
 function drawImageLayer(dt) {
   if (S.img && S.imgA < 1) S.imgA = Math.min(1, S.imgA + dt * 2.4);
   const v = S.view;
+  if (GLR) {
+    if (!S.img) { if (imgKey !== 'none') { imgKey = 'none'; GLR.clear(); } return; }
+    ensureGLImage();
+    if (S.fieldDirty) { S.fieldDirty = false; GLR.setField(S.warp.field, S.warp.gw, S.warp.gh); S.glDirty = true; }
+    const key = `${v.x.toFixed(2)}|${v.y.toFixed(2)}|${v.k.toFixed(6)}|${S.imgA.toFixed(3)}|${S.imgSeq}|${ov.width}x${ov.height}`;
+    if (key === imgKey && !S.glDirty) return;
+    imgKey = key; S.glDirty = false;
+    GLR.render(glParams(v, dpr, ov.width, ov.height, ease(S.imgA)));
+    if (S.imgA < 1) wake();
+    return;
+  }
   const key = S.img ? `${v.x.toFixed(2)}|${v.y.toFixed(2)}|${v.k.toFixed(6)}|${S.imgA.toFixed(3)}|${S.imgSeq}` : 'none';
   if (key === imgKey) return;
   imgKey = key;
@@ -794,6 +1004,72 @@ function drawImageLayer(dt) {
   ictx.strokeRect(Math.round(v.x) - .5, Math.round(v.y) - .5, Math.round(S.iw * v.k) + 1, Math.round(S.ih * v.k) + 1);
   ictx.globalAlpha = 1;
   if (S.imgA < 1) wake();
+}
+
+/* --------------------------------------------------- edit-tool overlays -- */
+
+function drawBrush(ctx, c) {
+  const r = brushV() * S.view.k, hard = clamp(cfg.mHard, 0, 1) * .85;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, TAU);
+  ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+  if (hard > .05 && r * hard > 4) {
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath(); ctx.arc(c.x, c.y, r * hard, 0, TAU);
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.beginPath(); ctx.arc(c.x, c.y, 1.6, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fill();
+  ctx.restore();
+}
+/** Screen positions of the face-outline handles (centre, side, bottom). */
+function ellHandles() {
+  const e = S.adj.ell;
+  if (!e) return [];
+  const sc = u => toS(uToV(u));
+  return [
+    { id: 'c', p: sc({ x: e.cx, y: e.cy }) },
+    { id: 'x', p: sc({ x: e.cx + e.ax, y: e.cy }) },
+    { id: 'y', p: sc({ x: e.cx, y: e.cy + e.ay }) },
+  ];
+}
+function drawAdjustGuides(ctx) {
+  const blue = getComputedStyle(root).getPropertyValue('--blue').trim() || '#7EA6FF';
+  ctx.save();
+  // level guides across the photo frame
+  const a = toS({ x: 0, y: 0 }), b = toS({ x: S.iw, y: S.ih });
+  ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 1; i < 8; i++) {
+    const y = Math.round(a.y + (b.y - a.y) * i / 8) + .5, x = Math.round(a.x + (b.x - a.x) * i / 8) + .5;
+    ctx.moveTo(a.x, y); ctx.lineTo(b.x, y);
+    ctx.moveTo(x, a.y); ctx.lineTo(x, b.y);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.22)';
+  ctx.strokeRect(Math.round(a.x) + .5, Math.round(a.y) + .5, Math.round(b.x - a.x), Math.round(b.y - a.y));
+  // face outline used by the lens correction
+  const e = S.adj.ell;
+  if (e && S.adj.lens > 0) {
+    ctx.beginPath();
+    for (let i = 0; i <= 72; i++) {
+      const t = i / 72 * TAU, p = toS(uToV({ x: e.cx + Math.cos(t) * e.ax, y: e.cy + Math.sin(t) * e.ay }));
+      i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+    }
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = rgba(blue, .9); ctx.lineWidth = 1.3; ctx.stroke();
+    ctx.setLineDash([]);
+    for (const h of ellHandles()) {
+      const hov = S.hdrag ? S.hdrag.id === h.id : (S.hoverHandle === h.id);
+      ctx.beginPath(); ctx.arc(h.p.x, h.p.y, hov ? 6 : 4.5, 0, TAU);
+      ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(h.p.x, h.p.y, hov ? 5 : 3.6, 0, TAU);
+      ctx.fillStyle = h.id === 'c' ? '#FFFFFF' : blue; ctx.fill();
+    }
+  }
+  ctx.restore();
 }
 
 /* ------------------------------------------------------------ overlay -- */
@@ -856,6 +1132,9 @@ function drawOverlay(t, dt) {
     ctx.restore();
   }
 
+  if (S.tool === 'adjust') drawAdjustGuides(ctx);
+  if (S.tool === 'morph' && S.cursorIn && S.cursor && !S.pan && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
+
   const overNode = S.hover && S.hover.node >= 0 && !S.draft;
   const placing = S.cursorIn && S.cursor && canPlace() && !S.drag && !S.pan && !(S.press && S.press.moved) && !overNode;
   updateLoupe(placing || !!S.drag);
@@ -913,7 +1192,8 @@ function updateLoupe(show) {
   const span = LOUPE / LOUPE_ZOOM, k = S.view.k, ip = toI(cx, cy), is = span / k;
   c.imageSmoothingEnabled = true;
   c.imageSmoothingQuality = 'high';
-  drawClipped(c, S.img, S.iw, S.ih, ip.x - is / 2, ip.y - is / 2, is, D);
+  if (GLR && !isIdentity()) drawClipped(c, glcv, glcv.width, glcv.height, (cx - span / 2) * dpr, (cy - span / 2) * dpr, span * dpr, D);
+  else drawClipped(c, S.img, S.iw, S.ih, ip.x - is / 2, ip.y - is / 2, is, D);
   drawClipped(c, ov, ov.width, ov.height, (cx - span / 2) * dpr, (cy - span / 2) * dpr, span * dpr, D);
   const m = D / 2, g = 5 * dpr, l = 15 * dpr;
   c.lineCap = 'round';
@@ -1075,17 +1355,26 @@ function syncPicks() {
 }
 function refreshCursor() {
   let c;
-  if (S.drag || S.pan || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
+  if (S.drag || S.pan || S.hdrag || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
   else if (S.box) c = 'crosshair';
   else if (S.space) c = 'grab';
+  else if (S.tool === 'morph') c = 'none';
+  else if (S.tool === 'adjust') c = S.hoverHandle ? 'grab' : 'default';
   else if (S.hover && S.hover.node >= 0) c = 'grab';
   else if (S.hover && selectMode()) c = 'move';
   else if (canPlace()) c = 'crosshair';
   else c = 'default';
   if (ov._c !== c) { ov._c = c; ov.style.cursor = c; }
 }
+function handleAt(sx, sy) {
+  if (S.tool !== 'adjust' || !(S.adj.lens > 0)) return null;
+  for (const h of ellHandles()) if (Math.hypot(h.p.x - sx, h.p.y - sy) <= 11) return h.id;
+  return null;
+}
 function updateHover(sx, sy) {
-  const h = S.draft || !S.img ? null : hitTest(sx, sy);
+  const hh = handleAt(sx, sy);
+  if (hh !== (S.hoverHandle || null)) { S.hoverHandle = hh; wake(); }
+  const h = S.draft || !S.img || EDIT_TOOLS.has(S.tool) ? null : hitTest(sx, sy);
   const changed = (h && h.id) !== (S.hover && S.hover.id) || (h && h.node) !== (S.hover && S.hover.node);
   S.hover = h;
   if (changed) wake();
@@ -1107,6 +1396,8 @@ ov.addEventListener('pointerdown', e => {
   if (pointers.size === 2) {
     S.press = null; S.pan = null; S.mdrag = null; S.box = null; S.rpress = null;
     if (S.drag) endDrag();
+    if (S.stroke) endStroke();
+    if (S.hdrag) endHandle();
     const [a, b] = [...pointers.values()];
     pinch = { d: dist(a, b) || 1, c: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, view: { ...S.view } };
     return;
@@ -1125,6 +1416,13 @@ ov.addEventListener('pointerdown', e => {
     return;
   }
   if (e.button !== 0) return;
+  if (S.tool === 'morph') { startStroke(sx, sy); return; }
+  if (S.tool === 'adjust') {
+    const h = handleAt(sx, sy);
+    if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
+    S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // drag pans
+    return;
+  }
   const sel = selectMode();
   const hit = S.draft ? null : hitTest(sx, sy);
   if (hit && hit.node >= 0) {
@@ -1165,6 +1463,13 @@ ov.addEventListener('pointermove', e => {
   S.cursor = { x: sx, y: sy }; S.cursorIn = true;
   wake();
   const fine = e.shiftKey ? .25 : 1;
+  if (S.stroke) {
+    const v = toI(sx, sy);
+    if (cfg.mMode === 'push' && dist(S.stroke.last, v) > 0) { morphPush(S.stroke.last, v); S.stroke.changed = true; }
+    S.stroke.last = v;
+    return;
+  }
+  if (S.hdrag) { moveHandle(toI(sx, sy)); return; }
   if (S.drag) {
     const d = S.drag, m = S.meas.get(d.id);
     if (!m) { S.drag = null; return; }
@@ -1210,19 +1515,61 @@ ov.addEventListener('pointermove', e => {
   updateHover(sx, sy);
 });
 
+/* morph strokes */
+function startStroke(sx, sy) {
+  const snap = snapshot();
+  beginStroke();
+  S.stroke = { last: toI(sx, sy), snap, changed: false };
+  if (cfg.mMode !== 'push') dabHere(1 / 60);
+  wake();
+}
+/** Bloat / pinch / restore build up while the button is held. */
+function dabHere(dt) {
+  const { pc, R } = brushAt(S.stroke.last);
+  const rate = cfg.mMode === 'restore' ? 3.2 : 1.5;
+  morphDab(pc, null, R, cfg.mMode, clamp(cfg.mStrength * rate * dt, 0, .4));
+  S.stroke.changed = true;
+  syncPts();
+}
+function endStroke() {
+  const st = S.stroke;
+  S.stroke = null;
+  if (!st) return;
+  if (st.changed) pushUndo(st.snap);
+  else { S.warp = st.snap.warp; S.fieldDirty = true; }
+  syncUI();
+}
+/* face-outline handles (Adjust → lens) */
+function moveHandle(v) {
+  const e = S.adj.ell, u = vToU(v);
+  if (!e) return;
+  if (S.hdrag.id === 'c') { e.cx = u.x; e.cy = u.y; }
+  else if (S.hdrag.id === 'x') e.ax = Math.max(8, Math.hypot(u.x - e.cx, u.y - e.cy));
+  else e.ay = Math.max(8, Math.hypot(u.x - e.cx, u.y - e.cy));
+  S.hdrag.moved = true;
+  syncPts();
+}
+function endHandle() {
+  const h = S.hdrag;
+  S.hdrag = null;
+  if (h && h.moved) pushUndo(h.snap);
+  syncUI();
+}
 function endDrag() {
   const d = S.drag;
   S.drag = null;
-  if (d && d.moved) { pushUndo(d.snap); syncUI(); }
+  if (d && d.moved) { const m = S.meas.get(d.id); if (m) anchor(m); pushUndo(d.snap); syncUI(); }
 }
 function pointerUp(e) {
   pointers.delete(e.pointerId);
   if (pinch) { if (pointers.size < 2) pinch = null; S.press = null; return; }
-  if (S.drag) endDrag();
+  if (S.stroke) endStroke();
+  else if (S.hdrag) endHandle();
+  else if (S.drag) endDrag();
   else if (S.mdrag) {
     const md = S.mdrag;
     S.mdrag = null;
-    if (md.moved) pushUndo(md.snap);
+    if (md.moved) { for (const id of S.picked) { const m = S.meas.get(id); if (m) anchor(m); } pushUndo(md.snap); }
     else if (md.toggle) S.picked.delete(md.toggle);
     syncUI();
   }
@@ -1230,7 +1577,7 @@ function pointerUp(e) {
   else if (S.rpress) {
     const r = S.rpress;
     S.rpress = null;
-    if (!r.moved) onRightClick(e.clientX, e.clientY);
+    if (!r.moved && !EDIT_TOOLS.has(S.tool)) onRightClick(e.clientX, e.clientY);
   }
   else if (S.box) {
     const b = S.box;
@@ -1327,6 +1674,12 @@ addEventListener('keydown', e => {
   }
   if (!S.img) return;
   if (TOOL_KEYS[k] && !e.repeat) { setTool(TOOL_KEYS[k]); return; }
+  if (e.key === '[' || e.key === ']') {
+    cfg.mSize = clamp(cfg.mSize * (e.key === ']' ? 1.15 : 1 / 1.15), .01, .5);
+    saveCfg(); syncToolOpts(); wake();
+    return;
+  }
+  if (k === 'b') { if (!e.repeat) setCompare(true); return; }
   switch (e.key) {
     case 'Escape':
       if (calibCtx) closeCalib(false);
@@ -1355,9 +1708,10 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => {
   if (e.key === ' ') { S.space = false; refreshCursor(); }
+  if (e.key.toLowerCase() === 'b') setCompare(false);
   if (e.key === 'Shift') { S.shift = false; wake(); }
 });
-addEventListener('blur', () => { S.space = false; S.shift = false; });
+addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); });
 addEventListener('resize', () => { resize(); if (S.img) fitView(); });
 
 /* --------------------------------------------------------- image input -- */
@@ -1393,9 +1747,14 @@ function setImageState(rec) {
     loupe._on = false; loupe.classList.remove('on');
     return;
   }
-  Object.assign(S, { img: rec.img, iw: rec.iw, ih: rec.ih, imgA: 0 });
+  Object.assign(S, { img: rec.img, iw: rec.iw, ih: rec.ih, imgA: 0, stroke: null, hdrag: null, compare: false });
+  S.adj = { rot: 0, zoom: 1, flip: 1, lens: 0, ell: null };
+  initWarp();
+  S.fieldDirty = true; S.glDirty = true;
   body.classList.add('has-img');
   fitView(true);
+  toolOptsFor = null;
+  renderToolOpts();
 }
 
 $('#btnBrowse').addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
@@ -1438,7 +1797,14 @@ async function exportPNG() {
   const c = document.createElement('canvas');
   c.width = iw; c.height = Math.round(ih + legendH);
   const ctx = c.getContext('2d');
-  ctx.drawImage(S.img, 0, 0);
+  if (GLR && !isIdentity()) {
+    // render the edited photo at full resolution (scaled only if the GPU can't fit it)
+    const sc = Math.min(1, GLR.maxView[0] / iw, GLR.maxView[1] / ih, 8192 / Math.max(iw, ih));
+    const cw = Math.round(iw * sc), ch = Math.round(ih * sc);
+    GLR.render({ ...glParams({ x: 0, y: 0, k: sc }, 1, cw, ch, 1), morph: !!S.warp.field });
+    ctx.drawImage(glcv, 0, 0, cw, ch, 0, 0, iw, ih);
+    imgKey = ''; S.glDirty = true;   // restore the on-screen render next frame
+  } else ctx.drawImage(S.img, 0, 0);
   const labels = [];
   for (const m of vis) drawMeas(ctx, m, { toS: p => p, u, t: 0, alpha: 1, labels, final: true, disp: targets(m) });
   if (rows.length) {
@@ -1548,11 +1914,204 @@ function toggleShowAll() {
   syncUI();
 }
 /** Select keeps the open layers; a drawing tool returns to free mode. */
+/** Select, Morph and Adjust keep the open layers (so ratios stay in view); drawing tools return to free mode. */
 function setTool(t) {
   if (S.draft) { S.draft = null; S.draftM = null; }
+  if (S.stroke) endStroke();
+  if (EDIT_TOOLS.has(t) && !GLR) { toast('Morph and Adjust need WebGL 2, which this browser doesn’t provide'); return; }
   S.tool = t;
-  if (t !== 'move' && S.sel.length) { S.sel = []; S.active = null; }
+  if (t !== 'move' && !EDIT_TOOLS.has(t) && S.sel.length) { S.sel = []; S.active = null; }
+  if (EDIT_TOOLS.has(t)) S.picked.clear();
+  renderToolOpts();
   syncUI();
+}
+
+/* -------------------------------------------------------- tool options -- */
+
+const toolOpts = $('#toolOpts'), toolOptsBody = $('#toolOptsBody');
+let toolOptsFor = null;
+
+const sliderRow = (id, label, min, max, step, tip) =>
+  `<label class="srow"${tip ? ` title="${esc(tip)}"` : ''}><span>${label}</span><input class="rng" type="range" id="${id}" min="${min}" max="${max}" step="${step}"><b id="${id}V"></b></label>`;
+
+function renderToolOpts() {
+  const t = S.img && EDIT_TOOLS.has(S.tool) ? S.tool : null;
+  toolOpts.classList.toggle('open', !!t);
+  if (t === toolOptsFor) { syncToolOpts(); return; }
+  toolOptsFor = t;
+  if (!t) return;
+  if (t === 'morph') {
+    toolOptsBody.innerHTML = `
+      <div class="to-head"><span class="to-title">Morph</span><span class="to-sub">landmarks follow the face</span></div>
+      <div class="seg full" id="mMode">
+        <button type="button" data-v="push">Push</button><button type="button" data-v="bloat">Bloat</button>
+        <button type="button" data-v="pinch">Pinch</button><button type="button" data-v="restore">Restore</button>
+      </div>
+      ${sliderRow('mSize', 'Size', 1, 50, .1)}
+      ${sliderRow('mStrength', 'Strength', 1, 100, 1)}
+      ${sliderRow('mHard', 'Hardness', 0, 100, 1)}
+      <div class="to-actions">
+        <button type="button" class="btn ghost sm" id="mCompare">Hold to compare</button>
+        <button type="button" class="btn ghost sm" id="mReset">Reset morph</button>
+      </div>`;
+    $('#mMode').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mMode = b.dataset.v; saveCfg(); syncToolOpts(); renderHint(); } });
+    const bind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncToolOpts(); wake(); });
+    bind('mSize', 'mSize', v => v / 100);
+    bind('mStrength', 'mStrength', v => v / 100);
+    bind('mHard', 'mHard', v => v / 100);
+    const cmp = $('#mCompare');
+    cmp.addEventListener('pointerdown', () => setCompare(true));
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => cmp.addEventListener(ev, () => setCompare(false)));
+    $('#mReset').addEventListener('click', () => {
+      if (!S.warp.field) return;
+      pushUndo();
+      S.warp = { ...S.warp, field: null };
+      S.fieldDirty = true;
+      syncPts(); syncUI();
+      toast('Morph reset');
+    });
+  } else {
+    toolOptsBody.innerHTML = `
+      <div class="to-head"><span class="to-title">Adjust image</span><span class="to-sub">measurements stay attached</span></div>
+      ${sliderRow('aRot', 'Rotation', -45, 45, .1)}
+      ${sliderRow('aZoom', 'Zoom', 50, 200, 1)}
+      <div class="to-actions" style="margin-top:4px">
+        <button type="button" class="btn ghost sm" id="aLevel">Level eyes</button>
+        <button type="button" class="btn ghost sm" id="aFlip">Flip</button>
+      </div>
+      <div class="to-group">
+        ${sliderRow('aLens', 'Lens', 0, 100, 1, 'Corrects close-range (selfie) perspective distortion')}
+        <p class="to-note" id="aLensNote"></p>
+        <div class="to-actions" style="margin-top:2px">
+          <button type="button" class="btn ghost sm" id="aFit">Fit to face</button>
+          <button type="button" class="btn ghost sm" id="aReset">Reset all</button>
+        </div>
+      </div>`;
+    // one undo step per slider gesture
+    const start = () => { if (!S.adjSnap) S.adjSnap = snapshot(); };
+    const commit = () => { if (S.adjSnap) { pushUndo(S.adjSnap); S.adjSnap = null; syncUI(); } };
+    const bind = (id, apply) => {
+      const el = $('#' + id);
+      el.addEventListener('pointerdown', start);
+      el.addEventListener('keydown', start);
+      el.addEventListener('input', e => { start(); apply(+e.target.value); syncPts(); syncToolOpts(); });
+      el.addEventListener('change', commit);
+      el.closest('.srow').querySelector('span').addEventListener('dblclick', () => {
+        start(); apply(id === 'aZoom' ? 100 : 0); syncPts(); syncToolOpts(); commit();
+      });
+    };
+    bind('aRot', v => { S.adj.rot = v; });
+    bind('aZoom', v => { S.adj.zoom = v / 100; });
+    bind('aLens', v => {
+      if (v > 0 && !S.adj.ell) S.adj.ell = guessFace();
+      S.adj.lens = v;
+    });
+    $('#aLevel').addEventListener('click', levelEyes);
+    $('#aFlip').addEventListener('click', () => { pushUndo(); S.adj.flip *= -1; syncPts(); syncToolOpts(); syncUI(); });
+    $('#aFit').addEventListener('click', () => fitFace(true));
+    $('#aReset').addEventListener('click', () => {
+      pushUndo();
+      S.adj = { rot: 0, zoom: 1, flip: 1, lens: 0, ell: S.adj.ell };
+      syncPts(); syncToolOpts(); syncUI();
+    });
+  }
+  syncToolOpts();
+  if (cfg.motion && toolOptsBody.animate) toolOptsBody.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: 'cubic-bezier(.22,1,.36,1)' });
+}
+function setRange(id, v, text) {
+  const el = $('#' + id);
+  if (!el) return;
+  if (document.activeElement !== el || +el.value !== v) el.value = v;
+  const p = (v - +el.min) / (+el.max - +el.min) * 100;
+  el.style.setProperty('--p', p.toFixed(1) + '%');
+  setText($('#' + id + 'V'), text);
+}
+function syncToolOpts() {
+  if (toolOptsFor === 'morph') {
+    $$('#mMode [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === cfg.mMode));
+    setRange('mSize', +(cfg.mSize * 100).toFixed(1), Math.round(brushV()) + ' px');
+    setRange('mStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
+    setRange('mHard', Math.round(cfg.mHard * 100), Math.round(cfg.mHard * 100) + '%');
+    $('#mReset').disabled = !S.warp.field;
+  } else if (toolOptsFor === 'adjust') {
+    const a = S.adj;
+    setRange('aRot', a.rot, (a.rot > 0 ? '+' : '') + a.rot.toFixed(1) + '°');
+    setRange('aZoom', Math.round(a.zoom * 100), Math.round(a.zoom * 100) + '%');
+    setRange('aLens', a.lens, a.lens > 0 ? a.lens + '%' : 'Off');
+    $('#aFlip').classList.toggle('on', a.flip < 0);
+    const d = a.lens > 0 ? lensDistanceCm(a.lens) : 0;
+    setText($('#aLensNote'), a.lens > 0
+      ? `Re-projects the face as if shot from far away, assuming the camera was ≈ ${d < 100 ? Math.round(d) + ' cm' : (d / 100).toFixed(1) + ' m'} from the face. Drag the dashed outline to fit the face.`
+      : 'Close selfies make the nose and face centre look bigger. Raise this to see the face as it looks from a distance.');
+    $('#aLevel').disabled = !eyePair();
+  }
+}
+function setCompare(on) {
+  if (S.compare === on) return;
+  S.compare = on;
+  S.glDirty = true;
+  const b = $('#mCompare');
+  if (b) b.classList.toggle('on', on);
+  wake();
+}
+
+/* ---- smart helpers for Adjust ---- */
+/** First measured landmark whose name starts with one of the given labels (in view space). */
+function landmark(...names) {
+  for (const n of names) {
+    for (const m of S.meas.values()) {
+      if (!m.preset) continue;
+      const i = P[m.preset].pts.indexOf(n);
+      if (i >= 0 && m.pts[i]) return m.pts[i];
+    }
+  }
+  return null;
+}
+function eyePair() {
+  const pairs = [['Pupil · left', 'Pupil · right'], ['Exocanthion · left', 'Exocanthion · right'], ['Endocanthion · left', 'Endocanthion · right'], ['Zygion · left', 'Zygion · right']];
+  for (const [a, b] of pairs) { const l = landmark(a), r = landmark(b); if (l && r && dist(l, r) > 4) return [l, r]; }
+  return null;
+}
+function levelEyes() {
+  const pr = eyePair();
+  if (!pr) { toast('Measure the pupils, eye corners or cheekbones first'); return; }
+  const [l, r] = pr[0].x <= pr[1].x ? pr : [pr[1], pr[0]];
+  const ang = Math.atan2(r.y - l.y, r.x - l.x) * DEG;
+  pushUndo();
+  S.adj.rot = clamp(+(S.adj.rot - ang).toFixed(2), -45, 45);
+  syncPts(); syncToolOpts(); syncUI();
+  toast(`Rotated ${(-ang).toFixed(1)}° to level the eyes`);
+}
+/** Estimate the face outline (U space) from landmarks, falling back to a centred default. */
+function guessFace() {
+  const U = p => p && vToU(p);
+  const zl = U(landmark('Zygion · left', 'Face edge · left')), zr = U(landmark('Zygion · right', 'Face edge · right'));
+  const top = U(landmark('Trichion', 'Glabella', 'Nasion')), bot = U(landmark('Menton', 'Gnathion'));
+  const nose = U(landmark('Subnasale', 'Pronasale')) || (() => { const a = U(landmark('Alare · left')), b = U(landmark('Alare · right')); return a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : null; })();
+  let cx = S.iw / 2, cy = S.ih * .47, ax = Math.min(S.iw * .28, S.ih * .22), ay = ax * 1.35;
+  if (zl && zr) { ax = dist(zl, zr) / 2 * 1.04; cx = (zl.x + zr.x) / 2; cy = (zl.y + zr.y) / 2 + ax * .25; ay = ax * 1.35; }
+  if (top && bot) { ay = Math.abs(bot.y - top.y) / 2 * 1.02; cy = (top.y + bot.y) / 2; }
+  if (nose) { cx = nose.x; cy = nose.y - ay * .05; }
+  return { cx, cy, ax: Math.max(10, ax), ay: Math.max(10, ay) };
+}
+async function fitFace(announce) {
+  const before = snapshot();
+  let ell = guessFace(), how = landmark('Zygion · left', 'Face edge · left') ? 'your landmarks' : null;
+  if (!how && 'FaceDetector' in window && isIdentity()) {
+    try {
+      const [f] = await new window.FaceDetector({ fastMode: false, maxDetectedFaces: 1 }).detect(S.img);
+      if (f) {
+        const b = f.boundingBox;
+        ell = { cx: b.x + b.width / 2, cy: b.y + b.height * .55, ax: b.width * .5, ay: b.height * .62 };
+        how = 'face detection';
+      }
+    } catch (e) { /* not supported here */ }
+  }
+  S.adj.ell = ell;
+  if (!S.adj.lens) S.adj.lens = 50;
+  pushUndo(before);
+  syncPts(); syncToolOpts(); syncUI();
+  if (announce) toast(how ? `Outline fitted from ${how}` : 'Outline centred — drag it to fit the face, or measure FWHR first for an automatic fit');
 }
 function toggleLoupe() {
   cfg.loupe = !cfg.loupe;
@@ -1825,7 +2384,12 @@ function renderHint() {
   if (S.img) {
     const d = S.draft;
     const tgt = d ? { preset: d.preset, kind: d.kind } : placeTarget();
-    if (tgt && tgt.preset) {
+    if (S.tool === 'morph') {
+      const mode = { push: 'Push', bloat: 'Bloat', pinch: 'Pinch', restore: 'Restore' }[cfg.mMode];
+      html = `<b>Morph · ${mode}</b><span class="h-desc">${cfg.mMode === 'push' ? 'Drag' : 'Hold'} on the photo · <kbd>[</kbd> <kbd>]</kbd> size · hold <kbd>B</kbd> to compare · right-drag pans</span>`;
+    } else if (S.tool === 'adjust') {
+      html = `<b>Adjust image</b><span class="h-desc">Use the panel to straighten, zoom or correct lens distortion${S.adj.lens > 0 ? ' · drag the outline to fit the face' : ''}</span>`;
+    } else if (tgt && tgt.preset) {
       const it = P[tgt.preset], i = d ? d.pts.length : 0, name = it.pts[i] || '';
       const desc = LANDMARKS[name.split(' · ')[0]] || '';
       html = `<span class="h-step">${i + 1}/${it.pts.length}</span><b>${esc(name)}</b><span class="h-desc">${esc(desc)}</span>`;
@@ -1983,6 +2547,7 @@ function frame(t) {
   const dt = Math.min(0.05, Math.max(0, (t - lastT) / 1000));
   lastT = t;
   stepView(dt);
+  if (S.stroke && cfg.mMode !== 'push') dabHere(dt);
   drawImageLayer(dt);
   drawGrid(dt);
   if (S.img && t < S.awakeUntil) { drawOverlay(t, dt); updateValues(); }
