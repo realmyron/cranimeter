@@ -65,6 +65,13 @@
     <button class="tool" data-tool="calib" data-tip="Scale (mm)  C" aria-label="Calibrate scale">
       <svg class="ic" viewBox="0 0 20 20"><circle cx="10" cy="10" r="5.5"/><path d="M10 2v3M10 15v3M2 10h3M15 10h3"/><circle cx="10" cy="10" r=".8"/></svg>
     </button>
+    <div class="rail-sep sm"></div>
+    <button class="tool" data-tool="morph" data-tip="Morph / liquify  M" aria-label="Morph">
+      <svg class="ic" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" stroke-dasharray="2.2 2.4"/><path d="M4.5 11.5c2.2 0 2.8-4 5.5-4s3.3 4 5.5 4"/></svg>
+    </button>
+    <button class="tool" data-tool="adjust" data-tip="Adjust image  E" aria-label="Adjust image">
+      <svg class="ic" viewBox="0 0 20 20"><path d="M6 2.5V14h11.5"/><path d="M2.5 6H14v11.5"/><path d="M15.5 2.8a5 5 0 0 1 1.7 3.4" /><path d="m17.6 4.6-.4 1.7-1.6-.6"/></svg>
+    </button>
   </div>
 
   <div class="rail-spacer"></div>
@@ -123,6 +130,7 @@
       </button>
     </div>
   </div>
+  <section class="topts" id="toolOpts"><div class="topts-in"><div class="topts-body" id="toolOptsBody"></div></div></section>
   <div class="panel-head">
     <div class="ph-title"><h2>Measurements</h2><span class="progress" id="progress"></span></div>
     <button id="btnShowAll" class="chip" type="button">Show all</button>
@@ -223,12 +231,13 @@
 
     <div class="modal-foot">
       <button type="button" class="btn ghost sm" id="resetSettings">Reset to defaults</button>
-      <span class="shortcuts">V R A T S C tools · Esc back to select<br>Ctrl A select all · Del delete · L magnifier</span>
+      <span class="shortcuts">V R A T S C M E tools · Esc back to select<br>Ctrl A select all · Del delete · L magnifier<br>[ ] brush size · hold B compare</span>
     </div>
   </div>
 </div>
 
 <script src="presets.js"></script>
+<script src="warp.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
