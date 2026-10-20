@@ -7,12 +7,12 @@
 <meta name="description" content="Cranimeter — measure facial proportions, ratios and angles on your own photos. Runs entirely in your browser.">
 <meta name="theme-color" content="#080A0F">
 <!-- Bump this (and the ?v= tags below, plus BUILD in app.js / warp.js) on every release so browsers never mix old and new files. -->
-<meta name="cranimeter-build" content="9">
+<meta name="cranimeter-build" content="10">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
-<link rel="stylesheet" href="style.css?v=9">
+<link rel="stylesheet" href="style.css?v=10">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -162,7 +162,8 @@
       <p>Drop a photo here, paste it, or browse your files.</p>
       <div class="drop-actions">
         <button class="btn" id="btnBrowse" type="button">Browse files</button>
-        <span class="drop-or">or paste with <kbd class="mod-key">Ctrl</kbd> <kbd>V</kbd></span>
+        <button class="btn ghost" id="btnPaste" type="button">Paste</button>
+        <span class="drop-or">or <kbd class="mod-key">Ctrl</kbd> <kbd>V</kbd></span>
       </div>
     </div>
     <div class="drop-tips">
@@ -174,6 +175,20 @@
 </section>
 
 <div id="dragveil" class="dragveil"><div>Drop to load image</div></div>
+
+<!-- New image popover -->
+<div id="newPop" class="popover newpop glass" role="dialog" aria-label="New image">
+  <div class="pop-title">New image</div>
+  <div class="new-drop" id="newDrop" role="button" tabindex="0" aria-label="Drop or browse for an image">
+    <svg class="ic" viewBox="0 0 20 20"><path d="M10 13V4M6.5 7.5 10 4l3.5 3.5"/><path d="M4 12.5v2A1.5 1.5 0 0 0 5.5 16h9a1.5 1.5 0 0 0 1.5-1.5v-2"/></svg>
+    <span><b>Drop an image here</b>or click to browse</span>
+  </div>
+  <div class="pop-actions new-actions">
+    <button type="button" class="btn ghost sm" id="newBrowse">Browse files</button>
+    <button type="button" class="btn sm" id="newPaste">Paste from clipboard</button>
+  </div>
+  <p class="new-note">You can also press <kbd class="mod-key">Ctrl</kbd> <kbd>V</kbd> or drop a file anywhere. Swapping images can be undone.</p>
+</div>
 <input type="file" id="file" accept="image/*" hidden>
 
 <!-- Calibration popover -->
@@ -240,8 +255,8 @@
   </div>
 </div>
 
-<script src="presets.js?v=9"></script>
-<script src="warp.js?v=9"></script>
-<script src="app.js?v=9"></script>
+<script src="presets.js?v=10"></script>
+<script src="warp.js?v=10"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>
