@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '12';   // must match the build in presets.js, warp.js and facemap.js
+const BUILD = '13';   // must match the build in presets.js, warp.js and facemap.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -138,7 +138,7 @@ const DEFAULTS = {
   width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
   mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
-  mSub: 'map', mShowLayers: true, mShade: .7, mOpen: 'bone',
+  mSub: 'map', mShowLayers: true, mShade: .7, mOpen: 'bone', mLevel: 'soft',
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -233,6 +233,8 @@ const S = {
   // face scan (Morph → Map) and the anatomy settings on top of it (Morph → Morph)
   map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null,
   anat: {}, anatBase: {}, anatHover: null, anatSnap: null, hideGroups: new Set(),
+  // 3D sculpting on the face mesh: a displacement per mesh vertex (cm, template axes); copy-on-write
+  sculpt: { field: null, base: null }, sstroke: null,
   glDirty: true, fieldDirty: false,
 };
 const wake = (ms = 1200) => { S.awakeUntil = Math.max(S.awakeUntil, now() + ms); };
@@ -357,7 +359,10 @@ const mlsEps = () => Math.pow(.004 * Math.max(S.iw, S.ih), 2);
 /** While mapping (Morph → Map) the photo is shown unchanged so you align to the original. */
 const mapping = () => S.tool === 'morph' && cfg.mSub === 'map';
 const anatOn = (a = S.anat) => Object.values(a).some(v => Math.abs(v) > 1e-3);
-const mapActive = () => !!(S.map && anatOn() && !mapping());
+const sculptOn = () => !!(S.sculpt && S.sculpt.field);
+const mapActive = () => !!(S.map && (anatOn() || sculptOn()) && !mapping());
+/** The face is rendered as a 3D mesh (needs float render targets); otherwise the 2D spline fallback. */
+const useMesh = () => !!(GLR && GLR.gpuMesh);
 const isProfile = (m = S.map) => !!m && Math.abs(m.yaw) > 45;
 const anatSame = (a, b) => FM.OPS.every(o => Math.abs((a[o.key] || 0) - (b[o.key] || 0)) < 1e-3);
 /** Something changed: the alignment (moved = true) or only the anatomy. */
@@ -395,7 +400,8 @@ function mapFrame() {
     sr += hx * gx + hy * gy; si += hx * gy - hy * gx; aa += hx * hx + hy * hy;
   }
   const zr = sr / (aa || 1), zi = si / (aa || 1);
-  m.frame = { pver: m.pver, zr, zi, scale: Math.hypot(zr, zi) || 1 };
+  // photo = z·template + t  (z = scale and roll as a complex number)
+  m.frame = { pver: m.pver, zr, zi, scale: Math.hypot(zr, zi) || 1, tx: bx - (zr * ax - zi * ay), ty: by - (zi * ax + zr * ay) };
   return m.frame;
 }
 /**
@@ -413,6 +419,12 @@ function mapShape() {
     q[2 * i + 1] = m.p[2 * i + 1] + f.zi * dx + f.zr * dy;
     dz[i] = f.scale * (D[3 * i] * s + D[3 * i + 2] * c);
     z0[i] = f.scale * (pt.x * s + pt.z * c);
+  });
+  // with the 3D mesh, the face dots ride on the mesh (which also carries the sculpting)
+  if (useMesh()) FM.POINTS.forEach((pt, i) => {
+    if (!m.vis[i] || pt.field === 'back') return;
+    const r = meshFwd(m.p[2 * i], m.p[2 * i + 1]);
+    q[2 * i] = r.x; q[2 * i + 1] = r.y;
   });
   m.shape = { ver: m.ver, q, dz, z0 };
   return m.shape;
@@ -488,7 +500,24 @@ function mapCtrl() {
   }
   // the photo border stays put (keeps far-away areas still in both layers)
   for (const b of borderAnchors()) { B.push(b.x, b.y, b.x, b.y); F.push(b.x, b.y, b.x, b.y); }
+  // A ring of fixed anchors just outside the face edge: when the face recedes, the background
+  // that fills the gap is stretched only in a narrow band, instead of bending far across the photo.
+  // (Skipped where the ring would land on hair, ears or neck dots, which carry their own motion.)
+  const ringGap = .22 * mapScale(), others = [];
+  FM.POINTS.forEach((pt, i) => { if (m.vis[i] && pt.field === 'back') others.push(i); });
+  contourNormals(bound, m.p).forEach(([nx, ny], k) => {
+    const i = bound.idx[k], ax = m.p[2 * i] + nx * ringGap, ay = m.p[2 * i + 1] + ny * ringGap;
+    if (maskAt(ax, ay) > .02) return;
+    if (others.some(o => (m.p[2 * o] - ax) ** 2 + (m.p[2 * o + 1] - ay) ** 2 < (ringGap * .8) ** 2)) return;
+    B.push(ax, ay, ax, ay);
+  });
   const s = Math.max(S.iw, S.ih);
+  if (useMesh()) {
+    // the face is rendered from the 3D mesh; only the layer behind it needs a spline
+    const back = FM.tpsFit(B, B.length / 4, s);
+    m.ctrl = { ver: m.ver, front: back, back, depth: null, change: null };
+    return m.ctrl;
+  }
   const anyDz = dz.some(v => Math.abs(v) > .05);
   m.ctrl = {
     ver: m.ver,
@@ -512,7 +541,7 @@ function syncMapGrid() {
     const x = i * cell, y = j * cell, k = (j * gw + i) * 4;
     const f = FM.tpsEval(c.front, x, y), b = FM.tpsEval(c.back, x, y);
     g[k] = f[0]; g[k + 1] = f[1]; g[k + 2] = b[0]; g[k + 3] = b[1];
-    d[k] = FM.tpsEval(c.depth, x, y)[0] - x;
+    d[k] = c.depth ? FM.tpsEval(c.depth, x, y)[0] - x : 0;
     d[k + 1] = c.change ? FM.tpsEval(c.change, x, y)[0] - x : 0;
   }
   GLR.setMapGrid(g, d, gw, gh, cell);
@@ -527,8 +556,19 @@ function maskAt(x, y) {
 function mapSrc(x) {
   if (!mapActive()) return { x: x.x, y: x.y };
   const c = mapCtrl();
-  const [fx, fy] = FM.tpsEval(c.front, x.x, x.y);
-  if (maskAt(fx, fy) >= .5) return { x: fx, y: fy };
+  if (useMesh()) {
+    // invert the mesh: which photo point lands here?
+    let sx = x.x, sy = x.y, ok = false;
+    for (let it = 0; it < 30; it++) {
+      const r = meshFwd(sx, sy), ex = r.x - x.x, ey = r.y - x.y;
+      if (ex * ex + ey * ey < .01) { ok = true; break; }
+      sx -= ex * .8; sy -= ey * .8;
+    }
+    if (ok && maskAt(sx, sy) >= .5) return { x: sx, y: sy };
+  } else {
+    const [fx, fy] = FM.tpsEval(c.front, x.x, x.y);
+    if (maskAt(fx, fy) >= .5) return { x: fx, y: fy };
+  }
   const [bx, by] = FM.tpsEval(c.back, x.x, x.y);
   return { x: bx, y: by };
 }
@@ -536,7 +576,9 @@ function mapSrc(x) {
 function mapInv(s) {
   if (!mapActive()) return { x: s.x, y: s.y };
   // a landmark on the face edge (zygion, gonion…) belongs to the face, so the edge counts as face
-  const c = mapCtrl(), T = maskAt(s.x, s.y) >= .2 ? c.front : c.back;
+  const onFace = maskAt(s.x, s.y) >= .2;
+  if (onFace && useMesh()) return meshFwd(s.x, s.y);
+  const c = mapCtrl(), T = onFace ? c.front : c.back;
   // solve f(x) = s: start from the reflected guess, then fixed-point steps
   let [fx, fy] = FM.tpsEval(T, s.x, s.y), x = 2 * s.x - fx, y = 2 * s.y - fy;
   for (let it = 0; it < 12; it++) {
@@ -693,7 +735,240 @@ const mapPt = i => ({ x: S.map.p[2 * i], y: S.map.p[2 * i + 1] });
 /** Photo → screen (while mapping the photo is shown unchanged) and back. */
 const mapToScreen = x => toS(uToV(pToU(sToP(x))));
 const screenToMap = (sx, sy) => pToS(vToP(toI(sx, sy)));
-const mapPending = () => !anatSame(S.anat, S.anatBase);
+const mapPending = () => !anatSame(S.anat, S.anatBase) || (S.sculpt.field || null) !== (S.sculpt.base || null);
+
+/* ---------------------------------------------------- 3D face mesh (Morph) --
+   A dense grid over the photo, lifted onto the face scan: every vertex inside the face gets its
+   3D template position (cm), soft-tissue depth, surface normal and how much it belongs to each
+   feature — all interpolated from the scan dots. The anatomy settings and the sculpt brushes move
+   those vertices in 3D. The mesh is rendered with a depth buffer, so a lowered brow really folds
+   over the lid and a set-back chin tucks under the lip, and the shading (light + ambient
+   occlusion) is worked out from the new surface. */
+const MESH_DIV = 240;
+const MEMB_GROUPS = ['outline', 'skin', 'brows', 'nose', 'lips'];
+/** Grid for this photo — fixed per photo, so sculpting survives re-aligning the scan. */
+function meshGrid() {
+  const cell = Math.max(S.iw, S.ih) / MESH_DIV;
+  return { cell, gw: Math.ceil(S.iw / cell) + 1, gh: Math.ceil(S.ih / cell) + 1 };
+}
+/** Scalar thin-plate spline through (x, y) → value. */
+function scalarFit(xs, ys, vs, s) {
+  const c = [];
+  for (let i = 0; i < xs.length; i++) c.push(xs[i], ys[i], xs[i] + vs[i], ys[i]);
+  return FM.tpsFit(c, xs.length, s, 1e-4);
+}
+const scalarAt = (T, x, y) => FM.tpsEval(T, x, y)[0] - x;
+/** Closed contours of the scan (eye openings, lips) filled onto the mesh grid: 0…1 per vertex. */
+function gridMask(ids, cell, gw, gh) {
+  const m = S.map, c = document.createElement('canvas');
+  c.width = gw; c.height = gh;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff';
+  for (const ct of m.contours) {
+    if (!ids.includes(ct.id) || !ct.closed || ct.idx.some(i => !m.vis[i])) continue;
+    const pts = FM.spline(ct.idx.map(i => ({ x: m.p[2 * i] / cell + .5, y: m.p[2 * i + 1] / cell + .5 })), true, 6);
+    g.beginPath(); pts.forEach((p, k) => k ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.closePath(); g.fill();
+  }
+  const d = g.getImageData(0, 0, gw, gh).data, out = new Float32Array(gw * gh);
+  for (let i = 0; i < gw * gh; i++) out[i] = d[4 * i + 3] / 255;
+  return out;
+}
+/** Per alignment: which vertices make up the face, and each one's place in the 3D template. */
+function meshPrep() {
+  const m = S.map;
+  if (m.mesh && m.mesh.pver === m.pver && m.mesh.seq === S.imgSeq) return m.mesh;
+  const { cell, gw, gh } = meshGrid(), nv = gw * gh, f = mapFrame();
+  const yaw = m.yaw * Math.PI / 180, ct = Math.cos(yaw), st = Math.sin(yaw);
+  // the face (from the face mask) plus one ring of vertices around it
+  const inside = new Uint8Array(nv), act = new Uint8Array(nv);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) if (maskAt(i * cell, j * cell) > .02) inside[j * gw + i] = 1;
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    let a = 0;
+    for (let dj = -1; dj <= 1 && !a; dj++) for (let di = -1; di <= 1; di++) {
+      const ii = i + di, jj = j + dj;
+      if (ii >= 0 && jj >= 0 && ii < gw && jj < gh && inside[jj * gw + ii]) { a = 1; break; }
+    }
+    act[j * gw + i] = a;
+  }
+  // splines from the photo onto the template (as seen from this view), its depth and the tissue depth
+  const ctl = [], gx = [], gy = [], dD = [], dT = [];
+  FM.POINTS.forEach((pt, i) => {
+    if (!m.vis[i] || pt.field === 'back') return;
+    const tp = FM.project(pt, m.yaw);
+    ctl.push(m.p[2 * i], m.p[2 * i + 1], f.zr * tp.x - f.zi * tp.y + f.tx, f.zi * tp.x + f.zr * tp.y + f.ty);
+    gx.push(m.p[2 * i]); gy.push(m.p[2 * i + 1]);
+    dD.push(pt.x * st + pt.z * ct); dT.push(pt.t);
+  });
+  const s = Math.max(S.iw, S.ih);
+  const toT = FM.tpsFit(ctl, gx.length, s), toD = scalarFit(gx, gy, dD, s), toTis = scalarFit(gx, gy, dT, s);
+  const z2 = f.zr * f.zr + f.zi * f.zi;
+  const actIdx = [];
+  for (let v = 0; v < nv; v++) if (act[v]) actIdx.push(v);
+  const na = actIdx.length, kOf = new Int32Array(nv).fill(-1);
+  const VX = new Float32Array(na), VY = new Float32Array(na), VD = new Float32Array(na), d0 = new Float32Array(nv);
+  const pts = new Array(na);
+  actIdx.forEach((v, k) => {
+    kOf[v] = k;
+    const sx = (v % gw) * cell, sy = ((v / gw) | 0) * cell;
+    const [ax, ay] = FM.tpsEval(toT, sx, sy), ux = ax - f.tx, uy = ay - f.ty;
+    VX[k] = (ux * f.zr + uy * f.zi) / z2; VY[k] = (uy * f.zr - ux * f.zi) / z2;
+    VD[k] = scalarAt(toD, sx, sy);
+    d0[v] = VD[k] * f.scale;
+    pts[k] = { x: VX[k] * ct + VD[k] * st, y: VY[k], z: -VX[k] * st + VD[k] * ct, t: Math.max(0, scalarAt(toTis, sx, sy)), n: null, m: null };
+  });
+  // surface normals of the template depth, in template axes
+  const at = (i, j) => (i >= 0 && j >= 0 && i < gw && j < gh) ? kOf[j * gw + i] : -1;
+  actIdx.forEach((v, k) => {
+    const i = v % gw, j = (v / gw) | 0;
+    let l = at(i - 1, j), r = at(i + 1, j), u = at(i, j - 1), b = at(i, j + 1);
+    if (l < 0) l = k; if (r < 0) r = k; if (u < 0) u = k; if (b < 0) b = k;
+    const ax = VX[r] - VX[l], ay = VY[r] - VY[l], ad = VD[r] - VD[l], bx = VX[b] - VX[u], by = VY[b] - VY[u], bd = VD[b] - VD[u];
+    const det = ax * by - ay * bx;
+    let gX = 0, gY = 0;
+    if (Math.abs(det) > 1e-9) { gX = (ad * by - ay * bd) / det; gY = (ax * bd - ad * bx) / det; }
+    const L = Math.hypot(gX, gY, 1), nx = -gX / L, ny = -gY / L, nd = 1 / L;
+    pts[k].n = [nx * ct + nd * st, ny, -nx * st + nd * ct];
+  });
+  // how much each vertex belongs to each feature: a soft blend of the nearby scan dots, with the
+  // eye openings and the lips taken from their filled contours
+  const eyes = gridMask(isProfile(m) ? ['eye'] : ['eyeL', 'eyeR'], cell, gw, gh);
+  const lips = gridMask(['lips'], cell, gw, gh);
+  const sig = .45 * f.scale, inv = 1 / (2 * sig * sig), reach = 9 * sig * sig, feat = [];
+  FM.POINTS.forEach((pt, i) => { if (m.vis[i] && MEMB_GROUPS.includes(pt.group)) feat.push([m.p[2 * i], m.p[2 * i + 1], pt.group]); });
+  actIdx.forEach((v, k) => {
+    const sx = (v % gw) * cell, sy = ((v / gw) | 0) * cell;
+    const w = { outline: 0, skin: .05, brows: 0, nose: 0, lips: 0 };
+    for (const [px, py, g] of feat) { const d2 = (px - sx) ** 2 + (py - sy) ** 2; if (d2 < reach) w[g] += Math.exp(-d2 * inv); }
+    w.lips = Math.max(w.lips, lips[v] * 4);
+    let tot = 0;
+    for (const g in w) tot += w[g];
+    const e = eyes[v], o = { eyes: e };
+    for (const g in w) o[g] = w[g] / tot * (1 - e);
+    pts[k].m = o;
+  });
+  const tris = [];
+  for (let j = 0; j < gh - 1; j++) for (let i = 0; i < gw - 1; i++) {
+    const a = j * gw + i, b = a + 1, c = a + gw, d = c + 1;
+    if (act[a] && act[b] && act[c] && act[d]) tris.push(a, b, d, a, d, c);
+  }
+  const triArr = new Uint32Array(tris);
+  if (useMesh()) GLR.setMeshIndices(triArr);
+  // the eyeball's depth step, softened over a couple of cells so a fold crosses it smoothly
+  const eyeBias = new Float32Array(nv);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    let s2 = 0, n2 = 0;
+    for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+      const ii = i + di, jj = j + dj;
+      if (ii >= 0 && jj >= 0 && ii < gw && jj < gh) { s2 += eyes[jj * gw + ii]; n2++; }
+    }
+    eyeBias[j * gw + i] = Math.max(eyes[j * gw + i], s2 / n2);
+  }
+  // a protective margin around each eye (≈ 0.8 cm, fading out smoothly) for bone and soft-tissue sculpting
+  const lr = Math.max(3, Math.round(.8 * f.scale / cell)), eyeLock = new Float32Array(nv);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    let mx = 0;
+    for (let dj = -lr; dj <= lr; dj++) for (let di = -lr; di <= lr; di++) {
+      const ii = i + di, jj = j + dj;
+      if (ii < 0 || jj < 0 || ii >= gw || jj >= gh) continue;
+      const e = eyes[jj * gw + ii];
+      if (e > 0) { const u = Math.max(0, 1 - Math.hypot(di, dj) / (lr + 1)); mx = Math.max(mx, e * u * u * (3 - 2 * u)); }
+    }
+    eyeLock[j * gw + i] = mx;
+  }
+  m.mesh = { pver: m.pver, seq: S.imgSeq, cell, gw, gh, nv, act, actIdx: Int32Array.from(actIdx), kOf, pts, d0, eye: eyeBias, eyeLock, tris: triArr, cur: null };
+  glMeshKey = '';
+  return m.mesh;
+}
+/** Average of a grid value over the face vertices within r cells (separable box). */
+function blurActive(M, a, r) {
+  const { gw, gh, act } = M, tmp = new Float32Array(gw * gh), out = new Float32Array(gw * gh);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    let s = 0, n = 0;
+    for (let d = -r; d <= r; d++) { const ii = i + d; if (ii >= 0 && ii < gw && act[j * gw + ii]) { s += a[j * gw + ii]; n++; } }
+    tmp[j * gw + i] = n ? s / n : a[j * gw + i];
+  }
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    let s = 0, n = 0;
+    for (let d = -r; d <= r; d++) { const jj = j + d; if (jj >= 0 && jj < gh && act[jj * gw + i]) { s += tmp[jj * gw + i]; n++; } }
+    out[j * gw + i] = n ? s / n : tmp[j * gw + i];
+  }
+  return out;
+}
+/**
+ * The mesh as it is now: anatomy + sculpting applied in 3D, projected into the result.
+ *   X1  result position of every vertex · z1  depth toward the camera · verts  GPU vertex data
+ * Shading compares the new surface with the old one under the photo's light, plus ambient
+ * occlusion: a spot pushed deeper than its surroundings (a recessed rim, a hollow) gets darker.
+ */
+function meshCur() {
+  const m = S.map, M = meshPrep();
+  if (M.cur && M.cur.ver === m.ver) return M.cur;
+  const f = mapFrame(), yaw = m.yaw * Math.PI / 180, ct = Math.cos(yaw), st = Math.sin(yaw), sc = f.scale;
+  const { gw, gh, cell, nv, actIdx, act } = M;
+  const D = FM.anatomyAt(S.anat, M.pts), field = S.sculpt.field;
+  const X1 = new Float32Array(nv * 2), z1 = new Float32Array(nv);
+  for (let v = 0; v < nv; v++) { X1[2 * v] = (v % gw) * cell; X1[2 * v + 1] = ((v / gw) | 0) * cell; }
+  actIdx.forEach((v, k) => {
+    let dx = D[3 * k], dy = D[3 * k + 1], dz = D[3 * k + 2];
+    if (field) { dx += field[3 * v]; dy += field[3 * v + 1]; dz += field[3 * v + 2]; }
+    const hx = dx * ct - dz * st, hy = dy;
+    X1[2 * v] += f.zr * hx - f.zi * hy; X1[2 * v + 1] += f.zi * hx + f.zr * hy;
+    z1[v] = M.d0[v] + sc * (dx * st + dz * ct);
+  });
+  // normals before (photo positions + template depth) and after
+  const normal = (P, Z, i, j) => {
+    const v = j * gw + i, pick = (ii, jj) => (ii >= 0 && jj >= 0 && ii < gw && jj < gh && act[jj * gw + ii]) ? jj * gw + ii : v;
+    const l = pick(i - 1, j), r = pick(i + 1, j), u = pick(i, j - 1), b = pick(i, j + 1);
+    const ax = P(r, 0) - P(l, 0), ay = P(r, 1) - P(l, 1), az = Z[r] - Z[l];
+    const bx = P(b, 0) - P(u, 0), by = P(b, 1) - P(u, 1), bz = Z[b] - Z[u];
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    const L = Math.hypot(nx, ny, nz) || 1;
+    return [nx / L, ny / L, nz / L];
+  };
+  const P0 = (v, c) => c ? ((v / gw) | 0) * cell : (v % gw) * cell, P1 = (v, c) => X1[2 * v + c];
+  const lt = m.light || [0, -.35, 1], lL = Math.hypot(...lt), L = lt.map(x => x / lL);
+  const r = Math.max(2, Math.round(.7 * sc / cell));   // ambient occlusion reach ≈ 0.7 cm
+  const b0 = blurActive(M, M.d0, r), b1 = blurActive(M, z1, r);
+  const shade = new Float32Array(nv).fill(1), strength = cfg.mShade;
+  actIdx.forEach(v => {
+    const i = v % gw, j = (v / gw) | 0;
+    const n0 = normal(P0, M.d0, i, j), n1 = normal(P1, z1, i, j);
+    let k = (Math.max(0, n1[0] * L[0] + n1[1] * L[1] + n1[2] * L[2]) + .3) / (Math.max(0, n0[0] * L[0] + n0[1] * L[1] + n0[2] * L[2]) + .3);
+    k = k > 1 ? 1 + (Math.min(k, 1.6) - 1) * .45 : Math.max(k, .55);   // skin scatters light: softer highlights
+    const dc = ((b1[v] - z1[v]) - (b0[v] - M.d0[v])) / sc;           // cm deeper than before, relative to the surroundings
+    const ao = clamp(1 - .9 * dc, .55, 1.05);
+    shade[v] = 1 + (k * ao - 1) * strength;
+  });
+  const verts = new Float32Array(nv * 6), eb = .35 * sc;
+  for (let v = 0; v < nv; v++) {
+    const o = v * 6;
+    verts[o] = X1[2 * v]; verts[o + 1] = X1[2 * v + 1];
+    verts[o + 2] = z1[v] - M.eye[v] * eb;   // the eyeball sits back: a fold of skin always passes in front of it
+    verts[o + 3] = (v % gw) * cell; verts[o + 4] = ((v / gw) | 0) * cell;
+    verts[o + 5] = shade[v];
+  }
+  M.cur = { ver: m.ver, X1, z1, verts };
+  return M.cur;
+}
+/** Photo → result through the mesh (bilinear between vertices). */
+function meshFwd(x, y) {
+  const M = meshPrep(), C = meshCur(), { cell, gw, gh } = M;
+  const fx = clamp(x / cell, 0, gw - 1.001), fy = clamp(y / cell, 0, gh - 1.001), i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j;
+  const a = j * gw + i, b = a + 1, c = a + gw, d = c + 1;
+  const dx = v => C.X1[2 * v] - (v % gw) * cell, dy = v => C.X1[2 * v + 1] - ((v / gw) | 0) * cell;
+  const lerp2 = g => (g(a) * (1 - tx) + g(b) * tx) * (1 - ty) + (g(c) * (1 - tx) + g(d) * tx) * ty;
+  return { x: x + lerp2(dx), y: y + lerp2(dy) };
+}
+/** Render the mesh into the GPU's face buffer when it changed. */
+let glMeshKey = '';
+function syncMesh() {
+  const M = meshPrep(), key = `${S.imgSeq}|${S.map.ver}|${S.map.pver}`;
+  if (key === glMeshKey) return;
+  glMeshKey = key;
+  const C = meshCur(), sc = Math.min(1, 2048 / Math.max(S.iw, S.ih));
+  GLR.renderMesh(C.verts, [S.iw, S.ih], sc, 1 / (40 * mapFrame().scale));
+  M.bufSc = sc;
+}
 
 const fwdMap = v => isIdentity() ? { x: v.x, y: v.y } : mapSrc(pToS(vToP(v)));
 const invMap = s => isIdentity() ? { x: s.x, y: s.y } : uToV(pToU(sToP(mapInv(s))));
@@ -1023,6 +1298,7 @@ function snapshot() {
     warp: S.warp,   // field arrays are copy-on-write, so sharing the reference is safe
     map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light } : null,
     anat: { ...S.anat }, anatBase: { ...S.anatBase },
+    sculpt: S.sculpt,   // field arrays are copy-on-write too
     list: [...S.meas.values()].map(m => ({ id: m.id, preset: m.preset, kind: m.kind, name: m.name, pts: m.pts.map(cp), src: m.src ? m.src.map(cp) : null })),
     refId: S.refId, calibId: S.calibId, calibMM: S.calibMM, seq: S.seq,
   };
@@ -1031,7 +1307,7 @@ function pushUndo(s = snapshot()) {
   S.undo.push(s);
   if (S.undo.length > 150) S.undo.shift();
   // morph fields are large — keep at most ~24 distinct ones in history
-  const fields = () => new Set(S.undo.map(u => u.warp && u.warp.field).filter(Boolean)).size;
+  const fields = () => new Set(S.undo.flatMap(u => [u.warp && u.warp.field, u.sculpt && u.sculpt.field]).filter(Boolean)).size;
   while (S.undo.length > 1 && fields() > 24) S.undo.shift();
   S.redo = [];
 }
@@ -1056,6 +1332,7 @@ function restore(s) {
     }
   }
   if (s.anat) { S.anat = { ...s.anat }; S.anatBase = { ...(s.anatBase || {}) }; if (S.map) mapTouched(false); }
+  if (s.sculpt) { S.sculpt = s.sculpt; if (S.map) mapTouched(false); }
   S.glDirty = true;
   const old = S.meas;
   S.meas = new Map();
@@ -1483,8 +1760,10 @@ function mapParams(forExport) {
   if (!S.map || S.compare) return null;
   const tint = !forExport && mapping() && cfg.mShowLayers && !S.qfit;
   if (!mapActive() && !tint) return null;
-  if (mapActive()) syncMapGrid();
-  return { moved: mapActive(), showLayers: tint, shade: cfg.mShade, light: S.map.light };
+  const on = mapActive(), mesh = on && useMesh();
+  if (on) { syncMapGrid(); if (mesh) syncMesh(); }
+  const sc = Math.min(1, 2048 / Math.max(S.iw, S.ih));
+  return { moved: on, mesh, jump: Math.max(8, 6 / sc), showLayers: tint, shade: cfg.mShade, light: S.map.light };
 }
 function glParams(view, d, cw, ch, alpha) {
   const a = S.adj, e = a.ell;
@@ -1626,7 +1905,9 @@ function drawBrush(ctx, c) {
   ctx.save();
   ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, TAU);
   ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 3; ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+  // sculpt brushes wear their level's colour
+  ctx.strokeStyle = isSculpt() ? rgba(LEVEL_COLORS[LEVEL_KEY[cfg.mLevel || 'soft']], .95) : 'rgba(255,255,255,.85)';
+  ctx.lineWidth = 1.2; ctx.stroke();
   if (hard > .05 && r * hard > 4) {
     ctx.setLineDash([2, 4]);
     ctx.beginPath(); ctx.arc(c.x, c.y, r * hard, 0, TAU);
@@ -2093,6 +2374,7 @@ ov.addEventListener('pointerdown', e => {
     S.press = null; S.pan = null; S.mdrag = null; S.box = null; S.rpress = null;
     if (S.drag) endDrag();
     if (S.stroke) endStroke();
+    if (S.sstroke) endSculpt();
     if (S.mapDrag || S.mapBox) morphUp(e);
     if (S.hdrag) endHandle();
     if (S.tdrag) endXf();
@@ -2168,6 +2450,7 @@ ov.addEventListener('pointermove', e => {
   wake();
   const fine = e.shiftKey ? .25 : 1;
   if (S.mapDrag || S.mapBox) { morphMove(sx, sy, e); return; }
+  if (S.sstroke) { moveSculpt(sx, sy); return; }
   if (S.stroke) {
     const v = toI(sx, sy);
     if (cfg.mMode === 'push' && dist(S.stroke.last, v) > 0) { morphPush(S.stroke.last, v); S.stroke.changed = true; }
@@ -2340,8 +2623,102 @@ function quickFitClick(sx, sy) {
   toast('Scanned and snapped to the edges — check the face edge, hairline and ears', 5000);
 }
 
+/* ---- 3D sculpt brushes (Morph → Sculpt) ----
+   They reshape the face mesh itself, in 3D, at one level:
+     bone  the change is filtered through the soft tissue above it (wider, weaker where thick)
+     soft  in / out scale with how much fat and muscle lie there
+     skin  exactly under the brush
+   In / Out work along the surface (toward / away from the camera on a front photo), Move drags
+   the surface across the photo, Smooth evens out sculpting, Restore takes it away. */
+const isSculpt = () => /^s[A-Z]/.test(cfg.mMode);
+const LEVEL_KEY = { bone: 'bone', soft: 'soft', skin: 'shape' };
+/** Brush radius in result px at a screen point. */
+function brushResultR(sx, sy) {
+  const v = toI(sx, sy), a = pToS(vToP(v)), b = pToS(vToP({ x: v.x + brushV(), y: v.y }));
+  return Math.max(2, dist(a, b));
+}
+function startSculpt(sx, sy) {
+  if (!S.map || !useMesh()) { toast(S.map ? 'Sculpting needs WebGL float rendering, which this browser lacks' : 'Map the face first — sculpting works on the face scan', 4000); return; }
+  const snap = snapshot(), M = meshPrep();
+  // copy-on-write, so undo snapshots keep the old field
+  S.sculpt = { ...S.sculpt, field: S.sculpt.field ? S.sculpt.field.slice() : new Float32Array(M.nv * 3) };
+  S.sstroke = { last: screenToMap(sx, sy), sx, sy, snap, changed: false };
+  if (cfg.mMode !== 'sMove') sculptDab(S.sstroke.last, null, 1 / 60);
+  S.glDirty = true; wake();
+}
+/** One sculpt dab at result point c: d = drag (result px) for Move, dt = seconds held for the others. */
+function sculptDab(c, d, dt) {
+  const M = meshPrep(), C = meshCur(), f = S.sculpt.field, fr = mapFrame(), sc = fr.scale;
+  const yaw = S.map.yaw * Math.PI / 180, ct = Math.cos(yaw), st = Math.sin(yaw), z2 = fr.zr * fr.zr + fr.zi * fr.zi;
+  const st0 = S.sstroke, R = brushResultR(st0.sx, st0.sy), sig = R / 2, hard = clamp(cfg.mHard, 0, 1) * .85;
+  const lvl = cfg.mLevel || 'soft', mode = cfg.mMode, str = cfg.mStrength;
+  const reach = lvl === 'bone' ? R + 2.2 * sc : R, reach2 = reach * reach;
+  // a drag across the result, as a move in template space (cm)
+  let mv = null;
+  if (d) {
+    const vx = (d.x * fr.zr + d.y * fr.zi) / z2, vy = (d.y * fr.zr - d.x * fr.zi) / z2;
+    mv = [vx * ct, vy, -vx * st];
+  }
+  const { gw, actIdx, kOf } = M;
+  let any = false;
+  for (let k = 0; k < actIdx.length; k++) {
+    const v = actIdx[k], ex = C.X1[2 * v] - c.x, ey = C.X1[2 * v + 1] - c.y, r2 = ex * ex + ey * ey;
+    if (r2 > reach2) continue;
+    const p = M.pts[k], t = p.t / 10;
+    let w;
+    if (lvl === 'bone') {
+      const k2 = (.9 * t * sc) ** 2, s2 = sig * sig + k2;
+      w = str * (sig * sig / s2) * Math.exp(-r2 / (2 * s2)) * 1.2;
+    } else {
+      w = (1 - smooth01(hard, 1, Math.sqrt(r2) / R)) * str;
+      if (lvl === 'soft') w *= Math.min(2, t / 1.2);
+    }
+    // the eyes and their lid margins keep their shape unless you sculpt the skin directly
+    if (lvl !== 'skin') w *= 1 - M.eyeLock[v];
+    if (w < 1e-4) continue;
+    const o = 3 * v;
+    if (mode === 'sMove' && mv) { f[o] += mv[0] * w; f[o + 1] += mv[1] * w; f[o + 2] += mv[2] * w; }
+    else if (mode === 'sIn' || mode === 'sOut') {
+      const a = (mode === 'sOut' ? 1 : -1) * w * dt * .7;   // cm per second at full strength
+      f[o] += p.n[0] * a; f[o + 1] += p.n[1] * a; f[o + 2] += p.n[2] * a;
+    } else if (mode === 'sSmooth') {
+      const i = v % gw, j = (v / gw) | 0, nb = [[i - 1, j], [i + 1, j], [i, j - 1], [i, j + 1]];
+      let ax = 0, ay = 0, az = 0, n = 0;
+      for (const [ii, jj] of nb) {
+        const kk = ii >= 0 && jj >= 0 && ii < gw && jj < M.gh ? kOf[jj * gw + ii] : -1;
+        if (kk < 0) continue;
+        const u = 3 * (jj * gw + ii); ax += f[u]; ay += f[u + 1]; az += f[u + 2]; n++;
+      }
+      if (!n) continue;
+      const a = Math.min(1, w * dt * 8);
+      f[o] += (ax / n - f[o]) * a; f[o + 1] += (ay / n - f[o + 1]) * a; f[o + 2] += (az / n - f[o + 2]) * a;
+    } else if (mode === 'sRestore') {
+      const a = 1 - Math.min(1, w * dt * 4);
+      f[o] *= a; f[o + 1] *= a; f[o + 2] *= a;
+    } else continue;
+    any = true;
+  }
+  if (any) { st0.changed = true; mapTouched(false); S.glDirty = true; wake(); }
+}
+function moveSculpt(sx, sy) {
+  const s = S.sstroke, x = screenToMap(sx, sy);
+  s.sx = sx; s.sy = sy;
+  if (cfg.mMode === 'sMove') sculptDab(s.last, { x: x.x - s.last.x, y: x.y - s.last.y }, 0);
+  s.last = x;
+}
+function endSculpt() {
+  const s = S.sstroke;
+  S.sstroke = null;
+  if (!s) return;
+  if (s.changed) { pushUndo(s.snap); syncPts(); }
+  else { S.sculpt = s.snap.sculpt; if (S.map) mapTouched(false); }
+  S.glDirty = true;
+  syncUI();
+}
+
 /* morph strokes */
 function startStroke(sx, sy) {
+  if (isSculpt()) { startSculpt(sx, sy); return; }
   const snap = snapshot();
   beginStroke();
   const v = toI(sx, sy);
@@ -2439,6 +2816,7 @@ function pointerUp(e) {
   pointers.delete(e.pointerId);
   if (pinch) { if (pointers.size < 2) pinch = null; S.press = null; return; }
   if (S.mapDrag || S.mapBox) morphUp(e);
+  else if (S.sstroke) endSculpt();
   else if (S.stroke) endStroke();
   else if (S.hdrag) endHandle();
   else if (S.tdrag) endXf();
@@ -2604,7 +2982,7 @@ addEventListener('keyup', e => {
   if (e.key.toLowerCase() === 'b') setCompare(false);
   if (e.key === 'Shift') { S.shift = false; wake(); }
 });
-addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); if (S.mapDrag || S.mapBox) morphUp({}); });
+addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); if (S.sstroke) endSculpt(); if (S.mapDrag || S.mapBox) morphUp({}); });
 addEventListener('resize', () => { resize(); if (S.img) fitView(); });
 
 /* --------------------------------------------------------- image input -- */
@@ -2632,8 +3010,8 @@ function setImageState(rec) {
     drag: null, mdrag: null, press: null, rpress: null, box: null, leaving: [],
   });
   S.picked = new Set();
-  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null, anat: {}, anatBase: {}, anatHover: null, lum: null });
-  glMaskVer = -1; glMapKey = '';
+  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null, anat: {}, anatBase: {}, anatHover: null, lum: null, sculpt: { field: null, base: null }, sstroke: null });
+  glMaskVer = -1; glMapKey = ''; glMeshKey = '';
   customSig = null;
   S.imgRec = rec || null;
   S.imgSeq++;
@@ -2893,6 +3271,7 @@ function toggleShowAll() {
 function setTool(t) {
   if (S.draft) { S.draft = null; S.draftM = null; }
   if (S.stroke) endStroke();
+  if (S.sstroke) endSculpt();
   if (S.mapDrag || S.mapBox) morphUp({});
   if (EDIT_TOOLS.has(t) && !GLR) toast(GL_MESSAGES[GL_REASON] || GL_MESSAGES.webgl, 7000);
   S.tool = t;
@@ -2966,15 +3345,25 @@ function renderToolOpts() {
         ${sliderRow('mShade', 'Relighting', 0, 100, 1, 'How strongly forward / backward changes re-shade the skin (light direction is read from the photo)')}
         <div class="to-actions" style="margin-top:4px"><button type="button" class="btn ghost sm" id="anatReset">Reset structure</button></div>
       </div>
-      <div class="to-sec"><span>Brush</span><span class="lv-key">free liquify on top</span></div>
-      <div class="seg full" id="mMode">
+      <div class="to-sec"><span>Brushes</span><span class="lv-key">paint on the photo</span></div>
+      <div class="to-label">Sculpt <small>3D — reshapes the face itself</small></div>
+      <div class="seg full mmode" id="mSculpt">
+        <button type="button" data-v="sOut" title="Build the surface up toward the camera (along the skin)">Out</button><button type="button" data-v="sIn" title="Push the surface back, away from the camera">In</button><button type="button" data-v="sMove" title="Drag the surface across the photo">Move</button><button type="button" data-v="sSmooth" title="Even out sculpting">Smooth</button><button type="button" data-v="sRestore" title="Take sculpting away">Restore</button>
+      </div>
+      <div class="seg full mlevel" id="mLevel">
+        ${[['bone', 'Bone'], ['soft', 'Soft tissue'], ['skin', 'Skin']].map(([v, n]) => `<button type="button" data-v="${v}"><i class="lv" style="--c:${LEVEL_COLORS[LEVEL_KEY[v]]}"></i>${n}</button>`).join('')}
+      </div>
+      <p class="to-note" id="mLevelNote"></p>
+      <div class="to-label">Liquify <small>2D — moves pixels</small></div>
+      <div class="seg full mmode" id="mMode">
         <button type="button" data-v="push">Push</button><button type="button" data-v="bloat">Bloat</button>
         <button type="button" data-v="pinch">Pinch</button><button type="button" data-v="restore">Restore</button>
       </div>
       ${sliderRow('mSize', 'Size', 1, 50, .1)}
       ${sliderRow('mStrength', 'Strength', 1, 100, 1)}
       ${sliderRow('mHard', 'Hardness', 0, 100, 1)}
-      <label class="tg sm"><span>Limit stretching<small>Stops a push once any area would stretch or squash past ≈ 1.7× — never smears, but moves less</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>`;
+      <label class="tg sm" id="mLimitRow"><span>Limit stretching<small>Liquify only: stops a push once any area would stretch or squash past ≈ 1.7×</small></span><input type="checkbox" class="sw-toggle" id="mLimit"></label>
+      <div class="to-actions" style="margin-top:4px"><button type="button" class="btn ghost sm" id="sculptClear">Clear sculpting</button></div>`;
     toolOptsBody.innerHTML = `
       <div class="to-head"><span class="to-title">Morph</span><span class="to-sub">landmarks follow the face</span></div>
       <div class="seg full msub" id="mSub">
@@ -3035,15 +3424,25 @@ function renderToolOpts() {
         row.addEventListener('pointerenter', () => { S.anatHover = o.key; wake(); });
         row.addEventListener('pointerleave', () => { if (S.anatHover === o.key) { S.anatHover = null; wake(); } });
       }
-      $('#mShade').addEventListener('input', e => { cfg.mShade = +e.target.value / 100; saveCfg(); S.glDirty = true; syncToolOpts(); wake(); });
+      $('#mShade').addEventListener('input', e => { cfg.mShade = +e.target.value / 100; saveCfg(); if (S.map) mapTouched(false); S.glDirty = true; syncToolOpts(); wake(); });
       $('#anatReset').addEventListener('click', () => {
         if (!anatOn()) return;
         pushUndo();
         S.anat = {}; if (S.map) mapTouched(false);
         syncPts(); syncUI();
       });
-      $('#mMode').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mMode = b.dataset.v; saveCfg(); syncToolOpts(); renderHint(); } });
+      const pickMode = e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mMode = b.dataset.v; saveCfg(); syncToolOpts(); renderHint(); wake(); } };
+      $('#mMode').addEventListener('click', pickMode);
+      $('#mSculpt').addEventListener('click', pickMode);
+      $('#mLevel').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.mLevel = b.dataset.v; if (!isSculpt()) cfg.mMode = 'sOut'; saveCfg(); syncToolOpts(); renderHint(); wake(); } });
       $('#mLimit').addEventListener('change', e => { cfg.mLimit = e.target.checked; saveCfg(); });
+      $('#sculptClear').addEventListener('click', () => {
+        if (!sculptOn()) return;
+        pushUndo();
+        S.sculpt = { ...S.sculpt, field: null };
+        if (S.map) mapTouched(false);
+        syncPts(); syncUI();
+      });
       const bind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncToolOpts(); wake(); });
       bind('mSize', 'mSize', v => v / 100);
       bind('mStrength', 'mStrength', v => v / 100);
@@ -3058,6 +3457,7 @@ function renderToolOpts() {
       pushUndo();
       S.warp = { ...S.warp, base: S.warp.field };
       S.anatBase = { ...S.anat };
+      S.sculpt = { ...S.sculpt, base: S.sculpt.field };
       syncUI();
       toast('Morph confirmed');
     });
@@ -3066,7 +3466,9 @@ function renderToolOpts() {
       pushUndo();
       S.warp = { ...S.warp, field: S.warp.base || null };
       S.fieldDirty = true;
-      S.anat = { ...S.anatBase }; if (S.map) mapTouched(false);
+      S.anat = { ...S.anatBase };
+      S.sculpt = { ...S.sculpt, field: S.sculpt.base || null };
+      if (S.map) mapTouched(false);
       syncPts(); syncUI();
       toast('Unconfirmed changes discarded');
     });
@@ -3146,7 +3548,7 @@ function syncToolOpts() {
     $('#mConfirm').disabled = !pending;
     $('#mReset').disabled = !pending;
     $('#mPending').classList.toggle('pending', pending);
-    setText($('#mStatus'), pending ? 'Unconfirmed changes' : (S.warp.field || anatOn()) ? 'All changes confirmed' : 'No morph yet');
+    setText($('#mStatus'), pending ? 'Unconfirmed changes' : (S.warp.field || anatOn() || sculptOn()) ? 'All changes confirmed' : 'No morph yet');
     $$('#mSub [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === sub));
     if (sub === 'map') {
       $$('#mView [data-v]').forEach(b => b.classList.toggle('on', !!S.map && b.dataset.v === S.map.view));
@@ -3179,7 +3581,16 @@ function syncToolOpts() {
       }
       setRange('mShade', Math.round(cfg.mShade * 100), Math.round(cfg.mShade * 100) + '%');
       $('#anatReset').disabled = !anatOn();
-      $$('#mMode [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === cfg.mMode));
+      $$('#mMode [data-v], #mSculpt [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === cfg.mMode));
+      const sculpt = isSculpt();
+      $$('#mLevel [data-v]').forEach(b => b.classList.toggle('on', sculpt && b.dataset.v === (cfg.mLevel || 'soft')));
+      $('#mLevel').classList.toggle('dim', !sculpt);
+      setText($('#mLevelNote'), !sculpt ? 'Pick a sculpt tool to reshape in 3D.'
+        : { bone: 'Bone: the change shows through the soft tissue — sharp where it is thin (cheekbone, brow), broad and softened where it is thick (jaw angle, cheeks).',
+            soft: 'Soft tissue: builds or removes volume in proportion to the fat and muscle there.',
+            skin: 'Skin: exactly under the brush (the eyes too).' }[cfg.mLevel || 'soft']);
+      $('#mLimitRow').classList.toggle('dim', sculpt);
+      $('#sculptClear').disabled = !sculptOn();
       setRange('mSize', +(cfg.mSize * 100).toFixed(1), Math.round(brushV()) + ' px');
       setRange('mStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
       setRange('mHard', Math.round(cfg.mHard * 100), Math.round(cfg.mHard * 100) + '%');
@@ -3556,9 +3967,10 @@ function renderHint() {
     } else if (S.tool === 'morph' && cfg.mSub === 'map') {
       html = `<b>Morph · Map</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · then <b>Morph</b></span>`;
     } else if (S.tool === 'morph') {
-      const mode = { push: 'Push', bloat: 'Bloat', pinch: 'Pinch', restore: 'Restore' }[cfg.mMode];
-      const act = cfg.mMode === 'push' ? 'Drag' : 'Hold';
-      html = `<b>Morph</b><span class="h-desc">Structure sliders reshape the anatomy · ${act.toLowerCase()} on the photo to ${mode.toLowerCase()} · hold <kbd>B</kbd> to compare</span>`;
+      const names = { push: 'push', bloat: 'bloat', pinch: 'pinch', restore: 'restore', sOut: 'build out', sIn: 'push in', sMove: 'move the surface', sSmooth: 'smooth', sRestore: 'restore' };
+      const act = cfg.mMode === 'push' || cfg.mMode === 'sMove' ? 'drag' : 'hold';
+      const lvl = isSculpt() ? ` (${{ bone: 'bone', soft: 'soft tissue', skin: 'skin' }[cfg.mLevel || 'soft']})` : '';
+      html = `<b>Morph</b><span class="h-desc">Sliders reshape the anatomy · ${act} on the photo to ${names[cfg.mMode] || 'brush'}${lvl} · hold <kbd>B</kbd> to compare</span>`;
     } else if (S.tool === 'adjust') {
       html = `<b>Adjust image</b><span class="h-desc">Corners stretch (<kbd>Shift</kbd> keep ratio) · outside a corner rotates · inside moves${S.adj.lens > 0 ? ' · blue dots fit the face' : ''}</span>`;
     } else if (tgt && tgt.preset) {
@@ -3724,6 +4136,7 @@ function frame(t) {
   try {
     stepView(dt);
     if (S.stroke && cfg.mMode !== 'push') dabHere(dt);
+    if (S.sstroke && cfg.mMode !== 'sMove') sculptDab(screenToMap(S.sstroke.sx, S.sstroke.sy), null, dt);
     if (S.map && S.map.maskDirty && !S.mapDrag) { buildMask(); S.map.maskDirty = false; }
     drawImageLayer(dt);
     drawGrid(dt);
