@@ -10,7 +10,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
-<link rel="stylesheet" href="style.css?v=15">
+<link rel="stylesheet" href="style.css?v=17">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -154,6 +154,19 @@
   <div class="list" id="list"></div>
 </aside>
 
+<!-- Face surface: 3D view (Face map → Surface) -->
+<div id="surf3d" class="surf3d glass" hidden>
+  <div class="s3-head">
+    <span class="s3-title">3D surface</span>
+    <div class="seg" id="s3Mode"><button type="button" data-v="photo" class="on">Photo</button><button type="button" data-v="clay">Clay</button><button type="button" data-v="wire">Wire</button></div>
+    <button class="icon-btn sm" id="s3Close" type="button" aria-label="Close 3D view"><svg class="ic" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8"/></svg></button>
+  </div>
+  <canvas id="s3Canvas"></canvas>
+  <div class="s3-foot">
+    <div class="seg"><button type="button" id="s3Left">◀ Side</button><button type="button" id="s3Front">Front</button><button type="button" id="s3Right">Side ▶</button></div>
+    <span>Drag to turn · scroll to zoom</span>
+  </div>
+</div>
 <div id="hint" class="hint"><div class="hint-in"></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
@@ -264,9 +277,10 @@
 
 <!-- Bump the ?v= tags (and BUILD in app.js, presets.js, warp.js and facemap.js) on every release.
      If a browser still has an old copy of a file, app.js fetches it again by itself. -->
-<script src="presets.js?v=15"></script>
-<script src="warp.js?v=15"></script>
-<script src="facemap.js?v=15"></script>
-<script src="app.js?v=15"></script>
+<script src="presets.js?v=17"></script>
+<script src="warp.js?v=17"></script>
+<script src="facemap.js?v=17"></script>
+<script src="surface.js?v=17"></script>
+<script src="app.js?v=17"></script>
 </body>
 </html>
