@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '14';   // must match the build in presets.js, warp.js and facemap.js
+const BUILD = '15';   // must match the build in presets.js, warp.js and facemap.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -138,7 +138,7 @@ const DEFAULTS = {
   width: 1.5, label: 10.5,
   loupe: false, names: true, gridFx: true,
   mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
-  mSub: 'map', mShowLayers: true, mShade: .6, mOpen: 'bone',
+  mShowLayers: true, mShade: .6, mOpen: 'bone',
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -146,8 +146,7 @@ const SKEY = 'cranimeter:settings';
 let cfg = (() => {
   try {
     const c = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(SKEY) || '{}') };
-    if (c.mSub !== 'map' && c.mSub !== 'morph') c.mSub = 'morph';   // older releases had more sub-modes
-    for (const k of ['mSmooth', 'mLevels', 'mLevelStrict', 'mShowLevels', 'mProtect', 'mLevel']) delete c[k];
+    for (const k of ['mSmooth', 'mLevels', 'mLevelStrict', 'mShowLevels', 'mProtect', 'mLevel', 'mSub']) delete c[k];
     if (/^s[A-Z]/.test(c.mMode)) c.mMode = 'push';   // the 3D sculpt brushes of build 13 are gone
     return c;
   } catch (e) { return { ...DEFAULTS }; }
@@ -232,7 +231,8 @@ const S = {
   warp: { field: null, gw: 1, gh: 1, cs: 1 },
   scratch: null, stroke: null, hdrag: null, compare: false, adjSnap: null,
   // face scan (Morph → Map) and the anatomy settings on top of it (Morph → Morph)
-  map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null,
+  // the face map is selected in the panel like a measurement (mapOpen): then its dots are edited
+  map: null, mapOpen: false, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null,
   anat: {}, anatBase: {}, anatHover: null, anatSnap: null, hideGroups: new Set(),
   // dodge & burn paint: log brightness per tone-grid node on the original photo; copy-on-write
   tone: { field: null, base: null }, toneRev: 0, tstroke: null,
@@ -360,8 +360,8 @@ const mapGap = () => .02 * Math.max(S.iw, S.ih);
 const mlsEps = () => Math.pow(.004 * Math.max(S.iw, S.ih), 2);
 /** Thin-plate-spline smoothing for the two layers (photo size = 1). */
 const TPS_SMOOTH = 2e-4;
-/** While mapping (Morph → Map) the photo is shown unchanged so you align to the original. */
-const mapping = () => S.tool === 'morph' && cfg.mSub === 'map';
+/** While the face map is selected the photo is shown unchanged, so you align the dots to the original. */
+const mapping = () => !!(S.mapOpen && S.img);
 const anatOn = (a = S.anat) => Object.values(a).some(v => Math.abs(v) > 1e-3);
 const toneOn = () => !!(S.tone && S.tone.field);
 const mapActive = () => !!(S.map && anatOn() && !mapping());
@@ -1377,6 +1377,10 @@ function removeMany(ids) {
 const removeMeas = id => removeMany([id]);
 
 function pickAll() {
+  if (mapping() && S.map) {   // the face map is open: select all its visible dots
+    S.mapSel = new Set(FM.POINTS.map((_, i) => i).filter(dotShown));
+    wake(); return;
+  }
   const ids = [...S.meas.values()].filter(isVisible).map(m => m.id);
   if (S.draft) cancelDraft();
   S.picked = new Set(ids);
@@ -1757,7 +1761,7 @@ function drawImageLayer(dt) {
 /* --------------------------------------------------- edit-tool overlays -- */
 
 const MAP_GROUPS = [
-  ['outline', 'Face edge', '#7EA6FF'], ['skin', 'Cheeks & chin', '#6FC3E8'], ['brows', 'Brows', '#A8D88F'],
+  ['outline', 'Face edge', '#7EA6FF'], ['skin', 'Face lines', '#6FC3E8'], ['brows', 'Brows', '#A8D88F'],
   ['eyes', 'Eyes', '#F0CD6E'], ['nose', 'Nose', '#F2A7C6'], ['lips', 'Lips', '#BCAEF7'],
   ['ears', 'Ears', '#F5B27A'], ['hair', 'Hair', '#6ED8CB'], ['neck', 'Neck', '#D9A6E8'],
 ];
@@ -2011,8 +2015,8 @@ function drawOverlay(t, dt) {
   }
 
   if (S.tool === 'adjust') drawAdjustGuides(ctx);
-  if (S.tool === 'morph' && S.map && !S.compare) { if (mapping()) drawMap(ctx); else drawAnatomyFocus(ctx); }
-  const brushOn = S.tool === 'morph' && cfg.mSub === 'morph' && !S.anatHover;
+  if (S.map && !S.compare) { if (mapping()) drawMap(ctx); else if (S.tool === 'morph') drawAnatomyFocus(ctx); }
+  const brushOn = S.tool === 'morph' && !mapping() && !S.anatHover;
   if (brushOn && !S.qfit && S.cursorIn && S.cursor && !S.pan && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
   if (S.qfit && S.cursorIn && S.cursor) tag(ctx, qfitSteps()[S.qfit.step].label + `  ${S.qfit.step + 1}/4`, S.cursor.x, S.cursor.y);
 
@@ -2243,7 +2247,8 @@ function refreshCursor() {
   else if (S.drag || S.pan || S.hdrag || (S.mapDrag && S.mapDrag.moved) || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
   else if (S.box || S.mapBox || S.qfit) c = 'crosshair';
   else if (S.space) c = 'grab';
-  else if (S.tool === 'morph') c = S.mapHover != null ? 'grab' : (mapping() ? 'crosshair' : 'none');
+  else if (mapping()) c = S.mapHover != null ? 'grab' : 'crosshair';
+  else if (S.tool === 'morph') c = 'none';
   else if (S.tool === 'adjust') c = S.hoverHandle ? 'grab' : 'default';
   else if (S.hover && S.hover.node >= 0) c = 'grab';
   else if (S.hover && selectMode()) c = 'move';
@@ -2288,11 +2293,11 @@ function xfCursor(z) {
 function updateHover(sx, sy) {
   const hh = handleAt(sx, sy);
   if (hh !== (S.hoverHandle || null)) { S.hoverHandle = hh; wake(); }
-  const mh = S.tool === 'morph' && !S.mapDrag && !S.mapBox ? mapHitAt(sx, sy) : null;
+  const mh = mapping() && !S.mapDrag && !S.mapBox ? mapHitAt(sx, sy) : null;
   if (mh !== S.mapHover && !S.mapDrag) { S.mapHover = mh; wake(); }
   const xz = hh ? null : xfZoneAt(sx, sy);
   if (JSON.stringify(xz) !== JSON.stringify(S.hoverXf || null)) { S.hoverXf = xz; wake(); }
-  const h = S.draft || !S.img || EDIT_TOOLS.has(S.tool) ? null : hitTest(sx, sy);
+  const h = S.draft || !S.img || EDIT_TOOLS.has(S.tool) || mapping() ? null : hitTest(sx, sy);
   const changed = (h && h.id) !== (S.hover && S.hover.id) || (h && h.node) !== (S.hover && S.hover.node);
   S.hover = h;
   if (changed) wake();
@@ -2337,11 +2342,12 @@ ov.addEventListener('pointerdown', e => {
     return;
   }
   if (e.button !== 0) return;
+  if (mapping()) { mapDown(sx, sy, e); return; }
   if (EDIT_TOOLS.has(S.tool) && !GLR) {
     S.press = { x: sx, y: sy, moved: false, vx: S.view.x, vy: S.view.y };   // tools unavailable: drag just pans
     return;
   }
-  if (S.tool === 'morph') { morphDown(sx, sy, e); return; }
+  if (S.tool === 'morph') { startStroke(sx, sy); return; }
   if (S.tool === 'adjust') {
     const h = handleAt(sx, sy);
     if (h) { S.hdrag = { id: h, snap: snapshot(), moved: false }; refreshCursor(); return; }
@@ -2445,7 +2451,7 @@ ov.addEventListener('pointermove', e => {
   updateHover(sx, sy);
 });
 
-/* ---- face scan interaction (Morph → Map) ---- */
+/* ---- face map interaction (the Face map layer is selected) ---- */
 function mapHitAt(sx, sy) {
   if (!S.map || !mapping() || S.qfit) return null;
   const P_ = mapScreenPts();
@@ -2458,18 +2464,40 @@ function ensureMap(quiet) {
   if (S.map || !FM || !S.img) return;
   const n = fitMap();
   syncPts();
-  if (!quiet) toast(n ? `Face scan placed from ${n} of your landmarks — check it in Map` : 'Face scan placed on a guess — use Map to fit it', 5000);
+  if (!quiet) toast(n ? `Face map placed from ${n} of your landmarks — check the dots` : 'Face map placed on a guess — use Quick fit to place it', 5000);
 }
-function setMorphSub(v) {
-  if (v === cfg.mSub) return;
-  cfg.mSub = v; saveCfg();
-  S.qfit = null; S.anatHover = null;
-  if (v === 'map') ensureMap(true); else S.mapSel.clear();
+/**
+ * Select the face map in the panel (like a measurement layer) or close it. While it is selected,
+ * its dots show on the unchanged photo and clicks on the canvas edit them.
+ */
+function openFaceMap(on) {
+  on = !!on && !!FM && !!S.img;
+  if (on === S.mapOpen) return;
+  if (on) {
+    if (S.tool !== 'move') setTool('move');
+    if (S.draft) { S.draft = null; S.draftM = null; }
+    S.sel = []; S.active = null; S.showAll = false; S.picked.clear();
+    S.mapOpen = true;
+    ensureMap(true);
+  } else {
+    if (S.mapDrag || S.mapBox) morphUp({});
+    S.mapOpen = false;
+    S.qfit = null; S.mapSel.clear(); S.mapHover = null;
+  }
+  S.glDirty = true;
   syncPts();               // the anatomy is hidden while mapping, so points move
-  toolOptsFor = null; renderToolOpts();
-  renderHint(); refreshCursor();
+  syncUI();
 }
-/** Switch the scan to another view (front or a profile): re-placed from scratch for that view. */
+/** Remove the face map (and the anatomy changes that need it) — an undo step. */
+function clearFaceMap() {
+  if (!S.map) return;
+  pushUndo();
+  S.map = null; S.mapSel.clear(); S.qfit = null;
+  S.anat = {}; S.anatBase = {};
+  S.glDirty = true;
+  syncPts(); syncUI();
+  toast('Face map removed');
+}/** Switch the scan to another view (front or a profile): re-placed from scratch for that view. */
 function setMapView(view) {
   if (S.map && S.map.view === view) return;
   pushUndo();
@@ -2492,9 +2520,8 @@ function moveMapPoints(dx, dy) {
   }
   wake();
 }
-function morphDown(sx, sy, e) {
+function mapDown(sx, sy, e) {
   if (S.qfit) { quickFitClick(sx, sy); return; }
-  if (cfg.mSub !== 'map') { startStroke(sx, sy); return; }
   ensureMap();
   const hit = mapHitAt(sx, sy), x = screenToMap(sx, sy);
   if (hit != null) {
@@ -2542,7 +2569,7 @@ function morphUp(e) {
 }
 /* quick fit: four clicks place the whole scan */
 function startQuickFit() {
-  if (cfg.mSub !== 'map') setMorphSub('map');
+  openFaceMap(true);
   ensureMap(true);
   S.qfit = { step: 0, clicks: [] };
   S.mapSel.clear();
@@ -2879,7 +2906,8 @@ addEventListener('keydown', e => {
       else if (exportPop.classList.contains('open')) closeExportPop();
       else if (calibCtx) closeCalib(false);
       else if (S.qfit) { S.qfit = null; renderHint(); refreshCursor(); syncToolOpts(); wake(); }
-      else if (S.tool === 'morph' && S.mapSel.size) { S.mapSel.clear(); wake(); }
+      else if (mapping() && S.mapSel.size) { S.mapSel.clear(); wake(); }
+      else if (S.mapOpen) openFaceMap(false);
       else if (S.draft) cancelDraft(true);
       else if (S.tool !== 'move') setTool('move');
       else if (S.picked.size) { S.picked.clear(); syncUI(); }
@@ -2936,7 +2964,7 @@ function setImageState(rec) {
     drag: null, mdrag: null, press: null, rpress: null, box: null, leaving: [],
   });
   S.picked = new Set();
-  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null, anat: {}, anatBase: {}, anatHover: null, lum: null, tone: { field: null, base: null }, tstroke: null });
+  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null, anat: {}, anatBase: {}, anatHover: null, lum: null, tone: { field: null, base: null }, tstroke: null, mapOpen: false });
   S.toneRev++;
   glMaskVer = -1; glMapKey = '';
   customSig = null;
@@ -2956,7 +2984,6 @@ function setImageState(rec) {
   S.fieldDirty = true; S.glDirty = true;
   body.classList.add('has-img');
   fitView(true);
-  if (S.tool === 'morph' && GLR) ensureMap(true);
   toolOptsFor = null;
   renderToolOpts();
 }
@@ -3166,6 +3193,7 @@ calibInput.addEventListener('keydown', e => {
 /* ------------------------------------------------------------ selection -- */
 
 function onItemClick(id, multi) {
+  if (S.mapOpen) openFaceMap(false);   // a measurement and the face map aren't selected together
   S.showAll = false;
   if (S.draft) { S.draft = null; S.draftM = null; }
   if (multi) {
@@ -3182,12 +3210,14 @@ function onItemClick(id, multi) {
   syncUI();
 }
 function deselectAll() {
+  if (S.mapOpen) { openFaceMap(false); return; }
   if (!S.sel.length && !S.showAll) return;
   S.sel = []; S.active = null; S.showAll = false;
   if (S.draft && S.draft.preset) { S.draft = null; S.draftM = null; }
   syncUI();
 }
 function toggleShowAll() {
+  if (S.mapOpen) openFaceMap(false);
   S.showAll = !S.showAll;
   S.sel = []; S.active = null;
   if (S.draft && S.draft.preset) { S.draft = null; S.draftM = null; }
@@ -3196,6 +3226,7 @@ function toggleShowAll() {
 /** Select keeps the open layers; a drawing tool returns to free mode. */
 /** Select, Morph and Adjust keep the open layers (so ratios stay in view); drawing tools return to free mode. */
 function setTool(t) {
+  if (t !== 'move' && S.mapOpen) openFaceMap(false);   // editing the face map is part of Select
   if (S.draft) { S.draft = null; S.draftM = null; }
   if (S.stroke) endStroke();
   if (S.tstroke) endTone();
@@ -3203,8 +3234,7 @@ function setTool(t) {
   if (EDIT_TOOLS.has(t) && !GLR) toast(GL_MESSAGES[GL_REASON] || GL_MESSAGES.webgl, 7000);
   S.tool = t;
   S.qfit = null; S.mapHover = null; S.anatHover = null;
-  if (t !== 'morph') S.mapSel.clear();
-  if (t === 'morph' && GLR) ensureMap(true);
+  if (!S.mapOpen) S.mapSel.clear();
   if (t !== 'move' && !EDIT_TOOLS.has(t) && S.sel.length) { S.sel = []; S.active = null; }
   if (EDIT_TOOLS.has(t)) S.picked.clear();
   syncPts();               // the anatomy is hidden while mapping
@@ -3236,32 +3266,17 @@ function renderToolOpts() {
     return;
   }
   if (t === 'morph') {
-    const sub = cfg.mSub;
     const levels = [
       ['bone', 'Bone', 'skeleton — shows through the soft tissue above it'],
       ['soft', 'Soft tissue', 'fat and muscle — scales with tissue depth'],
       ['shape', 'Proportions', 'lengths and positions'],
     ];
     const opRow = o => `<label class="srow arow" data-op="${o.key}"${o.help ? ` title="${esc(o.help)}"` : ''}><span><i class="lv" style="--c:${LEVEL_COLORS[o.level]}"></i>${esc(o.label)}</span><input class="rng bi" type="range" id="op_${o.key}" min="-100" max="100" step="1" style="--c:${LEVEL_COLORS[o.level]}"><b id="op_${o.key}V"></b></label>`;
-    const mapPane = `
-      <div class="seg full mview" id="mView">
-        <button type="button" data-v="front">Front</button><button type="button" data-v="left" title="Face looking to the left">◀ Profile</button><button type="button" data-v="right" title="Face looking to the right">Profile ▶</button>
-      </div>
-      <p class="to-note" id="mMapStatus"></p>
-      <div class="to-actions" style="margin:2px 0 10px">
-        <button type="button" class="btn sm" id="mQuick">Quick fit · 4 clicks</button>
-        <button type="button" class="btn ghost sm" id="mSnap" title="Pull the edge dots (face edge, hairline, hair, neck) onto the nearest edges in the photo">Snap to edges</button>
-        <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the scan from your measured landmarks">Fit to landmarks</button>
-      </div>
-      <div class="to-label">Dots <small>click to hide a group</small></div>
-      <div class="chips" id="mGroups">${MAP_GROUPS.map(([g, label, c]) => `<button type="button" class="chip-dot" data-g="${g}" style="--c:${c}"><i></i>${label}</button>`).join('')}</div>
-      <p class="to-note">Drag dots onto the face — the photo is shown unchanged here. Box-select or <kbd>Shift</kbd>-click to move several, arrow keys nudge. Hover a dot to see its tissue depth.</p>
-      <label class="tg sm"><span>Show layers<small>Teal = the face layer (forehead and hairline included), blue = hair, ears, neck and background behind it</small></span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>`;
     const morphPane = `
       <div class="to-sec"><span>Structure</span><span class="lv-key">hover a slider to see where it acts</span></div>
       <div id="mNoMap" class="to-callout">
-        <p class="to-note">The structure controls work on the face scan. Map the face first — four clicks.</p>
-        <button type="button" class="btn sm" id="mGoMap">Map the face</button>
+        <p class="to-note">The structure controls work on the face map. Place it first — four clicks (it's in the right panel, above the measurements).</p>
+        <button type="button" class="btn sm" id="mGoMap">Place face map</button>
       </div>
       <div class="anat" id="mAnat">
         <div class="to-label">Looks <small>a starting point — then fine-tune below</small></div>
@@ -3292,10 +3307,7 @@ function renderToolOpts() {
       <div class="to-actions" style="margin-top:4px"><button type="button" class="btn ghost sm" id="toneClear">Clear light &amp; shade</button></div>`;
     toolOptsBody.innerHTML = `
       <div class="to-head"><span class="to-title">Morph</span><span class="to-sub">landmarks follow the face</span></div>
-      <div class="seg full msub" id="mSub">
-        <button type="button" data-v="map" title="Fit the 3D face scan to the photo"><b>1</b>Map</button><button type="button" data-v="morph" title="Change the anatomy, or brush"><b>2</b>Morph</button>
-      </div>
-      ${sub === 'map' ? mapPane : morphPane}
+      ${morphPane}
       <div class="to-confirm" id="mPending">
         <span class="to-status" id="mStatus"></span>
         <div class="to-actions" style="margin-top:8px">
@@ -3304,33 +3316,9 @@ function renderToolOpts() {
           <button type="button" class="btn ghost sm" id="mCompare">Hold to compare</button>
         </div>
       </div>
-      <p class="to-note" style="margin-top:10px">${sub === 'map' ? 'Then switch to <b>Morph</b> to change the anatomy.' : '<kbd>[</kbd> <kbd>]</kbd> brush size · hold <kbd>B</kbd> to compare · double-click a slider name to reset it'}</p>`;
-    $('#mSub').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) setMorphSub(b.dataset.v); });
-    if (sub === 'map') {
-      $('#mView').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) setMapView(b.dataset.v); });
-      $('#mShowLayers').addEventListener('change', e => { cfg.mShowLayers = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
-      $('#mQuick').addEventListener('click', () => { if (S.qfit) { S.qfit = null; renderHint(); wake(); } else startQuickFit(); syncToolOpts(); });
-      $('#mSnap').addEventListener('click', () => {
-        if (!S.map) return;
-        const snap = snapshot(), n = snapEdges();
-        if (n) { pushUndo(snap); estimateLight(); syncPts(); syncUI(); }
-        toast(n ? `Snapped ${n} edge dot${n === 1 ? '' : 's'} — check them` : 'No clear edges found near the dots — drag them instead', 4000);
-      });
-      $('#mAuto').addEventListener('click', () => {
-        const snap = snapshot(), n = fitMap();
-        pushUndo(snap); S.mapSel.clear(); syncPts(); syncUI();
-        toast(n ? `Scan placed from ${n} of your landmarks` : 'No landmarks measured yet — use Quick fit instead', 4000);
-      });
-      $('#mGroups').addEventListener('click', e => {
-        const b = e.target.closest('[data-g]');
-        if (!b) return;
-        const g = b.dataset.g;
-        if (S.hideGroups.has(g)) S.hideGroups.delete(g); else S.hideGroups.add(g);
-        S.mapSel = new Set([...S.mapSel].filter(i => !S.hideGroups.has(FM.POINTS[i].group)));
-        syncToolOpts(); wake();
-      });
-    } else {
-      $('#mGoMap').addEventListener('click', () => { setMorphSub('map'); startQuickFit(); });
+      <p class="to-note" style="margin-top:10px"><kbd>[</kbd> <kbd>]</kbd> brush size · hold <kbd>B</kbd> to compare · double-click a slider name to reset it</p>`;
+    {
+      $('#mGoMap').addEventListener('click', startQuickFit);
       $('#mAnat').addEventListener('click', e => {
         const h = e.target.closest('[data-open]');
         if (!h) return;
@@ -3469,27 +3457,12 @@ function setRange(id, v, text) {
 }
 function syncToolOpts() {
   if (toolOptsFor === 'morph') {
-    const pending = morphPending(), sub = cfg.mSub;
+    const pending = morphPending();
     $('#mConfirm').disabled = !pending;
     $('#mReset').disabled = !pending;
     $('#mPending').classList.toggle('pending', pending);
     setText($('#mStatus'), pending ? 'Unconfirmed changes' : (S.warp.field || anatOn() || toneOn()) ? 'All changes confirmed' : 'No morph yet');
-    $$('#mSub [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === sub));
-    if (sub === 'map') {
-      $$('#mView [data-v]').forEach(b => b.classList.toggle('on', !!S.map && b.dataset.v === S.map.view));
-      $('#mShowLayers').checked = !!cfg.mShowLayers;
-      const qb = $('#mQuick');
-      qb.textContent = S.qfit ? `Cancel quick fit (${S.qfit.step + 1}/4)` : 'Quick fit · 4 clicks';
-      qb.classList.toggle('on', !!S.qfit);
-      $('#mAuto').disabled = !S.map || !FM.POINTS.some(pt => { const l = lmLabel(pt, S.map.view); return l && landmarkS(l); });
-      $('#mSnap').disabled = !S.map || !!S.qfit;
-      $$('#mGroups [data-g]').forEach(b => b.classList.toggle('off', S.hideGroups.has(b.dataset.g)));
-      const shown = S.map ? S.map.vis.reduce((a, v) => a + v, 0) : 0;
-      setText($('#mMapStatus'), !S.map ? 'Not scanned yet.'
-        : S.qfit ? qfitSteps()[S.qfit.step].label + '.'
-        : S.map.snapped ? `Scanned — ${shown} dots in view, ${S.map.snapped} placed from your landmarks or clicks. Check the edges.`
-        : `${shown} dots centred on a guess — use Quick fit, then drag the dots onto the face.`);
-    } else {
+    {
       $('#mNoMap').hidden = !!S.map;
       $('#mAnat').classList.toggle('disabled', !S.map);
       for (const o of FM.OPS) {
@@ -3696,12 +3669,83 @@ $('#filter').addEventListener('input', applyFilter);
 $('#filter').addEventListener('keydown', e => { if (e.key === 'Escape') { e.target.value = ''; applyFilter(); e.target.blur(); } });
 
 panel.addEventListener('click', e => {
-  if (e.target.closest('.item, .grp-head, button, input, .readout, .search')) return;
+  if (e.target.closest('.item, .grp-head, button, input, label, .readout, .search, .fmap')) return;
   deselectAll();
 });
 $('#btnShowAll').addEventListener('click', toggleShowAll);
 $('#btnPanel').addEventListener('click', () => panel.classList.toggle('open'));
 
+/* ------------------------------------------------------- face map panel --
+   The face map is a layer of its own, above the measurements: click it to select it (its dots
+   show on the photo, unchanged, and can be dragged), click it again or press Esc to close it. */
+const fmapEl = $('#fmap'), fmapItem = $('#fmapItem');
+const VIEW_LABEL = { front: 'Front', left: '◀ Profile', right: 'Profile ▶' };
+function buildFaceMapPanel() {
+  if (!FM) { fmapEl.hidden = true; return; }
+  $('#fmapBody').innerHTML = `
+    <div class="seg full mview" id="mView">
+      <button type="button" data-v="front">Front</button><button type="button" data-v="left" title="Face looking to the left">◀ Profile</button><button type="button" data-v="right" title="Face looking to the right">Profile ▶</button>
+    </div>
+    <p class="to-note" id="mMapStatus"></p>
+    <div class="to-actions" style="margin:2px 0 10px">
+      <button type="button" class="btn sm" id="mQuick">Quick fit · 4 clicks</button>
+      <button type="button" class="btn ghost sm" id="mSnap" title="Pull the edge dots (face edge, hairline, hair, neck) and the eye and lip outlines onto the edges in the photo">Snap to edges</button>
+      <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the map from your measured landmarks">Fit to landmarks</button>
+    </div>
+    <div class="to-label">Dots <small>click to hide a group</small></div>
+    <div class="chips" id="mGroups">${MAP_GROUPS.map(([g, label, c]) => `<button type="button" class="chip-dot" data-g="${g}" style="--c:${c}"><i></i>${label}</button>`).join('')}</div>
+    <label class="tg sm"><span>Show layers<small>Teal = the face layer, blue = hair, ears, neck and background behind it</small></span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
+    <p class="to-note">Drag dots onto the face — the photo is shown unchanged here. Box-select or <kbd>Shift</kbd>-click to move several, arrow keys nudge, <kbd>Ctrl</kbd> <kbd>A</kbd> selects all. Hover a dot to see its name and tissue depth.</p>`;
+  fmapItem.addEventListener('click', e => {
+    if (e.target.closest('.it-x')) { clearFaceMap(); return; }
+    openFaceMap(!S.mapOpen);
+  });
+  $('#mView').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) setMapView(b.dataset.v); });
+  $('#mShowLayers').addEventListener('change', e => { cfg.mShowLayers = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
+  $('#mQuick').addEventListener('click', () => { if (S.qfit) { S.qfit = null; renderHint(); refreshCursor(); wake(); } else startQuickFit(); syncUI(); });
+  $('#mSnap').addEventListener('click', () => {
+    if (!S.map) return;
+    const snap = snapshot(), n = snapEdges();
+    if (n) { pushUndo(snap); estimateLight(); syncPts(); syncUI(); }
+    toast(n ? `Snapped ${n} dot${n === 1 ? '' : 's'} to edges — check them` : 'No clear edges found near the dots — drag them instead', 4000);
+  });
+  $('#mAuto').addEventListener('click', () => {
+    const snap = snapshot(), n = fitMap();
+    pushUndo(snap); S.mapSel.clear(); syncPts(); syncUI();
+    toast(n ? `Face map placed from ${n} of your landmarks` : 'No landmarks measured yet — use Quick fit instead', 4000);
+  });
+  $('#mGroups').addEventListener('click', e => {
+    const b = e.target.closest('[data-g]');
+    if (!b) return;
+    const g = b.dataset.g;
+    if (S.hideGroups.has(g)) S.hideGroups.delete(g); else S.hideGroups.add(g);
+    S.mapSel = new Set([...S.mapSel].filter(i => !S.hideGroups.has(FM.POINTS[i].group)));
+    syncFaceMapPanel(); wake();
+  });
+}
+function syncFaceMapPanel() {
+  if (!FM) return;
+  const m = S.map, open = mapping(), shown = m ? m.vis.reduce((a, v) => a + v, 0) : 0;
+  fmapEl.classList.toggle('open', open);
+  fmapItem.classList.toggle('sel', open);
+  fmapItem.classList.toggle('measured', !!m);
+  setText(fmapItem.querySelector('.it-sub'), m ? `${VIEW_LABEL[m.view]} · ${shown} dots` : 'Not placed — click to start');
+  setText(fmapItem.querySelector('.it-val'), m ? (m.snapped ? 'fitted' : 'guess') : '');
+  if (!open) return;
+  $$('#mView [data-v]').forEach(b => b.classList.toggle('on', !!m && b.dataset.v === m.view));
+  $('#mShowLayers').checked = !!cfg.mShowLayers;
+  const qb = $('#mQuick');
+  setText(qb, S.qfit ? `Cancel quick fit (${S.qfit.step + 1}/4)` : 'Quick fit · 4 clicks');
+  qb.classList.toggle('on', !!S.qfit);
+  $('#mAuto').disabled = !m || !FM.POINTS.some(pt => { const l = lmLabel(pt, m.view); return l && landmarkS(l); });
+  $('#mSnap').disabled = !m || !!S.qfit;
+  $$('#mGroups [data-g]').forEach(b => b.classList.toggle('off', S.hideGroups.has(b.dataset.g)));
+  setText($('#mMapStatus'), !m ? 'Not placed yet — use Quick fit.'
+    : S.qfit ? qfitSteps()[S.qfit.step].label + '.'
+    : S.mapSel.size ? `${S.mapSel.size} dot${S.mapSel.size === 1 ? '' : 's'} selected of ${shown}.`
+    : m.snapped ? `${shown} dots in view, ${m.snapped} placed from your landmarks or clicks. Check the edges.`
+    : `${shown} dots centred on a guess — use Quick fit, then drag the dots onto the face.`);
+}
 /* -------------------------------------------------------------- readout -- */
 
 let RO = null, roKey = '';
@@ -3885,10 +3929,10 @@ function renderHint() {
   if (S.img) {
     const d = S.draft;
     const tgt = d ? { preset: d.preset, kind: d.kind } : placeTarget();
-    if (S.tool === 'morph' && S.qfit) {
+    if (mapping() && S.qfit) {
       html = `<b>Quick fit · ${S.qfit.step + 1}/4</b><span class="h-desc">${qfitSteps()[S.qfit.step].label} · <kbd>Esc</kbd> cancels</span>`;
-    } else if (S.tool === 'morph' && cfg.mSub === 'map') {
-      html = `<b>Morph · Map</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · then <b>Morph</b></span>`;
+    } else if (mapping()) {
+      html = `<b>Face map</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · arrows nudge · <kbd>Esc</kbd> closes</span>`;
     } else if (S.tool === 'morph') {
       const names = { push: 'push', bloat: 'bloat', pinch: 'pinch', restore: 'restore', tDodge: 'add light (dodge)', tBurn: 'add shade (burn)', tErase: 'erase light and shade' };
       const act = cfg.mMode === 'push' ? 'drag' : 'hold';
@@ -3955,6 +3999,7 @@ function syncUI() {
   $('#btnUndo').disabled = !S.undo.length;
   $('#btnRedo').disabled = !S.redo.length;
   body.classList.toggle('has-hist', !!(S.img || S.undo.length || S.redo.length));
+  syncFaceMapPanel();
   renderReadout();
   renderHint();
   refreshCursor();
@@ -4074,6 +4119,7 @@ function frame(t) {
 resize();
 applyCfg();
 buildList();
+buildFaceMapPanel();
 buildSettings();
 syncSettingsUI();
 syncUI();
