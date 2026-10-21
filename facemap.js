@@ -1,7 +1,7 @@
 /* ==========================================================================
    Cranimeter · face scan (structure-aware morph)
 
-   A 3D head template of about 270 points (named points plus detail dots between them), in centimetres:
+   A 3D head template of about 340 points (named points plus detail dots between them), in centimetres:
      x  lateral (+ = image right in a front photo), y  down,
      z  forward from the ear plane (tragion = 0).
    The same template is projected for a front photo or either profile, so one
@@ -68,7 +68,7 @@ mid('me', 'Chin bottom (menton)', 0, 6.3, 7.8, 'outline', 'both', 7.5, 'Menton',
 // ---- forehead, brows ----
 mid('fhC', 'Forehead · centre', 0, -9.4, 9.2, 'skin', 'face', 5);
 pair('fh', 'Forehead', 3.7, -9.3, 8.3, 'skin', 'face', 5);
-pair('supra', 'Brow ridge', 3.0, -7.9, 8.7, 'skin', 'face', 6);
+pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -7.9, 8.7, 'skin', 'face', 6);
 pair('temH', 'Temple hollow', 5.4, -6.4, 5.4, 'skin', 'face', 9);
 mid('gl', 'Glabella', 0, -6.9, 9.8, 'brows', 'face', 5.5, 'Glabella');
 pair('bi', 'Brow · inner', 1.2, -6.7, 9.0, 'brows', 'face', 6);
@@ -170,6 +170,37 @@ pair('dl2', 'Dorsal line', 0.6, -2.9, 10.9, 'nose', 'face', 2.5);
 pair('tdp', 'Tip-defining point', 0.45, -1.85, 11.9, 'nose', 'face', 3);
 pair('nsw', 'Nose side wall', 1.35, -2.2, 10.0, 'nose', 'face', 4);
 
+// lower eyelid: more of the lid margin, and the lower lid crease (where the lid meets the cheek)
+pair('el0', 'Lower lid · inner', 2.05, -5.27, 8.2, 'eyes', 'face');
+pair('el4', 'Lower lid · outer', 4.4, -5.3, 7.25, 'eyes', 'face');
+pair('lc1', 'Lower lid crease', 2.25, -4.9, 8.3, 'skin', 'face', 4);
+pair('lc2', 'Lower lid crease', 3.0, -4.78, 8.2, 'skin', 'face', 4);
+pair('lc3', 'Lower lid crease', 3.8, -4.85, 7.65, 'skin', 'face', 4);
+pair('lc4', 'Lower lid crease', 4.45, -5.0, 7.0, 'skin', 'face', 4.5);
+// orbit: the bony rim around the eye — supraorbital (above), lateral, infraorbital (below), medial
+pair('so1', 'Supraorbital rim · inner', 1.5, -7.55, 9.15, 'skin', 'face', 6);
+pair('so3', 'Supraorbital rim · outer', 4.2, -7.5, 7.75, 'skin', 'face', 6);
+pair('lor', 'Lateral orbital rim', 5.25, -5.5, 6.0, 'skin', 'face', 6.5);
+pair('ior', 'Infraorbital rim · outer', 4.55, -4.55, 6.9, 'skin', 'face', 6.5);
+pair('mor', 'Medial orbital rim', 1.25, -5.05, 8.9, 'skin', 'face', 6);
+// philtrum: the two ridges (philtral columns) from the nose base down to the peaks of the Cupid's bow
+pair('pc1', 'Philtral column · top', 0.42, -0.3, 10.35, 'lips', 'face', 12);
+pair('pc2', 'Philtral column', 0.48, 0.55, 10.45, 'lips', 'face', 12);
+mid('phL', 'Philtrum · lower', 0, 1.0, 10.55, 'lips', 'face', 12);
+// nose edges: the outline of the nose from the bridge down around the nostril wing, and the tip lobule
+pair('ne1', 'Nose edge · upper', 0.85, -4.7, 9.6, 'nose', 'face', 3);
+pair('ne2', 'Nose edge', 1.15, -2.85, 9.95, 'nose', 'face', 3.5);
+pair('ar1', 'Alar rim · top', 1.6, -1.65, 10.1, 'nose', 'face', 8);
+pair('tl', 'Tip lobule · side', 0.85, -1.35, 11.5, 'nose', 'face', 3);
+// inside the ear (profile): helix root, concha (the bowl), antihelix, antitragus
+pair('cru', 'Helix root', 7.2, -3.9, 0.1, 'ears', 'back', 0, null, { views: 'profile' });
+pair('cym', 'Concha · upper', 7.35, -4.1, -0.75, 'ears', 'back', 0, null, { views: 'profile' });
+pair('con', 'Concha (ear bowl)', 7.3, -2.6, -0.6, 'ears', 'back', 0, null, { views: 'profile' });
+pair('tfo', 'Triangular fossa', 7.5, -5.0, -1.0, 'ears', 'back', 0, null, { views: 'profile' });
+pair('ah1', 'Antihelix', 7.6, -4.4, -1.35, 'ears', 'back', 0, null, { views: 'profile' });
+pair('ah2', 'Antihelix · lower', 7.65, -3.0, -1.6, 'ears', 'back', 0, null, { views: 'profile' });
+pair('atr', 'Antitragus', 7.35, -1.55, -0.65, 'ears', 'back', 0, null, { views: 'profile' });
+
 const INDEX0 = Object.fromEntries(POINTS.map(p => [p.id, p]));
 
 /* ------------------------------------------------------------- views --
@@ -195,8 +226,8 @@ const FRONT_CONTOURS = [
   { id: 'outline', closed: true, boundary: true, snap: true, ids: ['tri', 'hl1R', 'hl2R', 'temR', 'zyR', 'chkR', 'jaw1R', 'goR', 'jaw2R', 'chinR', 'me', 'chinL', 'jaw2L', 'goL', 'jaw1L', 'chkL', 'zyL', 'temL', 'hl2L', 'hl1L'] },
   { id: 'browL', ids: ['biL', 'bmL', 'baL', 'btL'] },
   { id: 'browR', ids: ['biR', 'bmR', 'baR', 'btR'] },
-  { id: 'eyeL', closed: true, snapFine: true, ids: ['enL', 'eu1L', 'eu2L', 'eu3L', 'exL', 'el3L', 'el2L', 'el1L'] },
-  { id: 'eyeR', closed: true, snapFine: true, ids: ['enR', 'eu1R', 'eu2R', 'eu3R', 'exR', 'el3R', 'el2R', 'el1R'] },
+  { id: 'eyeL', closed: true, snapFine: true, ids: ['enL', 'eu1L', 'eu2L', 'eu3L', 'exL', 'el4L', 'el3L', 'el2L', 'el1L', 'el0L'] },
+  { id: 'eyeR', closed: true, snapFine: true, ids: ['enR', 'eu1R', 'eu2R', 'eu3R', 'exR', 'el4R', 'el3R', 'el2R', 'el1R', 'el0R'] },
   { id: 'ridge', ids: ['n', 'rhi', 'dor', 'prn', 'col', 'sn'] },
   { id: 'nostrils', ids: ['acL', 'alL', 'nosL', 'sn', 'nosR', 'alR', 'acR'] },
   { id: 'lips', closed: true, snapFine: true, ids: ['chL', 'ulL', 'cphL', 'ls', 'cphR', 'ulR', 'chR', 'llR', 'li', 'llL'] },
@@ -213,15 +244,20 @@ const FRONT_CONTOURS = [
     { id: 'submalar' + s, line: true, ids: ['sm1', 'sm2', 'sm3'].map(i => i + s) },
     { id: 'nasolabial' + s, line: true, ids: ['nl0', 'nl1', 'nl2', 'nl3'].map(i => i + s) },
     { id: 'dorsum' + s, line: true, ids: ['dl1', 'dl2', 'tdp'].map(i => i + s) },
-    { id: 'sidewall' + s, line: true, ids: ['nsd', 'nsw', 'al'].map(i => i + s) },
+    { id: 'noseEdge' + s, line: true, ids: ['ne1', 'nsd', 'ne2', 'nsw', 'ar1', 'al', 'ac'].map(i => i + s) },
+    { id: 'lowerCrease' + s, line: true, ids: ['lc1', 'lc2', 'lc3', 'lc4'].map(i => i + s) },
+    { id: 'orbit' + s, closed: true, line: true, ids: ['mor', 'so1', 'supra', 'so3', 'lor', 'ior', 'tt3', 'tt2', 'tt1'].map(i => i + s) },
+    { id: 'philtrum' + s, line: true, ids: ['pc1', 'pc2', 'cph'].map(i => i + s) },
   ]),
+  { id: 'lobule', line: true, ids: ['ar1L', 'tlL', 'tdpL', 'prn', 'tdpR', 'tlR', 'ar1R'] },
+  { id: 'philMid', line: true, ids: ['sn', 'phil', 'phL', 'ls'] },
 ];
 const PROFILE_CONTOURS = [
   // the face region: the profile line from hairline to under the chin, back along the jaw, up in front of the ear
-  { id: 'face', closed: true, boundary: true, ids: ['tri', 'fhC', 'gl', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'jaw2#', 'go#', 'ramus#', 'obs#', 'tem#', 'hl2#', 'hl1#'] },
-  { id: 'profile', snap: true, draw: false, ids: ['tri', 'fhC', 'gl', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'neckF'] },
+  { id: 'face', closed: true, boundary: true, ids: ['tri', 'fhC', 'gl', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'phL', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'jaw2#', 'go#', 'ramus#', 'obs#', 'tem#', 'hl2#', 'hl1#'] },
+  { id: 'profile', snap: true, draw: false, ids: ['tri', 'fhC', 'gl', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'phL', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'neckF'] },
   { id: 'brow', ids: ['bi#', 'bm#', 'ba#', 'bt#'] },
-  { id: 'eye', closed: true, snapFine: true, ids: ['en#', 'eu1#', 'eu2#', 'eu3#', 'ex#', 'el3#', 'el2#', 'el1#'] },
+  { id: 'eye', closed: true, snapFine: true, ids: ['en#', 'eu1#', 'eu2#', 'eu3#', 'ex#', 'el4#', 'el3#', 'el2#', 'el1#', 'el0#'] },
   { id: 'nostril', ids: ['nos#', 'al#', 'ac#'] },
   { id: 'lip', ids: ['ls', 'cph#', 'ul#', 'ch#', 'll#', 'li'] },
   { id: 'ear', closed: true, ids: ['obs#', 'sa#', 'eo#', 'hb#', 'lob#', 'obi#', 'tra#'] },
@@ -233,10 +269,15 @@ const PROFILE_CONTOURS = [
   { id: 'cheekbone', line: true, ids: ['malar#', 'zr1#', 'zr2#'] },
   { id: 'submalar', line: true, ids: ['sm1#', 'sm2#', 'sm3#'] },
   { id: 'nasolabial', line: true, ids: ['nl0#', 'nl1#', 'nl2#', 'nl3#'] },
+  { id: 'lowerCrease', line: true, ids: ['lc1#', 'lc2#', 'lc3#', 'lc4#'] },
+  { id: 'orbit', line: true, ids: ['so1#', 'supra#', 'so3#', 'lor#', 'ior#', 'tt3#'] },
+  { id: 'noseEdge', line: true, ids: ['ne1#', 'nsd#', 'ne2#', 'nsw#', 'ar1#', 'al#'] },
+  { id: 'antihelix', line: true, ids: ['tfo#', 'ah1#', 'ah2#', 'atr#'] },
+  { id: 'concha', line: true, ids: ['cru#', 'cym#', 'con#'] },
 ];
 
 /* Denser contours: a dot halfway along every segment of the main contours, so the outline, eyes,
-   lips, brows, nose and hair are traced closely (≈ 270 dots in all). Midpoints are averaged in 3D
+   lips, brows, nose and hair are traced closely (≈ 340 dots in all). Midpoints are averaged in 3D
    and marked as detail dots (drawn smaller). */
 const MIDS = new Map();
 let midCount = 0;
@@ -297,7 +338,8 @@ function contours(yaw) {
 /* ------------------------------------------------------- anatomy ops --
    Each op moves template points in 3D (cm at 100 %, radians for rotations).
    Regions are 3D Gaussians (centre, sigma) given for the right side and
-   mirrored. Ops act on the scan dots and on every node of the dense face grid\n   (used for the automatic shading) alike, so the dots and the shading always agree. */
+   mirrored. Ops act on the scan dots and on every node of the dense face grid
+   (used for the automatic shading) alike, so the dots and the shading always agree. */
 const FACE = ['outline', 'skin', 'brows', 'eyes', 'nose', 'lips'];
 const SOFT_GROUPS = ['outline', 'skin', 'nose', 'lips'];
 const SKIN = ['outline', 'skin', 'brows', 'nose', 'lips'];   // everything on the face except the eye openings
@@ -554,6 +596,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '14',
+  mls, tpsFit, tpsEval, spline, build: '15',
 };
 })();
