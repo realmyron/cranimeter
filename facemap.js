@@ -209,44 +209,61 @@ function contours(yaw) {
 }
 
 /* ------------------------------------------------------- anatomy ops --
-   Each op moves template points in 3D (cm at 100 %). Regions are 3D
-   Gaussians (centre, sigma) given for the right side and mirrored. */
+   Each op moves template points in 3D (cm at 100 %, radians for rotations).
+   Regions are 3D Gaussians (centre, sigma) given for the right side and
+   mirrored. Ops act on the 137 scan dots and on every vertex of the dense
+   face mesh alike, so the dots and the rendered skin always agree. */
 const FACE = ['outline', 'skin', 'brows', 'eyes', 'nose', 'lips'];
 const SOFT_GROUPS = ['outline', 'skin', 'nose', 'lips'];
+const SKIN = ['outline', 'skin', 'brows', 'nose', 'lips'];   // everything on the face except the eye openings
+// pivots (y, z in cm) for rotations
+const JAW_PIVOT = [-3.2, 1.0];     // the jaw joint (condyle), just in front of the ear canal
+const NOSE_PIVOT = [-0.6, 10.0];   // the nose base
 const OPS = [
   // ---- bone ----
-  { key: 'cheekbones', label: 'Cheekbones', level: 'bone', mag: .75, dir: 'normal', regions: [[4.6, -2.9, 7.2, 1.7], [6.6, -3.6, 3.8, 1.6]],
-    help: 'Zygomatic projection — the malar body and the arch' },
+  { key: 'zygWidth', label: 'Cheekbone width', level: 'bone', mag: .7, dir: 'out', regions: [[6.6, -3.6, 3.8, 1.7], [5.3, -3.0, 6.0, 1.4]], affects: SKIN,
+    help: 'Lateral projection of the zygomatic arch — wider cheekbones from the front' },
+  { key: 'malarProj', label: 'Cheekbone projection', level: 'bone', mag: .6, dir: 'fwd', regions: [[4.4, -2.8, 7.3, 1.5]], affects: SKIN,
+    help: 'The malar body toward / away from the camera — moves the highlight and the shadow below it' },
+  { key: 'infraorbital', label: 'Infraorbital rim', level: 'bone', mag: .45, dir: 'fwd', regions: [[2.6, -4.1, 8.0, 1.0], [3.9, -3.7, 7.3, 1.0]], affects: SKIN,
+    help: 'Support under the eyes — negative recesses the rim (shadowed, hollow under-eyes)' },
+  { key: 'browRidge', label: 'Brow ridge projection', level: 'bone', mag: .45, dir: 'fwd', regions: [[0, -7.0, 9.8, 1.4], [3.0, -7.4, 8.8, 1.4]], affects: SKIN,
+    help: 'Supraorbital and glabellar projection — a stronger ridge throws the eyes into shadow' },
+  { key: 'browDrop', label: 'Brow ridge height', level: 'bone', mag: .5, dir: 'browDrop', regions: [[2.9, -7.2, 8.7, 1.25], [4.8, -6.8, 7.0, 1.15], [1.4, -6.9, 9.2, .8]], affects: ['outline', 'skin', 'brows'],
+    help: 'Lowers the supraorbital rim and brows: the brow fold drops over the upper lid (hooded, deep-set look) while the eye opening stays' },
   { key: 'jawWidth', label: 'Jaw width', level: 'bone', mag: .9, dir: 'out', regions: [[5.3, 3.0, .9, 2.2]],
     help: 'Bigonial width — the mandibular angles' },
   { key: 'jawAngle', label: 'Jaw angle', level: 'bone', mag: .6, dir: 'jawAngle', regions: [[5.4, 3.6, .7, 1.6]],
     help: 'A sharper, lower gonial angle (or a softer, rounder one)' },
+  // the band starts above the lips so they stay sealed (the soft tissue follows the jaw, the mouth doesn't open)
+  { key: 'mandible', label: 'Mandible rotation', level: 'bone', mag: .075, dir: 'rotJaw', band: [-.2, 3.4], affects: SKIN.concat(['neck']),
+    help: 'Rotates the lower jaw about the jaw joint: + sets the chin back and down (retrusion), − brings it forward and up' },
   { key: 'chinProj', label: 'Chin projection', level: 'bone', mag: .9, dir: 'fwd', regions: [[0, 4.9, 9.6, 1.7]],
-    help: 'Pogonion forward — shows most in profile' },
+    help: 'Pogonion forward / back — from the front it changes the chin’s shadow and the lip–chin crease' },
   { key: 'chinHeight', label: 'Chin height', level: 'bone', mag: .7, dir: 'down', regions: [[0, 5.6, 8.6, 1.9]],
     help: 'Vertical chin length' },
   { key: 'chinWidth', label: 'Chin width', level: 'bone', mag: .5, dir: 'out', regions: [[1.9, 5.3, 8.4, 1.3]] },
-  { key: 'browRidge', label: 'Brow ridge', level: 'bone', mag: .45, dir: 'fwd', regions: [[0, -7.0, 9.8, 1.5], [3.0, -7.4, 8.8, 1.5]],
-    help: 'Supraorbital and glabellar projection' },
   { key: 'midfaceProj', label: 'Midface projection', level: 'bone', mag: .6, dir: 'fwd', regions: [[0, -.4, 10.3, 2.2], [2.3, -.9, 9.1, 1.9]],
     help: 'Maxillary projection — nose base, upper lip, inner cheeks' },
   { key: 'jawProj', label: 'Lower jaw projection', level: 'bone', mag: .8, dir: 'fwd', regions: [[0, 4.0, 9.4, 2.5], [3.0, 4.6, 6.5, 2.2]],
     help: 'Mandibular advancement — chin and lower lip forward' },
-  { key: 'noseBridge', label: 'Nose bridge', level: 'bone', mag: .35, dir: 'fwd', regions: [[0, -3.4, 10.8, 1.0]],
-    help: 'Dorsal height — lower it to remove a hump', affects: ['nose'] },
-  { key: 'noseTip', label: 'Nose tip projection', level: 'bone', mag: .45, dir: 'fwd', regions: [[0, -1.6, 12.0, .9]], affects: ['nose', 'lips'] },
+  { key: 'noseBridge', label: 'Nose bridge', level: 'bone', mag: .35, dir: 'fwd', regions: [[0, -3.4, 10.8, 1.0]], affects: ['nose', 'skin'],
+    help: 'Dorsal height — lower it to remove a hump' },
+  { key: 'noseTip', label: 'Nose tip projection', level: 'bone', mag: .45, dir: 'fwd', regions: [[0, -1.6, 12.0, .9]], affects: ['nose', 'lips', 'skin'] },
   { key: 'noseWidth', label: 'Nose width', level: 'bone', mag: .35, dir: 'out', regions: [[1.6, -.9, 9.4, .8]], affects: ['nose', 'skin'] },
-  { key: 'noseRot', label: 'Nose tip rotation', level: 'bone', mag: .3, dir: 'up', regions: [[0, -1.5, 11.8, .9]], affects: ['nose'],
-    help: 'Upturned (+) or drooping (−) tip' },
+  { key: 'noseRot', label: 'Nose tip rotation', level: 'bone', mag: -.32, dir: 'rotNose', regions: [[0, -1.5, 11.8, 1.0]], affects: ['nose', 'skin'],
+    help: 'Rotates the tip about the nose base — + turns it up (more nostril shows from the front), − droops it' },
   // ---- soft tissue ----
   { key: 'fat', label: 'Facial fat', level: 'soft', mag: .35, dir: 'normal', all: true, affects: SOFT_GROUPS.concat(['neck']),
     help: 'Overall soft-tissue volume — moves most where the tissue is thickest (cheeks, jowls, under the chin)' },
-  { key: 'buccal', label: 'Cheek hollows', level: 'soft', mag: -.42, dir: 'normal', regions: [[4.7, .6, 6.0, 1.6]],
+  { key: 'buccal', label: 'Cheek hollows', level: 'soft', mag: -.42, dir: 'normal', regions: [[4.7, .6, 6.0, 1.6]], affects: SKIN,
     help: 'Buccal fat — positive hollows the cheeks below the cheekbones' },
   { key: 'underEye', label: 'Under-eye hollows', level: 'soft', mag: -.25, dir: 'normal', regions: [[2.6, -3.9, 8.1, .8]], affects: ['skin', 'outline'] },
+  { key: 'hooding', label: 'Upper lid fold', level: 'soft', mag: .32, dir: 'browDrop', regions: [[3.1, -6.25, 8.3, .7], [4.2, -6.0, 7.4, .7], [2.0, -6.2, 8.6, .6]], affects: ['skin', 'brows'],
+    help: 'The skin and fat between brow and lid crease hang over the upper lid — the lid itself stays where it is' },
   { key: 'masseter', label: 'Masseter', level: 'soft', mag: .42, dir: 'out', regions: [[5.6, 1.4, 2.4, 1.6]],
     help: 'Jaw muscle bulk at the angle of the jaw' },
-  { key: 'lips', label: 'Lip fullness', level: 'soft', mag: .3, dir: 'lips', regions: [[0, 1.5, 10.6, .9], [0, 2.7, 10.3, .9], [1.3, 2.0, 9.9, .9]], affects: ['lips'] },
+  { key: 'lips', label: 'Lip fullness', level: 'soft', mag: .3, dir: 'lips', regions: [[0, 1.5, 10.6, .9], [0, 2.7, 10.3, .9], [1.3, 2.0, 9.9, .9]], affects: ['lips', 'skin'] },
   { key: 'submental', label: 'Under the chin', level: 'soft', mag: .8, dir: 'normal', regions: [[0, 7.0, 4.2, 1.8], [3.2, 6.4, 3.0, 1.6]], affects: ['outline', 'skin', 'neck'],
     help: 'Submental fat — the neck–chin angle' },
   { key: 'temples', label: 'Temples', level: 'soft', mag: .4, dir: 'normal', regions: [[5.6, -6.8, 5.2, 1.4]] },
@@ -259,24 +276,38 @@ const OPS = [
     help: 'Nasion to subnasale — everything below moves down' },
   { key: 'lowerFace', label: 'Lower face length', level: 'shape', mag: .8, dir: 'down', band: [2.2, 4.8], affects: FACE.concat(['neck']),
     help: 'Stomion to menton' },
-  { key: 'tilt', label: 'Canthal tilt', level: 'shape', mag: .22, dir: 'tilt', regions: [[3.25, -5.6, 7.8, 1.2]], affects: ['eyes'],
+  { key: 'tilt', label: 'Canthal tilt', level: 'shape', mag: .22, dir: 'tilt', regions: [[3.25, -5.6, 7.8, 1.2]], affects: ['eyes', 'skin'],
     help: 'Positive tilt lifts the outer eye corners' },
   { key: 'ears', label: 'Ear protrusion', level: 'shape', mag: .6, dir: 'out', regions: [[7.6, -3.0, -1.2, 2.2]], affects: ['ears'] },
 ];
 const OP_INDEX = Object.fromEntries(OPS.map(o => [o.key, o]));
 
+/** How much a point belongs to any of these groups: scan dots have one group, mesh vertices a blend. */
+const member = (p, groups) => {
+  if (!p.m) return groups.includes(p.group) ? 1 : 0;
+  let s = 0;
+  for (const g of groups) s += p.m[g] || 0;
+  return Math.min(1, s);
+};
+/** Rotation of (y, z) about a pivot by angle a: the resulting offset. */
+function rotYZ(p, pivot, a) {
+  const dy = p.y - pivot[0], dz = p.z - pivot[1], c = Math.cos(a), s = Math.sin(a);
+  return [0, dy * c + dz * s - dy, -dy * s + dz * c - dz];
+}
 /**
- * 3D displacement (cm) of every point for a set of op values (−1…1).
- * Returns a Float32Array of 3 × points, plus the weight of each op per point when asked.
+ * 3D displacement (cm) for a set of op values (−1…1), for template points P (the scan dots by
+ * default, or mesh vertices: { x, y, z, t (mm), n: [3], m: { group: weight } }).
+ * With weightsFor = an op key, also returns how strongly that op acts on each point.
  */
-function anatomy(values, weightsFor) {
-  const n = POINTS.length, D = new Float32Array(n * 3), W = weightsFor ? new Float32Array(n) : null;
+function anatomyAt(values, P, weightsFor) {
+  const n = P.length, D = new Float32Array(n * 3), W = weightsFor ? new Float32Array(n) : null;
   for (const op of OPS) {
     const v = values[op.key] || 0;
     if (!v && op.key !== weightsFor) continue;
     const groups = op.affects || FACE;
-    POINTS.forEach((p, i) => {
-      if (!groups.includes(p.group)) return;
+    for (let i = 0; i < n; i++) {
+      const p = P[i], mem = member(p, groups);
+      if (mem <= 0) continue;
       const t = p.t / 10;   // cm
       let w;
       if (op.all) w = 1;
@@ -295,9 +326,10 @@ function anatomy(values, weightsFor) {
         }
       }
       if (op.level === 'soft') w *= Math.min(2, t / 1.2);   // fat and muscle change in proportion to their depth
+      w *= mem;
       if (W && op.key === weightsFor) W[i] = w;
-      if (!v || w < 1e-4) return;
-      const sx = Math.sign(p.x);
+      if (!v || w < 1e-4) continue;
+      const sx = Math.sign(p.x), a = v * op.mag * w;
       let d;
       switch (op.dir) {
         case 'out': d = [sx, 0, 0]; break;
@@ -305,17 +337,21 @@ function anatomy(values, weightsFor) {
         case 'up': d = [0, -1, 0]; break;
         case 'down': d = [0, 1, 0]; break;
         case 'normal': d = p.n; break;
+        case 'browDrop': d = [0, .85, .5]; break;   // down and slightly forward, over what lies below
         case 'jawAngle': d = [sx * .3, .8, -.5]; break;
         case 'lips': { const s = p.y < 2.0 ? -1 : 1; d = [0, s * .75, .65]; break; }
         case 'tilt': d = [0, -(Math.abs(p.x) - 3.25) / 1.4, 0]; break;
+        case 'rotJaw': { const r = rotYZ(p, JAW_PIVOT, a); D[3 * i + 1] += r[1]; D[3 * i + 2] += r[2]; continue; }
+        case 'rotNose': { const r = rotYZ(p, NOSE_PIVOT, a); D[3 * i + 1] += r[1]; D[3 * i + 2] += r[2]; continue; }
         default: d = [0, 0, 0];
       }
-      const a = v * op.mag * w;
       D[3 * i] += d[0] * a; D[3 * i + 1] += d[1] * a; D[3 * i + 2] += d[2] * a;
-    });
+    }
   }
   return W ? { D, W } : D;
 }
+/** The anatomy for the 137 scan dots. */
+const anatomy = (values, weightsFor) => anatomyAt(values, POINTS, weightsFor);
 function smooth(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
 
 /**
@@ -432,7 +468,7 @@ function spline(pts, closed, steps = 8) {
 
 window.CraniMap = {
   POINTS, INDEX, VIEWS, OPS, OP_INDEX,
-  visible, project, contours, nearSide, anatomy,
-  mls, tpsFit, tpsEval, spline, build: '12',
+  visible, project, contours, nearSide, anatomy, anatomyAt,
+  mls, tpsFit, tpsEval, spline, build: '13',
 };
 })();
