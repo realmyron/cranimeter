@@ -892,3 +892,27 @@ body.dragging .dragveil { opacity: 1; }
   .drop { padding: 72px 16px 24px; }
   .drop-tips { grid-template-columns: 1fr; }
 }
+
+/* face surface (Face map → Surface) */
+.sf-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 10px; font-size: 10.8px; color: var(--muted); }
+.sf-legend:empty { display: none; }
+.sf-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.sf-legend i { width: 9px; height: 9px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25); }
+.sf-legend .sf-ramp { width: 100%; height: 7px; border-radius: 4px; background: linear-gradient(90deg, rgb(38, 70, 160), rgb(40, 150, 170), rgb(90, 190, 110), rgb(235, 210, 90), rgb(250, 245, 235)); }
+#sfBrush button:disabled, #sfViews button:disabled { opacity: .4; cursor: default; }
+.surf3d {
+  position: fixed; z-index: 12;
+  top: 70px; right: calc(var(--panel-w) + 14px);
+  width: 340px; height: 440px; max-height: calc(100vh - 100px);
+  display: flex; flex-direction: column;
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 18px 50px -18px rgba(0, 0, 0, .7);
+}
+.surf3d[hidden] { display: none; }
+.s3-head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line); }
+.s3-title { font-size: 12.5px; font-weight: 600; margin-right: auto; }
+.s3-head .seg button, .s3-foot .seg button { height: 24px; padding: 0 9px; font-size: 11.5px; }
+#s3Canvas { flex: 1; min-height: 0; width: 100%; display: block; cursor: grab; touch-action: none; }
+#s3Canvas:active { cursor: grabbing; }
+.s3-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-top: 1px solid var(--line); font-size: 10.8px; color: var(--faint); }
+@media (max-width: 860px) { .surf3d { right: 12px; left: 12px; width: auto; top: 64px; height: 50vh; } }#fmPoints[hidden], #fmSurface[hidden], #sfPca[hidden], #sfSweepRow[hidden] { display: none; }
