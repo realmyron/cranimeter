@@ -362,10 +362,8 @@ body.has-img .panel { transform: none; opacity: 1; }
 .seg.msub button.on b { color: var(--blue); background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring); }
 .seg.mmode { margin-bottom: 8px; }
 .seg.mmode button { font-size: 11.5px; padding-left: 0; padding-right: 0; }
-.seg.mlevel { margin-bottom: 6px; }
-.seg.mlevel button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-size: 11px; white-space: nowrap; }
-.seg.mlevel.dim, .dim { opacity: .45; }
-#mLevelNote { margin: 0 0 10px; min-height: 2.6em; }
+#mTone button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }
+.dim { opacity: .45; }
 .seg.mview { margin-bottom: 10px; }
 .seg.mview button { white-space: nowrap; font-size: 11.5px; }
 #mMapStatus { margin: 0 0 8px; color: var(--text); }
@@ -385,6 +383,11 @@ body.has-img .panel { transform: none; opacity: 1; }
 .chip-dot:hover { background: var(--hover, rgba(255, 255, 255, .05)); }
 .chip-dot.off { opacity: .45; }
 .chip-dot.off i { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+/* Morph → Looks */
+.chips.looks { margin-bottom: 12px; }
+.chip-dot.look { padding: 4px 10px; }
+.chip-dot.look.on { background: var(--sel); color: var(--blue); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+.chip-dot.look:disabled { opacity: .4; cursor: default; }
 /* Morph → Structure */
 .to-sec {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
@@ -484,6 +487,18 @@ input[type="range"].rng::-moz-range-thumb { width: 13px; height: 13px; border-ra
 input[type="range"].rng:active::-webkit-slider-thumb { transform: scale(1.15); }
 
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px 10px 16px; }
+/* face map: its own layer above the measurements; its controls open below it when selected */
+.fmap { flex: none; padding: 0 8px 6px; border-bottom: 1px solid var(--line); }
+.fmap-head { padding: 12px 4px 6px 8px; }
+.fmap-item .dot { background: transparent; }
+.fmap-item.measured .dot { background: #7EA6FF; box-shadow: none; }
+.fmap-item.sel.measured .dot { background: #7EA6FF; box-shadow: 0 0 0 3px var(--sel); }
+.fmap-item .it-val { color: var(--faint); font-size: 10.5px; }
+.fmap-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .4s var(--ease); }
+.fmap.open .fmap-body { grid-template-rows: 1fr; }
+.fmap-inner { overflow: hidden; min-height: 0; padding: 0 6px; }
+.fmap.open .fmap-inner { overflow: auto; max-height: 46vh; padding-top: 10px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.fmap .chips { margin-bottom: 4px; }
 .ph-title { display: flex; align-items: baseline; gap: 8px; }
 .panel-head h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: -.005em; }
 .progress { font: 500 11px var(--mono); color: var(--faint); }
