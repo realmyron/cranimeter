@@ -446,5 +446,5 @@ function createRenderer(canvas) {
   };
 }
 
-window.CraniWarp = { createRenderer, build: '14' };
+window.CraniWarp = { createRenderer, build: '15' };
 })();
