@@ -1,7 +1,7 @@
 /* ==========================================================================
    Cranimeter · face scan (structure-aware morph)
 
-   A 3D head template of 137 points, in centimetres:
+   A 3D head template of about 270 points (named points plus detail dots between them), in centimetres:
      x  lateral (+ = image right in a front photo), y  down,
      z  forward from the ear plane (tragion = 0).
    The same template is projected for a front photo or either profile, so one
@@ -141,14 +141,36 @@ pair('nt', 'Neck · side', 5.2, 7.3, -0.4, 'neck', 'back', 15);
 pair('nm', 'Neck · side', 5.4, 10.0, -0.8, 'neck', 'back', 15);
 pair('nb', 'Neck · base', 5.9, 13.0, -1.0, 'neck', 'back', 15);
 
-const INDEX = Object.fromEntries(POINTS.map((p, i) => [p.id, i]));
+// ---- the lines retouchers and surgeons read a face by ----
+// upper eyelid crease (where the brow fold sits; hooding covers it)
+pair('cr1', 'Eyelid crease', 2.2, -6.35, 8.5, 'skin', 'face', 4);
+pair('cr2', 'Eyelid crease', 2.9, -6.5, 8.45, 'skin', 'face', 4);
+pair('cr3', 'Eyelid crease', 3.6, -6.48, 8.2, 'skin', 'face', 4);
+pair('cr4', 'Eyelid crease', 4.35, -6.2, 7.4, 'skin', 'face', 4);
+// tear trough / infraorbital line
+pair('tt1', 'Tear trough', 1.95, -4.6, 8.1, 'skin', 'face', 5);
+pair('tt2', 'Under-eye line', 2.9, -4.4, 8.0, 'skin', 'face', 6);
+pair('tt3', 'Under-eye line', 3.9, -4.45, 7.3, 'skin', 'face', 6);
+// cheekbone ridge (malar body → zygomatic arch) and the submalar hollow beneath it
+pair('zr1', 'Cheekbone ridge', 5.35, -3.2, 6.2, 'skin', 'face', 6.5);
+pair('zr2', 'Cheekbone ridge', 6.1, -3.6, 4.8, 'skin', 'face', 6.5);
+pair('sm1', 'Under-cheekbone hollow', 3.6, -0.9, 7.8, 'skin', 'face', 16);
+pair('sm2', 'Under-cheekbone hollow', 4.6, -0.3, 6.6, 'skin', 'face', 20);
+pair('sm3', 'Under-cheekbone hollow', 5.6, 0.2, 4.6, 'skin', 'face', 18);
+// nasolabial fold (alar base → past the mouth corner) and marionette line
+pair('nl0', 'Nasolabial fold · top', 1.85, -0.85, 9.3, 'skin', 'face', 12);
+pair('nl3', 'Nasolabial fold · end', 3.15, 2.15, 8.3, 'skin', 'face', 13);
+pair('mar', 'Marionette line', 2.7, 3.2, 8.4, 'skin', 'face', 11);
+// forehead and chin pad
+pair('fhU', 'Upper forehead', 2.0, -10.8, 8.6, 'skin', 'face', 5);
+pair('cpl', 'Chin pad · lower', 0.9, 5.45, 9.2, 'skin', 'face', 9);
+// nose: dorsal lines (the light stripe down the bridge) and the side walls
+pair('dl1', 'Dorsal line', 0.55, -4.6, 10.0, 'nose', 'face', 3);
+pair('dl2', 'Dorsal line', 0.6, -2.9, 10.9, 'nose', 'face', 2.5);
+pair('tdp', 'Tip-defining point', 0.45, -1.85, 11.9, 'nose', 'face', 3);
+pair('nsw', 'Nose side wall', 1.35, -2.2, 10.0, 'nose', 'face', 4);
 
-/** Outward surface normal: a head-shaped ellipsoid, unless a point says otherwise. */
-for (const p of POINTS) {
-  if (p.n) { const L = Math.hypot(...p.n); p.n = p.n.map(v => v / L); continue; }
-  const nx = p.x / (8.2 * 8.2), nz = (p.z + .3) / (10.6 * 10.6), L = Math.hypot(nx, nz) || 1;
-  p.n = [nx / L, 0, nz / L];
-}
+const INDEX0 = Object.fromEntries(POINTS.map(p => [p.id, p]));
 
 /* ------------------------------------------------------------- views --
    yaw 0 = front photo; +90 = profile with the face looking to the image left;
@@ -173,31 +195,95 @@ const FRONT_CONTOURS = [
   { id: 'outline', closed: true, boundary: true, snap: true, ids: ['tri', 'hl1R', 'hl2R', 'temR', 'zyR', 'chkR', 'jaw1R', 'goR', 'jaw2R', 'chinR', 'me', 'chinL', 'jaw2L', 'goL', 'jaw1L', 'chkL', 'zyL', 'temL', 'hl2L', 'hl1L'] },
   { id: 'browL', ids: ['biL', 'bmL', 'baL', 'btL'] },
   { id: 'browR', ids: ['biR', 'bmR', 'baR', 'btR'] },
-  { id: 'eyeL', closed: true, ids: ['enL', 'eu1L', 'eu2L', 'eu3L', 'exL', 'el3L', 'el2L', 'el1L'] },
-  { id: 'eyeR', closed: true, ids: ['enR', 'eu1R', 'eu2R', 'eu3R', 'exR', 'el3R', 'el2R', 'el1R'] },
+  { id: 'eyeL', closed: true, snapFine: true, ids: ['enL', 'eu1L', 'eu2L', 'eu3L', 'exL', 'el3L', 'el2L', 'el1L'] },
+  { id: 'eyeR', closed: true, snapFine: true, ids: ['enR', 'eu1R', 'eu2R', 'eu3R', 'exR', 'el3R', 'el2R', 'el1R'] },
   { id: 'ridge', ids: ['n', 'rhi', 'dor', 'prn', 'col', 'sn'] },
   { id: 'nostrils', ids: ['acL', 'alL', 'nosL', 'sn', 'nosR', 'alR', 'acR'] },
-  { id: 'lips', closed: true, ids: ['chL', 'ulL', 'cphL', 'ls', 'cphR', 'ulR', 'chR', 'llR', 'li', 'llL'] },
+  { id: 'lips', closed: true, snapFine: true, ids: ['chL', 'ulL', 'cphL', 'ls', 'cphR', 'ulR', 'chR', 'llR', 'li', 'llL'] },
   { id: 'mouth', ids: ['chL', 'sto', 'chR'] },
   { id: 'earL', closed: true, ids: ['obsL', 'saL', 'eoL', 'hbL', 'lobL', 'obiL', 'traL'] },
   { id: 'earR', closed: true, ids: ['obsR', 'saR', 'eoR', 'hbR', 'lobR', 'obiR', 'traR'] },
   { id: 'hair', snap: true, ids: ['hslL', 'hseL', 'hsuL', 'htsL', 'vertex', 'htsR', 'hsuR', 'hseR', 'hslR'] },
   { id: 'neckL', snap: true, ids: ['ntL', 'nmL', 'nbL'] },
   { id: 'neckR', snap: true, ids: ['ntR', 'nmR', 'nbR'] },
+  ...['L', 'R'].flatMap(s => [
+    { id: 'crease' + s, line: true, ids: ['cr1', 'cr2', 'cr3', 'cr4'].map(i => i + s) },
+    { id: 'trough' + s, line: true, ids: ['tt1', 'tt2', 'tt3'].map(i => i + s) },
+    { id: 'cheekbone' + s, line: true, ids: ['malar', 'zr1', 'zr2', 'zy'].map(i => i + s) },
+    { id: 'submalar' + s, line: true, ids: ['sm1', 'sm2', 'sm3'].map(i => i + s) },
+    { id: 'nasolabial' + s, line: true, ids: ['nl0', 'nl1', 'nl2', 'nl3'].map(i => i + s) },
+    { id: 'dorsum' + s, line: true, ids: ['dl1', 'dl2', 'tdp'].map(i => i + s) },
+    { id: 'sidewall' + s, line: true, ids: ['nsd', 'nsw', 'al'].map(i => i + s) },
+  ]),
 ];
 const PROFILE_CONTOURS = [
   // the face region: the profile line from hairline to under the chin, back along the jaw, up in front of the ear
   { id: 'face', closed: true, boundary: true, ids: ['tri', 'fhC', 'gl', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'jaw2#', 'go#', 'ramus#', 'obs#', 'tem#', 'hl2#', 'hl1#'] },
   { id: 'profile', snap: true, draw: false, ids: ['tri', 'fhC', 'gl', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'neckF'] },
   { id: 'brow', ids: ['bi#', 'bm#', 'ba#', 'bt#'] },
-  { id: 'eye', closed: true, ids: ['en#', 'eu1#', 'eu2#', 'eu3#', 'ex#', 'el3#', 'el2#', 'el1#'] },
+  { id: 'eye', closed: true, snapFine: true, ids: ['en#', 'eu1#', 'eu2#', 'eu3#', 'ex#', 'el3#', 'el2#', 'el1#'] },
   { id: 'nostril', ids: ['nos#', 'al#', 'ac#'] },
   { id: 'lip', ids: ['ls', 'cph#', 'ul#', 'ch#', 'll#', 'li'] },
   { id: 'ear', closed: true, ids: ['obs#', 'sa#', 'eo#', 'hb#', 'lob#', 'obi#', 'tra#'] },
   { id: 'hair', snap: true, ids: ['hairFront', 'vertex', 'occiput', 'hairBack'] },
   { id: 'neckFront', ids: ['cerv', 'neckF'] },
   { id: 'neckBack', snap: true, ids: ['nape', 'neckB'] },
+  { id: 'crease', line: true, ids: ['cr1#', 'cr2#', 'cr3#', 'cr4#'] },
+  { id: 'trough', line: true, ids: ['tt1#', 'tt2#', 'tt3#'] },
+  { id: 'cheekbone', line: true, ids: ['malar#', 'zr1#', 'zr2#'] },
+  { id: 'submalar', line: true, ids: ['sm1#', 'sm2#', 'sm3#'] },
+  { id: 'nasolabial', line: true, ids: ['nl0#', 'nl1#', 'nl2#', 'nl3#'] },
 ];
+
+/* Denser contours: a dot halfway along every segment of the main contours, so the outline, eyes,
+   lips, brows, nose and hair are traced closely (≈ 270 dots in all). Midpoints are averaged in 3D
+   and marked as detail dots (drawn smaller). */
+const MIDS = new Map();
+let midCount = 0;
+function midpoint(a, b, profileOnly) {
+  const key = a < b ? a + '|' + b : b + '|' + a;
+  if (MIDS.has(key)) {
+    const p = INDEX0[MIDS.get(key)];
+    if (!profileOnly && p.views === 'profile' && !p.ownViews) delete p.views;
+    return p.id;
+  }
+  const A = INDEX0[a], B = INDEX0[b], x = (A.x + B.x) / 2;
+  const p = {
+    // named after the plainer neighbour (a landmark's name belongs to the landmark alone)
+    id: 'd' + (++midCount), name: A.lm && !B.lm ? B.name : A.name,
+    x, y: (A.y + B.y) / 2, z: (A.z + B.z) / 2, group: A.group, field: A.field === 'both' || B.field === 'both' ? 'both' : A.field,
+    t: (A.t + B.t) / 2, lm: null, side: Math.abs(x) < 1e-6 ? 0 : Math.sign(x), detail: true,
+  };
+  if (A.views === 'all' || B.views === 'all') p.views = 'all';
+  else if (profileOnly || A.views === 'profile' || B.views === 'profile') { p.views = 'profile'; p.ownViews = A.views === 'profile' || B.views === 'profile'; }
+  if (A.n && B.n) p.n = A.n.map((v, i) => v + B.n[i]);
+  POINTS.push(p); INDEX0[p.id] = p; MIDS.set(key, p.id);
+  return p.id;
+}
+function densify(list, profileOnly) {
+  for (const c of list) {
+    if (c.line || c.id.startsWith('ear')) continue;
+    const ids = c.ids, n = ids.length, segs = c.closed ? n : n - 1, out = [];
+    for (let k = 0; k < n; k++) {
+      out.push(ids[k]);
+      if (k >= segs) continue;
+      const a = ids[k], b = ids[(k + 1) % n];
+      if (a.includes('#') || b.includes('#')) continue;
+      out.push(midpoint(a, b, profileOnly));
+    }
+    c.ids = out;
+  }
+}
+densify(FRONT_CONTOURS, false);
+densify(PROFILE_CONTOURS, true);
+
+const INDEX = Object.fromEntries(POINTS.map((p, i) => [p.id, i]));
+/** Outward surface normal: a head-shaped ellipsoid, unless a point says otherwise. */
+for (const p of POINTS) {
+  if (p.n) { const L = Math.hypot(...p.n); p.n = p.n.map(v => v / L); continue; }
+  const nx = p.x / (8.2 * 8.2), nz = (p.z + .3) / (10.6 * 10.6), L = Math.hypot(nx, nz) || 1;
+  p.n = [nx / L, 0, nz / L];
+}
 /** Contours for a view, with '#' resolved to the near side and ids turned into indices. */
 function contours(yaw) {
   const prof = Math.abs(yaw) > 45, ns = nearSide(yaw);
@@ -211,8 +297,7 @@ function contours(yaw) {
 /* ------------------------------------------------------- anatomy ops --
    Each op moves template points in 3D (cm at 100 %, radians for rotations).
    Regions are 3D Gaussians (centre, sigma) given for the right side and
-   mirrored. Ops act on the 137 scan dots and on every vertex of the dense
-   face mesh alike, so the dots and the rendered skin always agree. */
+   mirrored. Ops act on the scan dots and on every node of the dense face grid\n   (used for the automatic shading) alike, so the dots and the shading always agree. */
 const FACE = ['outline', 'skin', 'brows', 'eyes', 'nose', 'lips'];
 const SOFT_GROUPS = ['outline', 'skin', 'nose', 'lips'];
 const SKIN = ['outline', 'skin', 'brows', 'nose', 'lips'];   // everything on the face except the eye openings
@@ -282,7 +367,7 @@ const OPS = [
 ];
 const OP_INDEX = Object.fromEntries(OPS.map(o => [o.key, o]));
 
-/** How much a point belongs to any of these groups: scan dots have one group, mesh vertices a blend. */
+/** How much a point belongs to any of these groups: scan dots have one group, dense grid nodes a blend. */
 const member = (p, groups) => {
   if (!p.m) return groups.includes(p.group) ? 1 : 0;
   let s = 0;
@@ -296,7 +381,7 @@ function rotYZ(p, pivot, a) {
 }
 /**
  * 3D displacement (cm) for a set of op values (−1…1), for template points P (the scan dots by
- * default, or mesh vertices: { x, y, z, t (mm), n: [3], m: { group: weight } }).
+ * default, or dense grid nodes: { x, y, z, t (mm), n: [3], m: { group: weight } }).
  * With weightsFor = an op key, also returns how strongly that op acts on each point.
  */
 function anatomyAt(values, P, weightsFor) {
@@ -350,7 +435,7 @@ function anatomyAt(values, P, weightsFor) {
   }
   return W ? { D, W } : D;
 }
-/** The anatomy for the 137 scan dots. */
+/** The anatomy for the scan dots. */
 const anatomy = (values, weightsFor) => anatomyAt(values, POINTS, weightsFor);
 function smooth(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
 
@@ -469,6 +554,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '13',
+  mls, tpsFit, tpsEval, spline, build: '14',
 };
 })();
