@@ -6,13 +6,11 @@
 <title>Cranimeter</title>
 <meta name="description" content="Cranimeter — measure facial proportions, ratios and angles on your own photos. Runs entirely in your browser.">
 <meta name="theme-color" content="#080A0F">
-<!-- Bump this (and the ?v= tags below, plus BUILD in app.js / warp.js) on every release so browsers never mix old and new files. -->
-<meta name="cranimeter-build" content="10">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
-<link rel="stylesheet" href="style.css?v=10">
+<link rel="stylesheet" href="style.css?v=15">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -135,6 +133,15 @@
       </button>
     </div>
   </div>
+  <!-- Face map: a layer of its own, above the measurements -->
+  <section class="fmap" id="fmap" aria-label="Face map">
+    <div class="panel-head fmap-head"><div class="ph-title"><h2>Face map</h2></div></div>
+    <div class="item fmap-item" id="fmapItem" role="button" tabindex="0">
+      <span class="dot"></span><span class="it-text"><span class="it-name">Face map</span><span class="it-sub"></span></span><span class="it-val"></span>
+      <button class="it-x" type="button" aria-label="Remove face map"><svg class="ic" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8"/></svg></button>
+    </div>
+    <div class="fmap-body"><div class="fmap-inner" id="fmapBody"></div></div>
+  </section>
   <div class="panel-head">
     <div class="ph-title"><h2>Measurements</h2><span class="progress" id="progress"></span></div>
     <button id="btnShowAll" class="chip" type="button">Show all</button>
@@ -255,8 +262,11 @@
   </div>
 </div>
 
-<script src="presets.js?v=10"></script>
-<script src="warp.js?v=10"></script>
-<script src="app.js?v=10"></script>
+<!-- Bump the ?v= tags (and BUILD in app.js, presets.js, warp.js and facemap.js) on every release.
+     If a browser still has an old copy of a file, app.js fetches it again by itself. -->
+<script src="presets.js?v=15"></script>
+<script src="warp.js?v=15"></script>
+<script src="facemap.js?v=15"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>
