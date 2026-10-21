@@ -7,14 +7,14 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '15';   // must match the build in presets.js, warp.js and facemap.js
+const BUILD = '17';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
  * old index.html without the newer script tags). Anything missing or from another release is
  * fetched again, bypassing every cache — so stale files fix themselves instead of blocking the app.
  */
-const MODULES = [['CRANI', 'presets.js'], ['CraniWarp', 'warp.js'], ['CraniMap', 'facemap.js']];
+const MODULES = [['CRANI', 'presets.js'], ['CraniWarp', 'warp.js'], ['CraniMap', 'facemap.js'], ['CraniSurface', 'surface.js']];
 const moduleOk = g => !!window[g] && window[g].build === BUILD;
 const loadFresh = file => new Promise(res => {
   const s = document.createElement('script');
@@ -139,6 +139,7 @@ const DEFAULTS = {
   loupe: false, names: true, gridFx: true,
   mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
   mShowLayers: true, mShade: .6, mOpen: 'bone',
+  surfView: 'contours', surfAlpha: .8, surfTrust: .6, surfBrush: '', surfSweep: .5, surfPca: 0, surfUse: true,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -232,7 +233,7 @@ const S = {
   scratch: null, stroke: null, hdrag: null, compare: false, adjSnap: null,
   // face scan (Morph → Map) and the anatomy settings on top of it (Morph → Morph)
   // the face map is selected in the panel like a measurement (mapOpen): then its dots are edited
-  map: null, mapOpen: false, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null,
+  map: null, mapOpen: false, mapStep: 'points', surf: null, surfBusy: null, zstroke: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null,
   anat: {}, anatBase: {}, anatHover: null, anatSnap: null, hideGroups: new Set(),
   // dodge & burn paint: log brightness per tone-grid node on the original photo; copy-on-write
   tone: { field: null, base: null }, toneRev: 0, tstroke: null,
@@ -480,8 +481,9 @@ function mapCtrl() {
   // Dense samples along each contour (same spline parameters before and after), so every
   // contour moves as one smooth curve. The back layer needs less detail than the face.
   const gap = mapGap();
+  // (Interior feature lines — creases, rims, ridges — are dense enough in dots alone.)
   for (const c of m.contours) {
-    if (c.idx.some(i => !m.vis[i])) continue;
+    if (c.line || c.idx.some(i => !m.vis[i])) continue;
     const P_ = c.idx.map(i => ({ x: m.p[2 * i], y: m.p[2 * i + 1] })), N_ = P_.length;
     const lay = c.field === 'both' ? ['face', 'back'] : [c.field];
     for (const L of lay) {
@@ -501,8 +503,8 @@ function mapCtrl() {
     for (const i of c.idx) { cx += m.p[2 * i]; cy += m.p[2 * i + 1]; dx += q[2 * i] - m.p[2 * i]; dy += q[2 * i + 1] - m.p[2 * i + 1]; }
     const n = c.idx.length; cx /= n; cy /= n; dx /= n; dy /= n;
     F.push(cx + dx, cy + dy, cx, cy);
-    for (const f of [.3, .6]) for (const i of c.idx) {
-      const ax = cx + (m.p[2 * i] - cx) * f, ay = cy + (m.p[2 * i + 1] - cy) * f;
+    for (let k = 0; k < c.idx.length; k += 2) {
+      const i = c.idx[k], f = .55, ax = cx + (m.p[2 * i] - cx) * f, ay = cy + (m.p[2 * i + 1] - cy) * f;
       F.push(ax + dx, ay + dy, ax, ay);
     }
   }
@@ -522,7 +524,10 @@ function mapCtrl() {
   const s = Math.max(S.iw, S.ih);
   // A little smoothing (instead of passing exactly through every control) keeps tightly packed
   // controls that move differently — a lid fold dropping toward the lash line — from rippling.
-  m.ctrl = { ver: m.ver, front: FM.tpsFit(F, F.length / 4, s, TPS_SMOOTH), back: FM.tpsFit(B, B.length / 4, s, TPS_SMOOTH) };
+  // the layer behind the face only changes where the face edge pulls in, so reuse it when it hasn't
+  const old = m.ctrl, Bs = Float32Array.from(B);
+  const sameB = old && old.Bs && old.Bs.length === Bs.length && Bs.every((v, i) => Math.abs(v - old.Bs[i]) < 1e-3);
+  m.ctrl = { ver: m.ver, Bs, front: FM.tpsFit(F, F.length / 4, s, TPS_SMOOTH), back: sameB ? old.back : FM.tpsFit(B, B.length / 4, s, TPS_SMOOTH) };
   return m.ctrl;
 }
 /** Bring the GPU's face-scan grid up to date (computed on the GPU, or on the CPU as a fallback). */
@@ -786,7 +791,8 @@ function boxBlur(a, gw, gh, r, act) {
  */
 function denseFace() {
   const m = S.map;
-  if (m.dense && m.dense.pver === m.pver && m.dense.seq === S.imgSeq) return m.dense;
+  const sk = surfUsable() ? surfKey() : '';
+  if (m.dense && m.dense.pver === m.pver && m.dense.seq === S.imgSeq && m.dense.sk === sk) return m.dense;
   const { cell, gw, gh } = toneGrid(), nv = gw * gh, f = mapFrame();
   const yaw = m.yaw * Math.PI / 180, ct = Math.cos(yaw), st = Math.sin(yaw);
   const act = new Uint8Array(nv);
@@ -809,7 +815,9 @@ function denseFace() {
   actIdx.forEach((v, k) => {
     const sx = (v % gw) * cell, sy = ((v / gw) | 0) * cell;
     const [ax, ay] = FM.tpsEval(toT, sx, sy), ux = ax - f.tx, uy = ay - f.ty;
-    const X = (ux * f.zr + uy * f.zi) / z2, Y = (uy * f.zr - ux * f.zi) / z2, Dp = scalarAt(toD, sx, sy);
+    // depth: this face's own surface where it was built (Face map → Surface), else the template's
+    const sd = sk ? surfAt(sx, sy) : null;
+    const X = (ux * f.zr + uy * f.zi) / z2, Y = (uy * f.zr - ux * f.zi) / z2, Dp = sd != null ? sd : scalarAt(toD, sx, sy);
     d0[v] = Dp;
     pts[k] = { x: X * ct + Dp * st, y: Y, z: -X * st + Dp * ct, t: Math.max(0, scalarAt(toTis, sx, sy)), n: null, m: null };
   });
@@ -850,7 +858,7 @@ function denseFace() {
   const contrast = clamp(sd / Math.max(20, mean) / .16, .55, 1.35);
   // a feathered face mask, so the tone fades out at the face edge
   const feather = boxBlur(Float32Array.from(act), gw, gh, Math.max(1, Math.round(.35 * f.scale / cell)));
-  m.dense = { pver: m.pver, seq: S.imgSeq, cell, gw, gh, nv, act, actIdx: Int32Array.from(actIdx), kOf, pts, d0, cm, grad, contrast, feather, eyes, auto: null };
+  m.dense = { pver: m.pver, seq: S.imgSeq, sk, cell, gw, gh, nv, act, actIdx: Int32Array.from(actIdx), kOf, pts, d0, cm, grad, contrast, feather, eyes, auto: null };
   return m.dense;
 }
 /**
@@ -874,8 +882,11 @@ function autoTone() {
   const fill = boxBlur(dz, gw, gh, Math.max(2, Math.round(.8 * f.scale / cell)), skin);
   actIdx.forEach(v => { dz[v] += (fill[v] - dz[v]) * eyes[v]; d1[v] = d0[v] + dz[v]; });
   const lt = m.light || [0, -.35, 1], lL = Math.hypot(...lt), L = lt.map(x => x / lL);
+  // with a built surface: the light measured from the photo (ambient + direction); else a rough guess
+  const SL = surfUsable() ? S.surf.light : null;
   const lit = (g) => {
     const gX = clamp(g[0], -2.5, 2.5), gY = clamp(g[1], -2.5, 2.5);
+    if (SL) return Math.max(.04, SF.shade(SL, gX, gY));
     return Math.max(0, (-gX * L[0] - gY * L[1] + L[2]) / Math.hypot(gX, gY, 1)) + .45;   // + ambient / skin scatter
   };
   const r = Math.max(2, Math.round(1.1 * f.scale / cell));
@@ -908,6 +919,323 @@ function syncTone() {
   for (let v = 0; v < nv; v++) data[v] = Math.exp(clamp((auto ? auto[v] : 0) + (field ? field[v] : 0), -.7, .5));
   GLR.setTone(data, gw, gh, cell);
   return true;
+}
+
+/* ----------------------------------------------- face surface (Face map → 2) --
+   A depth map of this face on a grid over the photo, built by surface.js from the face-map dots
+   (the template's depth, pulled onto this face) and the photo's own light and shade. It is shown
+   as contour lines, relief, Haralick topography, a mesh or a turnable 3D view; the user can fix it
+   with brushes; and Morph uses it (its depth for the anatomy, its light for the shading). */
+const SF = window.CraniSurface || null;
+const SURF_DIV = 128;
+let surfIds = 0, surfRev = 0;
+const surfStep = () => mapping() && S.mapStep === 'surface';
+const surfUsable = () => !!(SF && S.surf && S.map && S.surf.view === S.map.view && cfg.surfUse);
+const surfKey = () => S.surf ? `${S.surf.id}:${S.surf.rev}` : '';
+/** The surface's depth with the user's fixes (cm toward the camera), cached per edit. */
+function surfZ(s = S.surf) {
+  if (!s) return null;
+  if (s._zt && s._zt.rev === s.rev) return s._zt.z;
+  const z = s.edit ? s.z.map((v, k) => v + s.edit[k]) : s.z;
+  s._zt = { rev: s.rev, z };
+  return z;
+}
+/** Depth of the surface at a photo point (bilinear), or null outside it. */
+function surfAt(x, y) {
+  const s = S.surf, z = surfZ(s);
+  const fx = (x - s.x0) / s.cell, fy = (y - s.y0) / s.cell, i = Math.floor(fx), j = Math.floor(fy);
+  if (i < 0 || j < 0 || i >= s.gw - 1 || j >= s.gh - 1) return null;
+  const k = j * s.gw + i;
+  if (!s.act[k] || !s.act[k + 1] || !s.act[k + s.gw] || !s.act[k + s.gw + 1]) return null;
+  const tx = fx - i, ty = fy - j;
+  return (z[k] * (1 - tx) + z[k + 1] * tx) * (1 - ty) + (z[k + s.gw] * (1 - tx) + z[k + s.gw + 1] * tx) * ty;
+}
+/** Eye openings, brows, lips and nostrils on the surface grid (0…1): their colour isn't skin shading. */
+function surfFeatureMask(x0, y0, cell, gw, gh, sc) {
+  const m = S.map, c = document.createElement('canvas');
+  c.width = gw; c.height = gh;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.setTransform(1 / cell, 0, 0, 1 / cell, -x0 / cell + .5, -y0 / cell + .5);
+  g.fillStyle = g.strokeStyle = '#fff';
+  g.lineWidth = .15 * sc; g.lineJoin = 'round';
+  for (const ct of m.contours) {
+    if (!ct.closed || ct.boundary || !/^(eye|lips|browShape)/.test(ct.id) || ct.idx.some(i => !m.vis[i])) continue;
+    const pts = FM.spline(ct.idx.map(i => ({ x: m.p[2 * i], y: m.p[2 * i + 1] })), true, 6);
+    g.beginPath(); pts.forEach((p, k) => k ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.closePath(); g.fill(); g.stroke();
+  }
+  for (const id of ['nosL', 'nosR', 'alL', 'alR', 'col']) {
+    const i = FM.INDEX[id];
+    if (i == null || !m.vis[i]) continue;
+    g.beginPath(); g.arc(m.p[2 * i], m.p[2 * i + 1], .32 * sc, 0, TAU); g.fill();
+  }
+  const d = g.getImageData(0, 0, gw, gh).data, out = new Float32Array(gw * gh);
+  for (let k = 0; k < gw * gh; k++) out[k] = d[4 * k + 3] / 255;
+  return out;
+}
+/** Build (or rebuild) the surface from the dots and the photo. Undoable; keeps fixes if the grid is unchanged. */
+async function buildSurface() {
+  if (!SF || !S.map || S.surfBusy) return;
+  const m = S.map, f = mapFrame(), seq = S.imgSeq, pver = m.pver;
+  // the face's box on the photo
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const i of mapBoundary().idx) { x0 = Math.min(x0, m.p[2 * i]); y0 = Math.min(y0, m.p[2 * i + 1]); x1 = Math.max(x1, m.p[2 * i]); y1 = Math.max(y1, m.p[2 * i + 1]); }
+  const pad = .04 * Math.max(x1 - x0, y1 - y0);
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(S.iw, x1 + pad); y1 = Math.min(S.ih, y1 + pad);
+  const cell = Math.max(x1 - x0, y1 - y0) / SURF_DIV, gw = Math.ceil((x1 - x0) / cell) + 1, gh = Math.ceil((y1 - y0) / cell) + 1, n = gw * gh;
+  const h = cell / f.scale;
+  const act = new Uint8Array(n);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) if (maskAt(x0 + i * cell, y0 + j * cell) > .5) act[j * gw + i] = 1;
+  // prior: the template's depth (as seen from this view), carried by the dots
+  const yaw = m.yaw * Math.PI / 180, ct = Math.cos(yaw), st = Math.sin(yaw), gx = [], gy = [], dD = [];
+  FM.POINTS.forEach((pt, i) => {
+    if (!m.vis[i] || pt.field === 'back') return;
+    gx.push(m.p[2 * i]); gy.push(m.p[2 * i + 1]); dD.push(pt.x * st + pt.z * ct);
+  });
+  const toD = scalarFit(gx, gy, dD, Math.max(S.iw, S.ih)), z0 = new Float32Array(n);
+  for (let k = 0; k < n; k++) if (act[k]) z0[k] = scalarAt(toD, x0 + (k % gw) * cell, y0 + ((k / gw) | 0) * cell);
+  // the photo: linear luminance per node, and a crop for the 3D view and the analysis views
+  const lc = document.createElement('canvas'); lc.width = gw; lc.height = gh;
+  const lg = lc.getContext('2d', { willReadFrequently: true });
+  lg.imageSmoothingQuality = 'high';
+  lg.drawImage(S.img, x0 - cell / 2, y0 - cell / 2, gw * cell, gh * cell, 0, 0, gw, gh);
+  const ld = lg.getImageData(0, 0, gw, gh).data, lum = new Float32Array(n);
+  const lin = v => { v /= 255; return v <= .04045 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); };
+  for (let k = 0; k < n; k++) lum[k] = .2126 * lin(ld[4 * k]) + .7152 * lin(ld[4 * k + 1]) + .0722 * lin(ld[4 * k + 2]);
+  const csc = Math.min(1, 1024 / (Math.max(gw, gh) * cell)), crop = document.createElement('canvas');
+  crop.width = Math.max(1, Math.round(gw * cell * csc)); crop.height = Math.max(1, Math.round(gh * cell * csc));
+  const cg = crop.getContext('2d', { willReadFrequently: true });
+  cg.imageSmoothingQuality = 'high';
+  cg.drawImage(S.img, x0 - cell / 2, y0 - cell / 2, gw * cell, gh * cell, 0, 0, crop.width, crop.height);
+  // data weights: skin, faded out near the face edge (the template is least sure there)
+  const feat = surfFeatureMask(x0, y0, cell, gw, gh, f.scale);
+  const fe = SF.blur(Float32Array.from(act), gw, gh, Math.max(1, Math.round(.4 / h)), null, 1), skin = new Float32Array(n);
+  for (let k = 0; k < n; k++) if (act[k]) skin[k] = clamp((fe[k] - .55) / .35, 0, 1) * (1 - feat[k]);
+  S.surfBusy = { p: 0 };
+  syncFaceMapPanel();
+  let res;
+  try {
+    res = await SF.buildSurface({ gw, gh, h, act, skin, z0, lum, trust: cfg.surfTrust }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
+  } catch (err) { console.error(err); }
+  S.surfBusy = null;
+  if (!res || seq !== S.imgSeq || S.map !== m || m.pver !== pver) { syncUI(); if (res) toast('The face map changed while building — build again'); return; }
+  const old = S.surf, keep = old && old.edit && old.gw === gw && old.gh === gh && Math.abs(old.x0 - x0) < 1e-6 && Math.abs(old.y0 - y0) < 1e-6 && Math.abs(old.cell - cell) < 1e-6;
+  pushUndo();
+  S.surf = { ...res, id: ++surfIds, rev: ++surfRev, view: m.view, pver, x0, y0, cell, crop, feat, trust: cfg.surfTrust, edit: keep ? old.edit : null };
+  S.glDirty = true;
+  syncPts(); syncUI();
+  if (old && old.edit && !keep) toast('Surface rebuilt — your fixes were cleared because the face area changed', 5000);
+  else toast(res.strength < .25 ? 'Surface built — the light in this photo is flat, so it stays close to the face map' : 'Surface built — check it in Contours, Relief or the 3D view', 4500);
+}
+
+/* surface views */
+const SURF_VIEWS = [
+  ['photo', 'Photo', 'Just the photo'],
+  ['contours', 'Contours', 'Lines of equal depth, every 2.5 mm (bold every 1 cm) — like a topographic map'],
+  ['relief', 'Relief', 'Depth as colour (blue = further back, warm = closer) with hill shading'],
+  ['topo', 'Topography', 'Haralick’s topographic labels of the surface’s local relief: ridges, ravines, peaks, pits, convex and concave hills'],
+  ['topoPhoto', 'Photo topography', 'The same labels read straight off the photo’s brightness (as in Yin et al.)'],
+  ['mesh', 'Mesh', 'A grid draped over the surface, shaded by the photo’s light'],
+  ['shading', 'Shading', 'How the surface would look in the photo’s light — compare it with the photo'],
+  ['gradient', 'Luminance gradient', 'How brightness changes: red = left↔right, green = up↔down. Shows the shape the light reveals'],
+  ['sweep', 'Level sweep', 'Magnifies one brightness level — sweep it to see bands of equal light'],
+  ['pca', 'Colour PCA', 'Principal components of the colours — PC 1 is mostly light and shade, PC 2–3 skin colour'],
+];
+const RELIEF_STOPS = [[0, [38, 70, 160]], [.3, [40, 150, 170]], [.55, [90, 190, 110]], [.78, [235, 210, 90]], [1, [250, 245, 235]]];
+function reliefColor(t) {
+  t = clamp(t, 0, 1);
+  for (let i = 1; i < RELIEF_STOPS.length; i++) {
+    const [b, cb] = RELIEF_STOPS[i], [a, ca] = RELIEF_STOPS[i - 1];
+    if (t <= b) { const u = (t - a) / (b - a); return ca.map((v, c) => v + (cb[c] - v) * u); }
+  }
+  return RELIEF_STOPS[RELIEF_STOPS.length - 1][1];
+}
+let surfOv = { key: '' };
+/** The current view as a raster over the surface box (cached per surface, edit and view). */
+function surfOverlay() {
+  const s = S.surf, v = cfg.surfView;
+  const key = `${surfKey()}|${v}|${v === 'sweep' ? cfg.surfSweep : ''}|${v === 'pca' ? cfg.surfPca : ''}`;
+  if (surfOv.key === key) return surfOv;
+  surfOv = { key, v };
+  if (v === 'photo') return surfOv;
+  const { gw, gh, act, h } = s, z = surfZ(s), n = gw * gh;
+  if (v === 'contours') { surfOv.lines = SF.contours(z, gw, gh, act, .25); return surfOv; }
+  if (v === 'gradient' || v === 'sweep' || v === 'pca') {
+    const c = s.crop, d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data;
+    const px = v === 'gradient' ? SF.lumGradient(d, c.width, c.height) : v === 'sweep' ? SF.levelSweep(d, c.width, c.height, cfg.surfSweep) : SF.pca(d, c.width, c.height, cfg.surfPca);
+    const o = document.createElement('canvas'); o.width = c.width; o.height = c.height;
+    o.getContext('2d').putImageData(new ImageData(px, c.width, c.height), 0, 0);
+    surfOv.canvas = o;
+    return surfOv;
+  }
+  const o = document.createElement('canvas'), up = v === 'mesh' ? 4 : 1;
+  o.width = gw * up; o.height = gh * up;
+  const g = o.getContext('2d'), img = g.createImageData(gw, gh), px = img.data;
+  const gr = SF.gradient(z, gw, gh, h, act), L = s.light;
+  const shadeAt = k => Math.max(0, SF.shade(L, gr.gx[k], gr.gy[k]));
+  if (v === 'relief') {
+    let lo = Infinity, hi = -Infinity;
+    for (let k = 0; k < n; k++) if (act[k]) { lo = Math.min(lo, z[k]); hi = Math.max(hi, z[k]); }
+    for (let k = 0; k < n; k++) {
+      if (!act[k]) continue;
+      const col = reliefColor((z[k] - lo) / (hi - lo || 1));
+      // classic map hill shading: light from the upper left
+      const hs = clamp(.55 + .45 * ((gr.gx[k] * .6 + gr.gy[k] * .6 + 1) / Math.sqrt(1 + gr.gx[k] ** 2 + gr.gy[k] ** 2) - .45) * 1.6, .25, 1.15);
+      px.set([col[0] * hs, col[1] * hs, col[2] * hs, 235], 4 * k);
+    }
+  } else if (v === 'topo' || v === 'topoPhoto') {
+    const T = v === 'topo' ? SF.topography(z, gw, gh, h, act, { detrend: 1.4, smooth: 2, k: .9 }) : SF.topography(s.I, gw, gh, h, act, { smooth: 1 });
+    for (let k = 0; k < n; k++) {
+      const c = SF.LABELS[T.lab[k]][1];
+      if (!c || !act[k]) continue;
+      px.set([parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16), 235], 4 * k);
+    }
+  } else if (v === 'shading') {
+    let mx = 0;
+    for (let k = 0; k < n; k++) if (act[k]) mx = Math.max(mx, s.rho[k] * shadeAt(k));
+    for (let k = 0; k < n; k++) {
+      if (!act[k]) continue;
+      // back to display gamma, so it compares with the photo
+      const L1 = Math.pow(clamp(s.rho[k] * shadeAt(k) / (mx || 1), 0, 1), 1 / 2.2) * 255;
+      px.set([L1, L1 * .96, L1 * .93, 255], 4 * k);
+    }
+  }
+  if (v === 'mesh') {
+    // grid lines every ≈ 4 mm, brightness from the surface's shading
+    const every = Math.max(2, Math.round(.4 / h));
+    let lo = Infinity, hi = 0;
+    for (let k = 0; k < n; k++) if (act[k]) { const v = shadeAt(k); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    g.lineWidth = 1.2;
+    for (let pass = 0; pass < 2; pass++) for (let a = 0; a < (pass ? gw : gh); a += every) {
+      const len = pass ? gh : gw;
+      for (let b = 0; b < len - 1; b++) {
+        const k0 = pass ? b * gw + a : a * gw + b, k1 = pass ? (b + 1) * gw + a : a * gw + b + 1;
+        if (!act[k0] || !act[k1]) continue;
+        // lit parts of the surface bright, shaded parts dark: the grid reads as a 3D shape
+        const l = clamp((shadeAt(k0) - lo) / (hi - lo || 1), 0, 1);
+        g.strokeStyle = `rgb(${Math.round(25 + 230 * l)},${Math.round(45 + 210 * l)},${Math.round(90 + 165 * l)})`;
+        g.beginPath();
+        if (pass) { g.moveTo((a + .5) * up, (b + .5) * up); g.lineTo((a + .5) * up, (b + 1.5) * up); }
+        else { g.moveTo((b + .5) * up, (a + .5) * up); g.lineTo((b + 1.5) * up, (a + .5) * up); }
+        g.stroke();
+      }
+    }
+  } else g.putImageData(img, 0, 0);
+  surfOv.canvas = o;
+  return surfOv;
+}
+/** Surface step: the chosen view over the (unchanged) photo, plus the dots, faint. */
+function drawSurfaceStep(ctx) {
+  const s = S.surf, m = S.map;
+  if (s && cfg.surfView !== 'photo') {
+    const o = surfOverlay();
+    // photo → screen is affine here (the face map shows the photo unchanged)
+    const ox = s.x0 - s.cell / 2, oy = s.y0 - s.cell / 2, W = s.gw * s.cell, H = s.gh * s.cell;
+    const p0 = mapToScreen({ x: ox, y: oy }), px = mapToScreen({ x: ox + W, y: oy }), py = mapToScreen({ x: ox, y: oy + H });
+    ctx.save();
+    ctx.transform((px.x - p0.x) / s.gw, (px.y - p0.y) / s.gw, (py.x - p0.x) / s.gh, (py.y - p0.y) / s.gh, p0.x, p0.y);
+    ctx.globalAlpha = cfg.surfAlpha;
+    if (o.canvas) { ctx.imageSmoothingEnabled = true; ctx.drawImage(o.canvas, 0, 0, s.gw, s.gh); }
+    if (o.lines) {
+      const k = Math.hypot(px.x - p0.x, px.y - p0.y) / s.gw, L = o.lines;
+      ctx.lineCap = 'round';
+      for (const major of [0, 1]) {
+        ctx.beginPath();
+        for (let q = 0; q < L.major.length; q++) {
+          if (L.major[q] !== major) continue;
+          ctx.moveTo(L.segs[4 * q] + .5, L.segs[4 * q + 1] + .5); ctx.lineTo(L.segs[4 * q + 2] + .5, L.segs[4 * q + 3] + .5);
+        }
+        ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = (major ? 3.2 : 2.2) / k; ctx.stroke();
+        ctx.strokeStyle = major ? 'rgba(255,236,170,.95)' : 'rgba(150,215,255,.8)'; ctx.lineWidth = (major ? 1.6 : 1) / k; ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+  // the dots, small and faint, for orientation
+  const P_ = mapScreenPts();
+  ctx.save(); ctx.globalAlpha = .45;
+  FM.POINTS.forEach((pt, i) => {
+    if (!dotShown(i) || pt.detail) return;
+    ctx.beginPath(); ctx.arc(P_[i].x, P_[i].y, 1.8, 0, TAU); ctx.fillStyle = MAP_COLORS[pt.group]; ctx.fill();
+  });
+  ctx.restore();
+  if (cfg.surfBrush && s && S.cursorIn && S.cursor && !S.pan) drawBrush(ctx, S.cursor);
+}
+
+/* fix-it brushes: Raise / Lower / Smooth / Restore paint a correction (cm) onto the surface */
+const SURF_BRUSH_COLORS = { raise: '#F5C542', lower: '#7EA6FF', smooth: '#A8D88F', restore: '#F2F2F3' };
+function startSurfBrush(sx, sy) {
+  const s = S.surf;
+  if (!s) { toast('Build the surface first'); return; }
+  const snap = snapshot();
+  S.surf = { ...s, edit: s.edit ? s.edit.slice() : new Float32Array(s.gw * s.gh), rev: ++surfRev, _zt: null };
+  S.zstroke = { sx, sy, snap, changed: false };
+  surfDab(1 / 60);
+}
+function surfDab(dt) {
+  const st0 = S.zstroke, s = S.surf, c = fwdMap(toI(st0.sx, st0.sy)), R = brushSrcR(st0.sx, st0.sy);
+  const { gw, gh, cell, x0, y0, act } = s, e = s.edit, mode = cfg.surfBrush, hard = clamp(cfg.mHard, 0, 1) * .85;
+  const i0 = Math.max(1, Math.floor((c.x - R - x0) / cell)), i1 = Math.min(gw - 2, Math.ceil((c.x + R - x0) / cell));
+  const j0 = Math.max(1, Math.floor((c.y - R - y0) / cell)), j1 = Math.min(gh - 2, Math.ceil((c.y + R - y0) / cell));
+  let any = false;
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+    const k = j * gw + i;
+    if (!act[k]) continue;
+    const d = Math.hypot(x0 + i * cell - c.x, y0 + j * cell - c.y);
+    if (d > R) continue;
+    const w = (1 - smooth01(hard, 1, d / R)) * cfg.mStrength;
+    if (w < 1e-4) continue;
+    if (mode === 'raise' || mode === 'lower') e[k] = clamp(e[k] + (mode === 'raise' ? 1 : -1) * w * dt * .35, -2.5, 2.5);   // ≈ 3.5 mm per second
+    else if (mode === 'restore') e[k] *= 1 - Math.min(1, w * dt * 4);
+    else if (mode === 'smooth') {
+      const t = k2 => s.z[k2] + e[k2], avg = (t(k - 1) + t(k + 1) + t(k - gw) + t(k + gw)) / 4;
+      e[k] += (avg - t(k)) * Math.min(1, w * dt * 10);
+    }
+    any = true;
+  }
+  if (any) { st0.changed = true; s.rev = ++surfRev; s._zt = null; wake(); }
+}
+function endSurfBrush() {
+  const z = S.zstroke;
+  S.zstroke = null;
+  if (!z) return;
+  if (z.changed) pushUndo(z.snap); else S.surf = z.snap.surf;
+  S.glDirty = true;
+  syncPts(); syncUI();
+}
+
+/* the 3D view (a small window beside the panel) */
+const s3El = $('#surf3d');
+let viewer3d = null, viewer3dKey = '';
+function open3d(on) {
+  if (!s3El) return;
+  if (on && !S.surf) { toast('Build the surface first'); return; }
+  s3El.hidden = !on;
+  if (on && !viewer3d) {
+    viewer3d = SF.createViewer($('#s3Canvas'));
+    if (!viewer3d) { s3El.hidden = true; toast('3D view needs WebGL 2'); return; }
+  }
+  viewer3dKey = '';
+  sync3d();
+}
+function sync3d() {
+  if (!viewer3d || !s3El || s3El.hidden) return;
+  if (!S.surf || !mapping()) { s3El.hidden = true; return; }
+  const key = surfKey();
+  if (key === viewer3dKey) return;
+  viewer3dKey = key;
+  const s = S.surf;
+  viewer3d.setSurface({ gw: s.gw, gh: s.gh, h: s.h, act: s.act, z: surfZ(s), dir: s.dir }, s.crop);
+  $$('#s3Mode [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === viewer3d.state.mode));
+}
+if (s3El) {
+  $('#s3Close').addEventListener('click', () => open3d(false));
+  $('#s3Mode').addEventListener('click', e => {
+    const b = e.target.closest('[data-v]');
+    if (!b || !viewer3d) return;
+    viewer3d.setMode(b.dataset.v);
+    $$('#s3Mode [data-v]').forEach(x => x.classList.toggle('on', x === b));
+  });
+  for (const [id, yaw] of [['s3Front', 0], ['s3Left', .9], ['s3Right', -.9]]) $('#' + id).addEventListener('click', () => viewer3d && viewer3d.setView(yaw, 0));
 }
 
 const fwdMap = v => isIdentity() ? { x: v.x, y: v.y } : mapSrc(pToS(vToP(v)));
@@ -1239,6 +1567,7 @@ function snapshot() {
     map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light } : null,
     anat: { ...S.anat }, anatBase: { ...S.anatBase },
     tone: S.tone,   // paint arrays are copy-on-write too
+    surf: S.surf,   // so is the face surface (and its fixes)
     list: [...S.meas.values()].map(m => ({ id: m.id, preset: m.preset, kind: m.kind, name: m.name, pts: m.pts.map(cp), src: m.src ? m.src.map(cp) : null })),
     refId: S.refId, calibId: S.calibId, calibMM: S.calibMM, seq: S.seq,
   };
@@ -1273,6 +1602,7 @@ function restore(s) {
   }
   if (s.anat) { S.anat = { ...s.anat }; S.anatBase = { ...(s.anatBase || {}) }; if (S.map) mapTouched(false); }
   if (s.tone) { S.tone = s.tone; S.toneRev++; }
+  if ('surf' in s) S.surf = s.surf;
   S.glDirty = true;
   const old = S.meas;
   S.meas = new Map();
@@ -1851,7 +2181,7 @@ function drawBrush(ctx, c) {
   ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, TAU);
   ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 3; ctx.stroke();
   // dodge / burn brushes wear their own colour
-  ctx.strokeStyle = isTone() ? rgba(TONE_COLORS[cfg.mMode], .95) : 'rgba(255,255,255,.85)';
+  ctx.strokeStyle = surfStep() ? rgba(SURF_BRUSH_COLORS[cfg.surfBrush] || '#FFFFFF', .95) : isTone() ? rgba(TONE_COLORS[cfg.mMode], .95) : 'rgba(255,255,255,.85)';
   ctx.lineWidth = 1.2; ctx.stroke();
   if (hard > .05 && r * hard > 4) {
     ctx.setLineDash([2, 4]);
@@ -2015,7 +2345,7 @@ function drawOverlay(t, dt) {
   }
 
   if (S.tool === 'adjust') drawAdjustGuides(ctx);
-  if (S.map && !S.compare) { if (mapping()) drawMap(ctx); else if (S.tool === 'morph') drawAnatomyFocus(ctx); }
+  if (S.map && !S.compare) { if (surfStep()) drawSurfaceStep(ctx); else if (mapping()) drawMap(ctx); else if (S.tool === 'morph') drawAnatomyFocus(ctx); }
   const brushOn = S.tool === 'morph' && !mapping() && !S.anatHover;
   if (brushOn && !S.qfit && S.cursorIn && S.cursor && !S.pan && !(S.rpress && S.rpress.moved)) drawBrush(ctx, S.cursor);
   if (S.qfit && S.cursorIn && S.cursor) tag(ctx, qfitSteps()[S.qfit.step].label + `  ${S.qfit.step + 1}/4`, S.cursor.x, S.cursor.y);
@@ -2247,6 +2577,7 @@ function refreshCursor() {
   else if (S.drag || S.pan || S.hdrag || (S.mapDrag && S.mapDrag.moved) || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
   else if (S.box || S.mapBox || S.qfit) c = 'crosshair';
   else if (S.space) c = 'grab';
+  else if (surfStep()) c = cfg.surfBrush && S.surf ? 'none' : 'grab';
   else if (mapping()) c = S.mapHover != null ? 'grab' : 'crosshair';
   else if (S.tool === 'morph') c = 'none';
   else if (S.tool === 'adjust') c = S.hoverHandle ? 'grab' : 'default';
@@ -2321,6 +2652,7 @@ ov.addEventListener('pointerdown', e => {
     if (S.drag) endDrag();
     if (S.stroke) endStroke();
     if (S.tstroke) endTone();
+    if (S.zstroke) endSurfBrush();
     if (S.mapDrag || S.mapBox) morphUp(e);
     if (S.hdrag) endHandle();
     if (S.tdrag) endXf();
@@ -2398,6 +2730,7 @@ ov.addEventListener('pointermove', e => {
   const fine = e.shiftKey ? .25 : 1;
   if (S.mapDrag || S.mapBox) { morphMove(sx, sy, e); return; }
   if (S.tstroke) { S.tstroke.sx = sx; S.tstroke.sy = sy; return; }
+  if (S.zstroke) { S.zstroke.sx = sx; S.zstroke.sy = sy; return; }
   if (S.stroke) {
     const v = toI(sx, sy);
     if (cfg.mMode === 'push' && dist(S.stroke.last, v) > 0) { morphPush(S.stroke.last, v); S.stroke.changed = true; }
@@ -2453,7 +2786,7 @@ ov.addEventListener('pointermove', e => {
 
 /* ---- face map interaction (the Face map layer is selected) ---- */
 function mapHitAt(sx, sy) {
-  if (!S.map || !mapping() || S.qfit) return null;
+  if (!S.map || !mapping() || S.qfit || surfStep()) return null;
   const P_ = mapScreenPts();
   let best = null, bd = 9;
   P_.forEach((p, i) => { if (!dotShown(i)) return; const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
@@ -2488,11 +2821,49 @@ function openFaceMap(on) {
   syncPts();               // the anatomy is hidden while mapping, so points move
   syncUI();
 }
+const dirText = d => {
+  const v = d[1] < -.25 ? 'above' : d[1] > .25 ? 'below' : '', hz = d[0] < -.25 ? 'the left' : d[0] > .25 ? 'the right' : '';
+  return v && hz ? `${v}, from ${hz}` : v ? v : hz ? `from ${hz}` : 'the front';
+};
+function syncSurfacePane() {
+  const s = S.surf, m = S.map, busy = S.surfBusy;
+  const stale = s && m && (s.view !== m.view || s.pver !== m.pver);
+  setText($('#sfStatus'), !m ? 'Place the dots first (step 1).'
+    : busy ? `Building the surface… ${Math.round(busy.p * 100)}%`
+    : !s ? 'Build a 3D surface of this face from your dots and the photo’s own light and shade.'
+    : (s.view !== m.view ? 'Built for another view — build again. '
+      : `Light ${dirText(s.dir)}. The surface explains ${Math.round(Math.max(0, s.fit1) * 100)}% of the photo’s shading (the dots alone: ${Math.round(Math.max(0, s.fit0) * 100)}%).`
+        + (s.strength < .25 ? ' The light is flat here, so the surface stays close to the dots.' : '')
+        + (stale ? ' Dots moved since — build again to update.' : '')));
+  const bb = $('#sfBuild');
+  setText(bb, busy ? 'Building…' : s ? 'Rebuild' : 'Build surface');
+  bb.disabled = !m || !!busy;
+  $('#sf3d').disabled = !s;
+  $('#sf3d').classList.toggle('on', !!s3El && !s3El.hidden);
+  setRange('sfTrust', Math.round(cfg.surfTrust * 100), Math.round(cfg.surfTrust * 100) + '%');
+  $$('#sfViews [data-v]').forEach(b => { b.classList.toggle('on', b.dataset.v === cfg.surfView); b.disabled = !s; });
+  $('#sfSweepRow').hidden = cfg.surfView !== 'sweep';
+  setRange('sfSweep', Math.round(cfg.surfSweep * 100), Math.round(cfg.surfSweep * 100) + '%');
+  $('#sfPca').hidden = cfg.surfView !== 'pca';
+  $$('#sfPca [data-v]').forEach(b => b.classList.toggle('on', +b.dataset.v === cfg.surfPca));
+  setRange('sfAlpha', Math.round(cfg.surfAlpha * 100), Math.round(cfg.surfAlpha * 100) + '%');
+  const lg = $('#sfLegend'), v = cfg.surfView;
+  const html = v === 'topo' || v === 'topoPhoto' ? SF.LABELS.filter(l => l[1]).map(([n, c]) => `<span><i style="background:${c}"></i>${n}</span>`).join('')
+    : v === 'contours' ? '<span><i style="background:rgba(150,215,255,.9)"></i>every 2.5 mm</span><span><i style="background:#FFECAA"></i>every 1 cm</span>'
+    : v === 'relief' ? '<span class="sf-ramp"></span><span>back</span><span style="margin-left:auto">closer</span>' : '';
+  if (lg._h !== html) { lg._h = html; lg.innerHTML = html; }
+  $$('#sfBrush [data-v]').forEach(b => { b.classList.toggle('on', b.dataset.v === cfg.surfBrush); b.disabled = !s && !!b.dataset.v; });
+  setRange('sfSize', +(cfg.mSize * 100).toFixed(1), Math.round(brushV()) + ' px');
+  setRange('sfStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
+  $('#sfClear').disabled = !(s && s.edit);
+  $('#sfUse').checked = !!cfg.surfUse;
+  sync3d();
+}
 /** Remove the face map (and the anatomy changes that need it) — an undo step. */
 function clearFaceMap() {
   if (!S.map) return;
   pushUndo();
-  S.map = null; S.mapSel.clear(); S.qfit = null;
+  S.map = null; S.mapSel.clear(); S.qfit = null; S.surf = null;
   S.anat = {}; S.anatBase = {};
   S.glDirty = true;
   syncPts(); syncUI();
@@ -2521,6 +2892,11 @@ function moveMapPoints(dx, dy) {
   wake();
 }
 function mapDown(sx, sy, e) {
+  if (surfStep()) {   // Surface: a fix-it brush, or (Look) drag to pan
+    if (cfg.surfBrush && S.surf) startSurfBrush(sx, sy);
+    else { S.pan = { x: sx, y: sy, vx: S.view.x, vy: S.view.y }; refreshCursor(); }
+    return;
+  }
   if (S.qfit) { quickFitClick(sx, sy); return; }
   ensureMap();
   const hit = mapHitAt(sx, sy), x = screenToMap(sx, sy);
@@ -2769,6 +3145,7 @@ function pointerUp(e) {
   pointers.delete(e.pointerId);
   if (pinch) { if (pointers.size < 2) pinch = null; S.press = null; return; }
   if (S.mapDrag || S.mapBox) morphUp(e);
+  else if (S.zstroke) endSurfBrush();
   else if (S.tstroke) endTone();
   else if (S.stroke) endStroke();
   else if (S.hdrag) endHandle();
@@ -2785,7 +3162,7 @@ function pointerUp(e) {
   else if (S.rpress) {
     const r = S.rpress;
     S.rpress = null;
-    if (!r.moved && !EDIT_TOOLS.has(S.tool)) onRightClick(e.clientX, e.clientY);
+    if (!r.moved && !EDIT_TOOLS.has(S.tool) && !mapping()) onRightClick(e.clientX, e.clientY);
   }
   else if (S.box) {
     const b = S.box;
@@ -2936,7 +3313,7 @@ addEventListener('keyup', e => {
   if (e.key.toLowerCase() === 'b') setCompare(false);
   if (e.key === 'Shift') { S.shift = false; wake(); }
 });
-addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); if (S.tstroke) endTone(); if (S.mapDrag || S.mapBox) morphUp({}); });
+addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); if (S.tstroke) endTone(); if (S.zstroke) endSurfBrush(); if (S.mapDrag || S.mapBox) morphUp({}); });
 addEventListener('resize', () => { resize(); if (S.img) fitView(); });
 
 /* --------------------------------------------------------- image input -- */
@@ -2964,7 +3341,7 @@ function setImageState(rec) {
     drag: null, mdrag: null, press: null, rpress: null, box: null, leaving: [],
   });
   S.picked = new Set();
-  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null, anat: {}, anatBase: {}, anatHover: null, lum: null, tone: { field: null, base: null }, tstroke: null, mapOpen: false });
+  Object.assign(S, { map: null, mapSel: new Set(), mapHover: null, mapDrag: null, mapBox: null, qfit: null, anat: {}, anatBase: {}, anatHover: null, lum: null, tone: { field: null, base: null }, tstroke: null, mapOpen: false, surf: null, zstroke: null });
   S.toneRev++;
   glMaskVer = -1; glMapKey = '';
   customSig = null;
@@ -3226,6 +3603,7 @@ function toggleShowAll() {
 /** Select keeps the open layers; a drawing tool returns to free mode. */
 /** Select, Morph and Adjust keep the open layers (so ratios stay in view); drawing tools return to free mode. */
 function setTool(t) {
+  if (S.zstroke) endSurfBrush();
   if (t !== 'move' && S.mapOpen) openFaceMap(false);   // editing the face map is part of Select
   if (S.draft) { S.draft = null; S.draftM = null; }
   if (S.stroke) endStroke();
@@ -3326,8 +3704,15 @@ function renderToolOpts() {
       });
       // one undo step per slider gesture
       const start = () => { if (!S.anatSnap) S.anatSnap = snapshot(); };
-      const commit = () => { if (S.anatSnap) { pushUndo(S.anatSnap); S.anatSnap = null; syncUI(); } };
-      const setOp = (key, v) => { S.anat[key] = v; if (S.map) mapTouched(false); syncPts(); syncToolOpts(); };
+      // while a slider is dragged, the landmarks catch up once per frame (the warp fit is the slow part)
+      let ptsRaf = 0;
+      const flushPts = () => { if (ptsRaf) { cancelAnimationFrame(ptsRaf); ptsRaf = 0; } syncPts(); };
+      const commit = () => { flushPts(); if (S.anatSnap) { pushUndo(S.anatSnap); S.anatSnap = null; syncUI(); } };
+      const setOp = (key, v) => {
+        S.anat[key] = v; if (S.map) mapTouched(false);
+        S.glDirty = true; wake(); syncToolOpts();
+        if (!ptsRaf) ptsRaf = requestAnimationFrame(() => { ptsRaf = 0; syncPts(); });
+      };
       for (const o of FM.OPS) {
         const el = $('#op_' + o.key), row = el.closest('.arow');
         el.addEventListener('pointerdown', start);
@@ -3683,6 +4068,10 @@ const VIEW_LABEL = { front: 'Front', left: '◀ Profile', right: 'Profile ▶' }
 function buildFaceMapPanel() {
   if (!FM) { fmapEl.hidden = true; return; }
   $('#fmapBody').innerHTML = `
+    <div class="seg full msub" id="fmStep">
+      <button type="button" data-v="points" title="Place the dots on the face"><b>1</b>Points</button><button type="button" data-v="surface" title="A 3D surface of the face from the dots and the photo's light"${SF ? '' : ' disabled'}><b>2</b>Surface</button>
+    </div>
+    <div id="fmPoints">
     <div class="seg full mview" id="mView">
       <button type="button" data-v="front">Front</button><button type="button" data-v="left" title="Face looking to the left">◀ Profile</button><button type="button" data-v="right" title="Face looking to the right">Profile ▶</button>
     </div>
@@ -3695,11 +4084,57 @@ function buildFaceMapPanel() {
     <div class="to-label">Dots <small>click to hide a group</small></div>
     <div class="chips" id="mGroups">${MAP_GROUPS.map(([g, label, c]) => `<button type="button" class="chip-dot" data-g="${g}" style="--c:${c}"><i></i>${label}</button>`).join('')}</div>
     <label class="tg sm"><span>Show layers<small>Teal = the face layer, blue = hair, ears, neck and background behind it</small></span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
-    <p class="to-note">Drag dots onto the face — the photo is shown unchanged here. Box-select or <kbd>Shift</kbd>-click to move several, arrow keys nudge, <kbd>Ctrl</kbd> <kbd>A</kbd> selects all. Hover a dot to see its name and tissue depth.</p>`;
+    <p class="to-note">Drag dots onto the face — the photo is shown unchanged here. Box-select or <kbd>Shift</kbd>-click to move several, arrow keys nudge, <kbd>Ctrl</kbd> <kbd>A</kbd> selects all. Hover a dot to see its name and tissue depth. Then go to <b>Surface</b>.</p>
+    </div>
+    <div id="fmSurface" hidden>
+      <p class="to-note" id="sfStatus"></p>
+      <div class="to-actions" style="margin:2px 0 10px">
+        <button type="button" class="btn sm" id="sfBuild">Build surface</button>
+        <button type="button" class="btn ghost sm" id="sf3d">3D view</button>
+      </div>
+      ${sliderRow('sfTrust', 'Follow the photo', 0, 100, 1, 'How much the surface follows the photo’s light and shade (right) or keeps the face map’s shape (left). Rebuild to apply.')}
+      <div class="to-label">View</div>
+      <div class="chips looks" id="sfViews">${SURF_VIEWS.map(([v, n, tip]) => `<button type="button" class="chip-dot look" data-v="${v}" title="${esc(tip)}">${n}</button>`).join('')}</div>
+      <div id="sfSweepRow">${sliderRow('sfSweep', 'Level', 0, 100, 1, 'The brightness level to magnify')}</div>
+      <div class="seg full" id="sfPca"><button type="button" data-v="0">PC 1</button><button type="button" data-v="1">PC 2</button><button type="button" data-v="2">PC 3</button></div>
+      ${sliderRow('sfAlpha', 'Overlay', 0, 100, 1)}
+      <div class="sf-legend" id="sfLegend"></div>
+      <div class="to-label">Fix the surface <small>hold on the photo</small></div>
+      <div class="seg full mmode" id="sfBrush"><button type="button" data-v="">Look</button><button type="button" data-v="raise">Raise</button><button type="button" data-v="lower">Lower</button><button type="button" data-v="smooth">Smooth</button><button type="button" data-v="restore">Restore</button></div>
+      ${sliderRow('sfSize', 'Size', 1, 50, .1)}
+      ${sliderRow('sfStrength', 'Strength', 1, 100, 1)}
+      <div class="to-actions" style="margin:2px 0 6px"><button type="button" class="btn ghost sm" id="sfClear">Clear fixes</button></div>
+      <label class="tg sm"><span>Use for morphing<small>Morph works on this surface: its depth for the anatomy, the photo’s measured light for the shading</small></span><input type="checkbox" class="sw-toggle" id="sfUse"></label>
+    </div>`;
   fmapItem.addEventListener('click', e => {
     if (e.target.closest('.it-x')) { clearFaceMap(); return; }
     openFaceMap(!S.mapOpen);
   });
+  $('#fmStep').addEventListener('click', e => {
+    const b = e.target.closest('[data-v]');
+    if (!b || b.disabled || S.mapStep === b.dataset.v) return;
+    S.mapStep = b.dataset.v; S.qfit = null; S.mapSel.clear(); S.mapHover = null;
+    if (S.mapStep === 'surface' && !S.surf && S.map) buildSurface();
+    S.glDirty = true; syncUI();
+  });
+  $('#sfBuild').addEventListener('click', () => buildSurface());
+  $('#sf3d').addEventListener('click', () => open3d(s3El.hidden));
+  $('#sfViews').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.surfView = b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
+  $('#sfPca').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.surfPca = +b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
+  $('#sfBrush').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.surfBrush = b.dataset.v; saveCfg(); syncFaceMapPanel(); renderHint(); refreshCursor(); wake(); } });
+  const sbind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncFaceMapPanel(); wake(); });
+  sbind('sfTrust', 'surfTrust', v => v / 100);
+  sbind('sfSweep', 'surfSweep', v => v / 100);
+  sbind('sfAlpha', 'surfAlpha', v => v / 100);
+  sbind('sfSize', 'mSize', v => v / 100);
+  sbind('sfStrength', 'mStrength', v => v / 100);
+  $('#sfClear').addEventListener('click', () => {
+    if (!S.surf || !S.surf.edit) return;
+    pushUndo();
+    S.surf = { ...S.surf, edit: null, rev: ++surfRev, _zt: null };
+    S.glDirty = true; syncPts(); syncUI();
+  });
+  $('#sfUse').addEventListener('change', e => { cfg.surfUse = e.target.checked; saveCfg(); S.glDirty = true; syncPts(); syncUI(); });
   $('#mView').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) setMapView(b.dataset.v); });
   $('#mShowLayers').addEventListener('change', e => { cfg.mShowLayers = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
   $('#mQuick').addEventListener('click', () => { if (S.qfit) { S.qfit = null; renderHint(); refreshCursor(); wake(); } else startQuickFit(); syncUI(); });
@@ -3729,9 +4164,14 @@ function syncFaceMapPanel() {
   fmapEl.classList.toggle('open', open);
   fmapItem.classList.toggle('sel', open);
   fmapItem.classList.toggle('measured', !!m);
-  setText(fmapItem.querySelector('.it-sub'), m ? `${VIEW_LABEL[m.view]} · ${shown} dots` : 'Not placed — click to start');
+  setText(fmapItem.querySelector('.it-sub'), m ? `${VIEW_LABEL[m.view]} · ${shown} dots${S.surf && S.surf.view === m.view ? ' · surface' : ''}` : 'Not placed — click to start');
   setText(fmapItem.querySelector('.it-val'), m ? (m.snapped ? 'fitted' : 'guess') : '');
-  if (!open) return;
+  if (!open) { if (s3El && !s3El.hidden) s3El.hidden = true; return; }
+  const surfOn = S.mapStep === 'surface';
+  $$('#fmStep [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === S.mapStep));
+  $('#fmPoints').hidden = surfOn;
+  $('#fmSurface').hidden = !surfOn;
+  if (surfOn) { syncSurfacePane(); return; }
   $$('#mView [data-v]').forEach(b => b.classList.toggle('on', !!m && b.dataset.v === m.view));
   $('#mShowLayers').checked = !!cfg.mShowLayers;
   const qb = $('#mQuick');
@@ -3931,6 +4371,8 @@ function renderHint() {
     const tgt = d ? { preset: d.preset, kind: d.kind } : placeTarget();
     if (mapping() && S.qfit) {
       html = `<b>Quick fit · ${S.qfit.step + 1}/4</b><span class="h-desc">${qfitSteps()[S.qfit.step].label} · <kbd>Esc</kbd> cancels</span>`;
+    } else if (surfStep()) {
+      html = `<b>Face surface</b><span class="h-desc">${S.surf ? (cfg.surfBrush ? 'Hold on the photo to ' + { raise: 'raise', lower: 'lower', smooth: 'smooth', restore: 'restore' }[cfg.surfBrush] + ' the surface' : 'Pick a view, or a brush to fix the surface · drag to pan') : 'Build the surface from your dots and the photo’s light'} · <kbd>Esc</kbd> closes</span>`;
     } else if (mapping()) {
       html = `<b>Face map</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · arrows nudge · <kbd>Esc</kbd> closes</span>`;
     } else if (S.tool === 'morph') {
@@ -4104,6 +4546,7 @@ function frame(t) {
     stepView(dt);
     if (S.stroke && cfg.mMode !== 'push') dabHere(dt);
     if (S.tstroke) toneDab(dt);
+    if (S.zstroke) surfDab(dt);
     if (S.map && S.map.maskDirty && !S.mapDrag) { buildMask(); S.map.maskDirty = false; }
     drawImageLayer(dt);
     drawGrid(dt);
@@ -4128,6 +4571,6 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto };
+window.cranimeter = { loadFile, state: S, build: BUILD, surfOverlay, surfZ, buildSurface, drawSurfaceStep, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto };
 
 })();
