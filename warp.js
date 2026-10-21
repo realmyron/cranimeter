@@ -6,6 +6,9 @@
      screen → view space V → (rotate / zoom / flip)⁻¹ → U
             → lens re-projection → P → free-brush displacement field
             → face map (face layer over head / background layer) → source S
+   The face layer comes from a 3D mesh rendered with a depth buffer into a face buffer
+   (photo position + shading per pixel), so folds and occlusion work; without float
+   render targets it falls back to a 2D spline warp.
 
    Every frame samples the ORIGINAL photo, so edits never stack resampling
    blur. Magnified areas use a sharp Catmull-Rom bicubic filter; minified
@@ -50,7 +53,40 @@ uniform float uShowLayers;
 uniform sampler2D uDepth;   // RGBA32F grid: face depth at each node of the photo (r), its change at each node of the result (g) — source px
 uniform float uShade;       // 0…1 relighting strength
 uniform vec3  uLight;       // light direction (image x right, y down, z toward the camera)
+// ---- 3D face mesh, rendered with a depth buffer into a face buffer (mode 3) ----
+uniform sampler2D uMesh;    // RGBA32F over the result: photo position (rg), shading (b), coverage (a)
+uniform ivec2 uMeshN;
+uniform float uMeshSc;      // face-buffer px per result px
+uniform float uMeshJump;    // photo px: neighbours further apart than this sit on different folds
 out vec4 outColor;
+
+/* The face buffer at x. Photo positions are interpolated between texels, except across a fold
+   (one surface in front of another), where blending positions would invent pixels. */
+vec4 meshAt(vec2 x) {
+  vec2 f = x * uMeshSc - 0.5;
+  vec2 fl = floor(f), t = f - fl;
+  ivec2 i0 = clamp(ivec2(fl), ivec2(0), uMeshN - 1), i1 = clamp(ivec2(fl) + 1, ivec2(0), uMeshN - 1);
+  vec4 a = texelFetch(uMesh, ivec2(i0.x, i0.y), 0), b = texelFetch(uMesh, ivec2(i1.x, i0.y), 0);
+  vec4 c = texelFetch(uMesh, ivec2(i0.x, i1.y), 0), d = texelFetch(uMesh, ivec2(i1.x, i1.y), 0);
+  float wa = (1.0 - t.x) * (1.0 - t.y) * a.a, wb = t.x * (1.0 - t.y) * b.a, wc = (1.0 - t.x) * t.y * c.a, wd = t.x * t.y * d.a;
+  float sw = wa + wb + wc + wd;
+  if (sw < 1e-5) return vec4(0.0);
+  vec3 v = (wa * a.rgb + wb * b.rgb + wc * c.rgb + wd * d.rgb) / sw;
+  float spread = 0.0;
+  if (a.a > 0.0 && b.a > 0.0) spread = max(spread, distance(a.rg, b.rg));
+  if (a.a > 0.0 && c.a > 0.0) spread = max(spread, distance(a.rg, c.rg));
+  if (d.a > 0.0 && b.a > 0.0) spread = max(spread, distance(d.rg, b.rg));
+  if (d.a > 0.0 && c.a > 0.0) spread = max(spread, distance(d.rg, c.rg));
+  if (spread > uMeshJump) {
+    // on a fold: take the strongest texel instead of blending across it
+    vec4 m = a; float wm = wa;
+    if (wb > wm) { m = b; wm = wb; }
+    if (wc > wm) { m = c; wm = wc; }
+    if (wd > wm) { m = d; }
+    v = m.rgb;
+  }
+  return vec4(v, sw);
+}
 
 vec4 gridAt(sampler2D g, vec2 x) {
   vec2 f = x / uMapCell;
@@ -158,7 +194,10 @@ void main() {
 
   // face map layers (identity when off)
   vec2 sb = x, sf = x;
-  if (uMapOn == 1) { vec4 s = mapAt(x); sf = s.rg; sb = s.ba; }
+  if (uMapOn == 1 || uMapOn == 3) { vec4 s = mapAt(x); sf = s.rg; sb = s.ba; }
+  // mode 3: the face comes from the rendered 3D mesh (with occlusion and its own shading)
+  float meshShade = 1.0, meshCov = 1.0;
+  if (uMapOn == 3) { vec4 fm = meshAt(x); meshCov = fm.a; sf = fm.a > 0.0 ? fm.rg : x; meshShade = fm.b; }
   bool layered = uMapOn != 0;
 
   // derivatives first (must be taken in uniform control flow)
@@ -170,6 +209,7 @@ void main() {
   float footb = max(length(sbx), length(sby)), footf = max(length(sfx), length(sfy));
 
   float m = layered ? texture(uMask, uvf).r : 0.0;     // is the face layer here?
+  if (uMapOn == 3) m *= smoothstep(0.0, 1.0, meshCov);   // …and has the mesh reached this spot?
 
   // Relighting: the face's depth before (z0, carried from the photo) and after (z1) the change.
   // Their slopes give the surface normals; the ratio of the two Lambert terms is the shading change.
@@ -183,8 +223,9 @@ void main() {
   vec4 col = colb;
   float edgeB = min(min(sb.x, sb.y), min(uSize.x - sb.x, uSize.y - sb.y));
   float a = clamp(edgeB / max(footb, 1e-4) + 0.5, 0.0, 1.0);   // anti-aliased photo border
-  if (uMapOn == 1) {
+  if (uMapOn == 1 || uMapOn == 3) {
     vec4 colf = mix(bicubic(uvf), textureGrad(uImg, uvf, dfx, dfy), smoothstep(0.0, 0.7, lodf));
+    if (uMapOn == 3) { colf.rgb *= meshShade; colf.rgb = min(colf.rgb, vec3(colf.a)); }
     if (shade) {
       vec3 L = normalize(uLight);
       vec3 n0 = normalize(vec3(-g0, 1.0)), n1 = normalize(vec3(-g1, 1.0));
@@ -247,6 +288,29 @@ void main() {
   outDepth = vec4(uND > 0 ? tps1(2, uND, uAD, v) : 0.0, uNC > 0 ? tps1(3, uNC, uAC, v) : 0.0, 0.0, 1.0);
 }`;
 
+// The deformed 3D face mesh: each vertex knows where it is now (result px), how close it is to the
+// camera (for the depth test), where its pixels come from on the photo, and its new shading.
+const MESH_VS = `#version 300 es
+in vec2 aPos;      // result position (px)
+in float aZ;       // depth toward the camera (px)
+in vec2 aSrc;      // photo position (px)
+in float aShade;
+uniform vec2 uSize;
+uniform float uZScale;
+out vec2 vSrc;
+out float vShade;
+void main() {
+  vSrc = aSrc; vShade = aShade;
+  vec2 n = aPos / uSize * 2.0 - 1.0;
+  gl_Position = vec4(n, clamp(-aZ * uZScale, -1.0, 1.0), 1.0);   // nearer = smaller depth
+}`;
+const MESH_FS = `#version 300 es
+precision highp float;
+in vec2 vSrc;
+in float vShade;
+out vec4 outFace;
+void main() { outFace = vec4(vSrc, vShade, 1.0); }`;
+
 function createRenderer(canvas) {
   let gl;
   try {
@@ -273,11 +337,15 @@ function createRenderer(canvas) {
   // rendering the map grid needs float render targets; without them app.js fills the grid on the CPU
   const floatRT = !!gl.getExtension('EXT_color_buffer_float');
   const mapProg = floatRT ? link(vs, sh(gl.FRAGMENT_SHADER, MAP_FS)) : null;
+  const meshProg = floatRT ? link(sh(gl.VERTEX_SHADER, MESH_VS), sh(gl.FRAGMENT_SHADER, MESH_FS)) : null;
 
   const U = {};
   ['uImg', 'uTexSize', 'uSize', 'uField', 'uFieldN', 'uCell', 'uMorph', 'uView', 'uDpr', 'uCanvasH',
    'uRot', 'uScale', 'uTrans', 'uEll', 'uLensD', 'uZref', 'uAlpha',
-   'uMapOn', 'uMap', 'uMapN', 'uMapCell', 'uMask', 'uShowLayers', 'uDepth', 'uShade', 'uLight'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+   'uMapOn', 'uMap', 'uMapN', 'uMapCell', 'uMask', 'uShowLayers', 'uDepth', 'uShade', 'uLight',
+   'uMesh', 'uMeshN', 'uMeshSc', 'uMeshJump'].forEach(n => { U[n] = gl.getUniformLocation(prog, n); });
+  const XU = {};
+  if (meshProg) ['uSize', 'uZScale'].forEach(n => { XU[n] = gl.getUniformLocation(meshProg, n); });
   const MU = {};
   if (mapProg) ['uCtrl', 'uNF', 'uNB', 'uND', 'uNC', 'uAF', 'uAB', 'uAD', 'uAC', 'uS', 'uMapCell'].forEach(n => { MU[n] = gl.getUniformLocation(mapProg, n); });
   const vao = gl.createVertexArray();
@@ -318,6 +386,22 @@ function createRenderer(canvas) {
   rgba32(mapTex, 1, 1, new Float32Array(4));
   rgba32(depthTex, 1, 1, new Float32Array(4));
   let mapW = 1, mapH = 1, mapCell = 1;
+  // 3D face mesh → face buffer
+  const meshTex = gl.createTexture(), meshDepth = gl.createRenderbuffer(), meshFbo = gl.createFramebuffer();
+  const meshVao = gl.createVertexArray(), meshVbo = gl.createBuffer(), meshIbo = gl.createBuffer();
+  rgba32(meshTex, 1, 1, new Float32Array(4));
+  let meshW = 1, meshH = 1, meshSc = 1, meshCount = 0;
+  if (meshProg) {
+    gl.bindVertexArray(meshVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, meshVbo);
+    const loc = n => gl.getAttribLocation(meshProg, n), F = 4, stride = 6 * F;
+    [['aPos', 2, 0], ['aZ', 1, 2], ['aSrc', 2, 3], ['aShade', 1, 5]].forEach(([n, k, o]) => {
+      const l = loc(n); if (l < 0) return;
+      gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, k, gl.FLOAT, false, stride, o * F);
+    });
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshIbo);
+    gl.bindVertexArray(null);
+  }
 
   let texW = 1, texH = 1, fieldW = 0, fieldH = 0, hasField = false;
 
@@ -325,6 +409,50 @@ function createRenderer(canvas) {
     canvas, maxTex, maxView,
     /** True when the face-map grid can be computed on the GPU (computeMap); otherwise use setMapGrid. */
     gpuMap: !!mapProg,
+    /** True when the 3D face mesh can be rendered (needs float render targets). */
+    gpuMesh: !!meshProg,
+    /** Triangles of the face mesh (indices into the vertex list); changes when the scan is re-aligned. */
+    setMeshIndices(idx) {
+      gl.bindVertexArray(meshVao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshIbo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      meshCount = idx.length;
+    },
+    /**
+     * Render the face mesh into the face buffer. verts: Float32Array of 6 per vertex
+     * (result x, y, depth, photo x, y, shading); size [iw, ih] of the result in px; sc: buffer px per result px.
+     */
+    renderMesh(verts, size, sc, zScale) {
+      const w = Math.max(1, Math.round(size[0] * sc)), h = Math.max(1, Math.round(size[1] * sc));
+      if (w !== meshW || h !== meshH) {
+        rgba32(meshTex, w, h, null);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, meshDepth);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+        meshW = w; meshH = h;
+      }
+      meshSc = w / size[0];
+      gl.bindBuffer(gl.ARRAY_BUFFER, meshVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, meshFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, meshTex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, null, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, meshDepth);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      gl.viewport(0, 0, w, h);
+      gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.clearColor(0, 0, 0, 0); gl.clearDepth(1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS);
+      gl.useProgram(meshProg);
+      gl.uniform2f(XU.uSize, size[0], size[1]);
+      gl.uniform1f(XU.uZScale, zScale);
+      gl.bindVertexArray(meshVao);
+      gl.drawElements(gl.TRIANGLES, meshCount, gl.UNSIGNED_INT, 0);
+      gl.bindVertexArray(null);
+      gl.disable(gl.DEPTH_TEST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    },
     /**
      * Evaluate both face-map layers and the two depth fields on a gw × gh grid (cell = source px
      * between nodes). F, B: thin-plate splines from CraniMap.tpsFit (same length unit s);
@@ -424,7 +552,11 @@ function createRenderer(canvas) {
       gl.uniform1f(U.uZref, p.zref || 0);
       // face map: p.map = { moved (grids are current), showLayers, shade (0…1), light [x, y, z] } | null
       const M = p.map;
-      gl.uniform1i(U.uMapOn, M ? (M.moved ? 1 : 2) : 0);
+      gl.uniform1i(U.uMapOn, M ? (M.moved ? (M.mesh ? 3 : 1) : 2) : 0);
+      gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, meshTex); gl.uniform1i(U.uMesh, 5);
+      gl.uniform2i(U.uMeshN, meshW, meshH);
+      gl.uniform1f(U.uMeshSc, meshSc);
+      gl.uniform1f(U.uMeshJump, M && M.jump ? M.jump : 8);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.uniform1i(U.uMask, 2);
       gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, mapTex); gl.uniform1i(U.uMap, 3);
       gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, depthTex); gl.uniform1i(U.uDepth, 4);
@@ -442,5 +574,5 @@ function createRenderer(canvas) {
   };
 }
 
-window.CraniWarp = { createRenderer, build: '12' };
+window.CraniWarp = { createRenderer, build: '13' };
 })();
