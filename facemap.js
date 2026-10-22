@@ -104,9 +104,7 @@ pair('ac', 'Alar crease', 1.45, -0.7, 9.0, 'nose', 'face', 12, 'Alar crease');
 pair('nos', 'Nostril', 0.75, -0.75, 10.6, 'nose', 'face', 4);
 
 // ---- cheeks, chin (interior skin) ----
-pair('infra', 'Under-eye', 2.6, -4.0, 8.2, 'skin', 'face', 7);
 pair('malar', 'Cheekbone (malar)', 4.5, -2.8, 7.3, 'skin', 'face', 7);
-pair('buc', 'Buccal fat pad (side of the cheek)', 4.7, 0.5, 6.1, 'skin', 'face', 22);
 pair('nl1', 'Nasolabial fold', 2.0, -0.4, 9.3, 'skin', 'face', 13);
 pair('nl2', 'Nasolabial fold · lower', 2.9, 1.3, 8.8, 'skin', 'face', 13);
 pair('jowl', 'Jowl', 3.9, 3.2, 6.9, 'skin', 'face', 12);
@@ -151,10 +149,10 @@ pair('cr1', 'Eyelid crease', 2.2, -6.35, 8.5, 'skin', 'face', 4);
 pair('cr2', 'Eyelid crease', 2.9, -6.5, 8.45, 'skin', 'face', 4);
 pair('cr3', 'Eyelid crease', 3.6, -6.48, 8.2, 'skin', 'face', 4);
 pair('cr4', 'Eyelid crease', 4.35, -6.2, 7.4, 'skin', 'face', 4);
-// tear trough / infraorbital line
+// the lower half of the eye socket's rim: tear trough (inner) → infraorbital rim (under the eye)
 pair('tt1', 'Tear trough', 1.95, -4.6, 8.1, 'skin', 'face', 5);
-pair('tt2', 'Under-eye line', 2.9, -4.4, 8.0, 'skin', 'face', 6);
-pair('tt3', 'Under-eye line', 3.9, -4.45, 7.3, 'skin', 'face', 6);
+pair('tt2', 'Infraorbital rim (under the eye)', 2.9, -4.4, 8.0, 'skin', 'face', 6);
+pair('tt3', 'Infraorbital rim', 3.9, -4.45, 7.3, 'skin', 'face', 6);
 // cheekbone ridge (malar body → zygomatic arch); below it, the cheekbone's underside (where its
 // shadow starts: from beside the nostril out and up toward the arch) and the cheek hollow (the
 // shadow line of a lean face: from under the cheekbone's high point, down to the end of the smile
@@ -178,13 +176,9 @@ pair('dl2', 'Dorsal line', 0.6, -2.9, 10.9, 'nose', 'face', 2.5);
 pair('tdp', 'Tip-defining point', 0.45, -1.85, 11.9, 'nose', 'face', 3);
 pair('nsw', 'Nose side wall', 1.35, -2.2, 10.0, 'nose', 'face', 4);
 
-// lower eyelid: more of the lid margin, and the lower lid crease (where the lid meets the cheek)
+// lower eyelid: more of the lid margin
 pair('el0', 'Lower lid · inner', 2.05, -5.27, 8.2, 'eyes', 'face');
 pair('el4', 'Lower lid · outer', 4.4, -5.3, 7.25, 'eyes', 'face');
-pair('lc1', 'Lower lid crease', 2.25, -4.9, 8.3, 'skin', 'face', 4);
-pair('lc2', 'Lower lid crease', 3.0, -4.78, 8.2, 'skin', 'face', 4);
-pair('lc3', 'Lower lid crease', 3.8, -4.85, 7.65, 'skin', 'face', 4);
-pair('lc4', 'Lower lid crease', 4.45, -5.0, 7.0, 'skin', 'face', 4.5);
 // orbit: the bony rim around the eye — supraorbital (above), lateral, infraorbital (below), medial
 pair('so1', 'Supraorbital rim · inner', 1.4, -7.75, 9.25, 'skin', 'face', 6);
 pair('so3', 'Supraorbital rim · outer', 4.35, -7.8, 7.7, 'skin', 'face', 6);
@@ -280,26 +274,24 @@ const FRONT_CONTOURS = [
   { id: 'neckR', snap: true, ids: ['ntR', 'nmR', 'nbR'] },
   ...['L', 'R'].flatMap(s => [
     { id: 'crease' + s, line: true, ids: ['cr1', 'cr2', 'cr3', 'cr4'].map(i => i + s) },
-    { id: 'trough' + s, line: true, ids: ['tt1', 'tt2', 'tt3'].map(i => i + s) },
-    { id: 'cheekbone' + s, line: true, ids: ['malar', 'zr1', 'zr2', 'zy'].map(i => i + s) },
-    { id: 'submalar' + s, line: true, ids: ['sm1', 'sm2', 'sm3'].map(i => i + s) },
+    { id: 'cheekbone' + s, line: true, bone: true, ids: ['malar', 'zr1', 'zr2', 'zy'].map(i => i + s) },
+    { id: 'submalar' + s, line: true, bone: true, ids: ['sm1', 'sm2', 'sm3'].map(i => i + s) },
     { id: 'hollow' + s, line: true, ids: ['sm2', 'hcm', 'nl3'].map(i => i + s) },
     { id: 'nasolabial' + s, line: true, ids: ['nl0', 'nl1', 'nl2', 'nl3'].map(i => i + s) },
     { id: 'dorsum' + s, line: true, ids: ['dl1', 'dl2', 'tdp'].map(i => i + s) },
     { id: 'noseEdge' + s, line: true, ids: ['ne1', 'nsd', 'ne2', 'nsw', 'ar1', 'al', 'ac'].map(i => i + s) },
-    { id: 'lowerCrease' + s, line: true, ids: ['lc1', 'lc2', 'lc3', 'lc4'].map(i => i + s) },
-    { id: 'orbit' + s, closed: true, line: true, ids: ['mor', 'so1', 'supra', 'so3', 'so4', 'lor', 'ior', 'tt3', 'tt2', 'tt1'].map(i => i + s) },
+    { id: 'orbit' + s, line: true, bone: true, ids: ['so4', 'lor', 'ior', 'tt3', 'tt2', 'tt1', 'mor'].map(i => i + s) },
     { id: 'philtrum' + s, line: true, ids: ['pc1', 'pc2', 'cph'].map(i => i + s) },
     { id: 'browShape' + s, closed: true, line: true, snapFine: true, ids: ['bi', 'bu1', 'bu2', 'bu3', 'bt', 'bl3', 'bl2', 'bl1'].map(i => i + s) },
-    { id: 'supratoral' + s, line: true, ids: ['sg', ...['ss1', 'ss2', 'ss3', 'tc1'].map(i => i + s)] },
-    { id: 'temporal' + s, line: true, ids: ['so4', 'tc1', 'tc2', 'tc3'].map(i => i + s) },
+    { id: 'supratoral' + s, line: true, bone: true, ids: ['sg', ...['ss1', 'ss2', 'ss3', 'tc1'].map(i => i + s)] },
+    { id: 'temporal' + s, line: true, bone: true, ids: ['so4', 'tc1', 'tc2', 'tc3'].map(i => i + s) },
     { id: 'radixSide' + s, line: true, ids: ['bi', 'ns', 'ne1'].map(i => i + s) },
     { id: 'iris' + s, line: true, ids: ['irI', 'pu', 'irO'].map(i => i + s) },
     { id: 'antihelix' + s, line: true, ids: ['crS', 'ah1', 'ah2', 'atr'].map(i => i + s) },
     { id: 'lowerCrus' + s, line: true, ids: ['crI', 'ah1'].map(i => i + s) },
     { id: 'concha' + s, line: true, ids: ['cru', 'cym', 'con', 'itn'].map(i => i + s) },
   ]),
-  { id: 'browRidge', line: true, ids: ['so1L', 'gl', 'so1R'] },
+  { id: 'browRidge', line: true, bone: true, ids: ['so4L', 'so3L', 'supraL', 'so1L', 'gl', 'so1R', 'supraR', 'so3R', 'so4R'] },
   { id: 'glabella', line: true, ids: ['sg', 'gl', 'rx', 'n'] },
   { id: 'chinCrease', line: true, ids: ['msL', 'bpt', 'msR'] },
   { id: 'lobule', line: true, ids: ['ar1L', 'tlL', 'tdpL', 'prn', 'tdpR', 'tlR', 'ar1R'] },
@@ -318,15 +310,14 @@ const PROFILE_CONTOURS = [
   { id: 'neckFront', ids: ['cerv', 'thy', 'neckF'] },
   { id: 'neckBack', snap: true, ids: ['nape', 'neckB'] },
   { id: 'crease', line: true, ids: ['cr1#', 'cr2#', 'cr3#', 'cr4#'] },
-  { id: 'trough', line: true, ids: ['tt1#', 'tt2#', 'tt3#'] },
-  { id: 'cheekbone', line: true, ids: ['malar#', 'zr1#', 'zr2#', 'za#'] },
-  { id: 'submalar', line: true, ids: ['sm1#', 'sm2#', 'sm3#'] },
+  { id: 'cheekbone', line: true, bone: true, ids: ['malar#', 'zr1#', 'zr2#', 'za#'] },
+  { id: 'submalar', line: true, bone: true, ids: ['sm1#', 'sm2#', 'sm3#'] },
   { id: 'hollow', line: true, ids: ['sm2#', 'hcm#', 'nl3#'] },
   { id: 'nasolabial', line: true, ids: ['nl0#', 'nl1#', 'nl2#', 'nl3#'] },
-  { id: 'lowerCrease', line: true, ids: ['lc1#', 'lc2#', 'lc3#', 'lc4#'] },
-  { id: 'orbit', line: true, ids: ['so1#', 'supra#', 'so3#', 'so4#', 'lor#', 'ior#', 'tt3#'] },
-  { id: 'supratoral', line: true, ids: ['ss1#', 'ss2#', 'ss3#', 'tc1#'] },
-  { id: 'temporal', line: true, ids: ['so4#', 'tc1#', 'tc2#', 'tc3#'] },
+  { id: 'browRidge', line: true, bone: true, ids: ['so1#', 'supra#', 'so3#', 'so4#'] },
+  { id: 'orbit', line: true, bone: true, ids: ['so4#', 'lor#', 'ior#', 'tt3#', 'tt2#'] },
+  { id: 'supratoral', line: true, bone: true, ids: ['ss1#', 'ss2#', 'ss3#', 'tc1#'] },
+  { id: 'temporal', line: true, bone: true, ids: ['so4#', 'tc1#', 'tc2#', 'tc3#'] },
   { id: 'browShape', closed: true, line: true, snapFine: true, ids: ['bi#', 'bu1#', 'bu2#', 'bu3#', 'bt#', 'bl3#', 'bl2#', 'bl1#'] },
   { id: 'noseEdge', line: true, ids: ['ne1#', 'nsd#', 'ne2#', 'nsw#', 'ar1#', 'al#'] },
   { id: 'antihelix', line: true, ids: ['crS#', 'ah1#', 'ah2#', 'atr#'] },
@@ -576,6 +567,7 @@ function mls(ctrl, n, x, y, eps, inverse) {
  * Returns { n, c (centres, in units of s), w (weights), a (affine), s } for tpsEval / the GPU.
  */
 function tpsFit(ctrl, n, s, lambda = 1e-6) {
+  // lambda: one smoothing for every control, or an array (per control: small = follow it closely)
   // one flat matrix (rows reached through perm, so pivoting swaps offsets, not data); each row
   // carries the two right-hand sides in its last two columns
   const m = n + 3, W = m + 2, A = new Float64Array(m * W), perm = new Int32Array(m);
@@ -588,7 +580,7 @@ function tpsFit(ctrl, n, s, lambda = 1e-6) {
       const u = r2 > 1e-14 ? .5 * r2 * Math.log(r2) : 0;
       A[oi + j] = u; A[j * W + i] = u;
     }
-    A[oi + i] = lambda; A[oi + n] = 1; A[oi + n + 1] = xi; A[oi + n + 2] = yi;
+    A[oi + i] = typeof lambda === 'number' ? lambda : lambda[i]; A[oi + n] = 1; A[oi + n + 1] = xi; A[oi + n + 2] = yi;
     A[n * W + i] = 1; A[(n + 1) * W + i] = xi; A[(n + 2) * W + i] = yi;
     A[oi + m] = (ctrl[4 * i + 2] - ctrl[4 * i]) / s; A[oi + m + 1] = (ctrl[4 * i + 3] - ctrl[4 * i + 1]) / s;
   }
@@ -661,6 +653,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '22',
+  mls, tpsFit, tpsEval, spline, build: '23',
 };
 })();
