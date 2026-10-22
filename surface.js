@@ -561,5 +561,5 @@ function createViewer(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '18' };
+window.CraniSurface = { buildSurface: build, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '19' };
 })();
