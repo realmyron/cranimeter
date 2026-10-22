@@ -410,7 +410,8 @@ function fitAnatomy(inp, P, T, wd) {
   const rho = new Float32Array(m), S = new Float32Array(m), dSx = new Float32Array(m), dSy = new Float32Array(m), r = new Float32Array(m);
   // held near the template unless the light clearly says otherwise (tested on a rendered face with
   // shine, occlusion, a cast shadow and stubble: freer settings traded one feature for another)
-  const sigV = .35, sigP = .15, F = Math.max(1, (1.4 / h) ** 2), vmax = 1.5;
+  // (Follow the photo widens or narrows how far the light may move the anatomy: × 4 either way)
+  const sigV = .35 * Math.pow(10, ((inp.trust == null ? .5 : inp.trust) - .5) * 1.2), sigP = .15, F = Math.max(1, (1.4 / h) ** 2), vmax = 1;
   const pins = (inp.pins || []).filter(p => act[p.k]);
   let L = P.L.slice(), c = new Array(NP).fill(0);
   c[0] = 1;
@@ -506,7 +507,7 @@ function bendThrough(z, inp, pins, R) {
 }
 
 async function build(inp, onProgress) {
-  const { gw, gh, h, act } = inp, trust = inp.trust == null ? .5 : inp.trust, detail = inp.detail == null ? .35 : inp.detail;
+  const { gw, gh, h, act } = inp, trust = inp.trust == null ? .5 : inp.trust, detail = inp.detail == null ? 0 : inp.detail;
   const prior = inp.prior, zPrior = inp.z0;
   let z0 = zPrior, fit = null;
   // 1 · the anatomy, fitted to the light and shade (and to depths set by hand)
@@ -541,13 +542,17 @@ async function build(inp, onProgress) {
   const F = { gw, gh, h, act, z0, rho: P.rho, T, wd, bk, L: P.L, pw, pwt, ao: P.ao };
   // stiff: the shape is the anatomy's; this only adds what it can't express (build 23's much softer
   // surface raised humps and folds on real photos — shine, stubble and dark creases read as shape)
-  const alpha = DETAIL_ALPHA * Math.pow(10, (.5 - trust) * 2.4), p0 = fit ? .3 : 0;
-  // coarse pass (≈ 5 mm grid)
-  const f = Math.max(2, Math.round(.5 / h)), C = coarsen(F, f);
-  const dzC = await solve(C, alpha, 5, 160, new Float32Array(C.gw * C.gh), k => onProgress && onProgress(p0 + k / 5 * (1 - p0) * (detail > 0 ? .7 : 1)));
-  let dz = blur(refine(dzC, C, F, f), gw, gh, Math.max(1, Math.round(f / 2)), act, 1);
-  // fine pass: only as much detail as allowed (a stiffer surface for less detail)
+  // Free detail is optional (Fine detail > 0): on real photos — shine, stubble, a side light, a camera's
+  // contrast curve — it read brightness as humps, even on the coarse grid. At 0 the surface is the
+  // anatomy fit plus the depths set by hand: smooth, and always a human face.
+  const alpha = DETAIL_ALPHA * Math.pow(10, (.5 - trust) * 2.4) / Math.max(.1, detail), p0 = fit ? .3 : 0;
+  let dz = new Float32Array(n);
   if (detail > 0) {
+    // coarse pass (≈ 5 mm grid)
+    const f = Math.max(2, Math.round(.5 / h)), C = coarsen(F, f);
+    const dzC = await solve(C, alpha, 5, 160, new Float32Array(C.gw * C.gh), k => onProgress && onProgress(p0 + k / 5 * (1 - p0) * .7));
+    dz = blur(refine(dzC, C, F, f), gw, gh, Math.max(1, Math.round(f / 2)), act, 1);
+    // fine pass: only as much detail as allowed (a stiffer surface for less detail)
     dz = await solve(F, alpha / Math.max(.05, detail * detail) * .5, 2, 100, dz, k => onProgress && onProgress(p0 + (1 - p0) * (.7 + k / 2 * .3)));
     dz = blur(dz, gw, gh, 1, act, 1);
   }
@@ -793,5 +798,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '25' };
+window.CraniSurface = { buildSurface: build, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '26' };
 })();
