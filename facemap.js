@@ -285,7 +285,7 @@ const FRONT_CONTOURS = [
     { id: 'lowerCrease' + s, line: true, ids: ['lc1', 'lc2', 'lc3', 'lc4'].map(i => i + s) },
     { id: 'orbit' + s, closed: true, line: true, ids: ['mor', 'so1', 'supra', 'so3', 'so4', 'lor', 'ior', 'tt3', 'tt2', 'tt1'].map(i => i + s) },
     { id: 'philtrum' + s, line: true, ids: ['pc1', 'pc2', 'cph'].map(i => i + s) },
-    { id: 'browShape' + s, closed: true, line: true, ids: ['bi', 'bu1', 'bu2', 'bu3', 'bt', 'bl3', 'bl2', 'bl1'].map(i => i + s) },
+    { id: 'browShape' + s, closed: true, line: true, snapFine: true, ids: ['bi', 'bu1', 'bu2', 'bu3', 'bt', 'bl3', 'bl2', 'bl1'].map(i => i + s) },
     { id: 'supratoral' + s, line: true, ids: ['sg', ...['ss1', 'ss2', 'ss3', 'tc1'].map(i => i + s)] },
     { id: 'temporal' + s, line: true, ids: ['so4', 'tc1', 'tc2', 'tc3'].map(i => i + s) },
     { id: 'radixSide' + s, line: true, ids: ['bi', 'ns', 'ne1'].map(i => i + s) },
@@ -321,7 +321,7 @@ const PROFILE_CONTOURS = [
   { id: 'orbit', line: true, ids: ['so1#', 'supra#', 'so3#', 'so4#', 'lor#', 'ior#', 'tt3#'] },
   { id: 'supratoral', line: true, ids: ['ss1#', 'ss2#', 'ss3#', 'tc1#'] },
   { id: 'temporal', line: true, ids: ['so4#', 'tc1#', 'tc2#', 'tc3#'] },
-  { id: 'browShape', closed: true, line: true, ids: ['bi#', 'bu1#', 'bu2#', 'bu3#', 'bt#', 'bl3#', 'bl2#', 'bl1#'] },
+  { id: 'browShape', closed: true, line: true, snapFine: true, ids: ['bi#', 'bu1#', 'bu2#', 'bu3#', 'bt#', 'bl3#', 'bl2#', 'bl1#'] },
   { id: 'noseEdge', line: true, ids: ['ne1#', 'nsd#', 'ne2#', 'nsw#', 'ar1#', 'al#'] },
   { id: 'antihelix', line: true, ids: ['crS#', 'ah1#', 'ah2#', 'atr#'] },
   { id: 'lowerCrus', line: true, ids: ['crI#', 'ah1#'] },
@@ -655,6 +655,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '19',
+  mls, tpsFit, tpsEval, spline, build: '20',
 };
 })();
