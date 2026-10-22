@@ -5,7 +5,7 @@
    ========================================================================== */
 
 :root {
-  --cm-build: 23;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+  --cm-build: 24;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
   --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --c1: #7CCBF5;
