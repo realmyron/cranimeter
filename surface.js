@@ -15,7 +15,7 @@
    Plus the views: Haralick's topographic labels (peak, pit, ridge, ravine, saddle, hills — "the
    topographic primal sketch", 1983) of the surface or of the photo, contour lines, relief, and
    photo-analysis views (luminance gradient, level sweep, colour principal components).
-   And a small WebGL viewer to turn the surface around in 3D.
+   And the 3D stage: the photo itself as a relief you can turn around.
 
    Units: grid nodes; depth in cm toward the camera; h = cm per grid step. y points down.
    Normal of a depth map z(x, y): (−zx, −zy, 1) / √(1 + zx² + zy²).
@@ -188,7 +188,8 @@ function prepare(inp) {
     rho[k] = Is[k] / Math.max(.05, s0);
     wr[k] = skin[k] * (s0 > .15 ? 1 : 0) * (hint ? 1 - Math.min(1, Math.abs(hint[k])) : 1);
   }
-  const rhoLP = blur(rho, gw, gh, Math.max(2, Math.round(.9 / h)), wr, 2);
+  // smooth over ~2 cm: broader than that is skin colour; anything smaller is left to be shape
+  const rhoLP = blur(rho, gw, gh, Math.max(2, Math.round(2 / h)), wr, 2);
   for (let k = 0; k < n; k++) rhoLP[k] = Math.min(2.5, Math.max(.4, rhoLP[k] || 1));
   const dir = [L[1], L[2], L[3]], ll = Math.hypot(...dir) || 1;
   return { n, skin, cw, Is, g0, L, rho: rhoLP, dir: dir.map(v => v / ll), strength: ll / Math.max(.05, Math.abs(L[0]) + ll) };
@@ -227,6 +228,8 @@ function analyze(inp) {
    gradients, with robust re-weighting after the first pass. */
 async function solve(G, alpha, outerN, iters, dz, onPass) {
   const { gw, gh, h, act, z0, rho, T, bk, L } = G, n = gw * gh, wd0 = G.wd, wd = Float32Array.from(wd0);
+  // pins: depths the user set by dragging dots in 3D (weight, and weight × the depth change wanted)
+  const pw = G.pw || new Float32Array(n), pwt = G.pwt || new Float32Array(n);
   const inner = k => { const i = k % gw, j = (k / gw) | 0; return i > 0 && j > 0 && i < gw - 1 && j < gh - 1 && act[k] && act[k - 1] && act[k + 1] && act[k - gw] && act[k + gw]; };
   const Ul = [], Dl = [], Rl = [];
   for (let k = 0; k < n; k++) {
@@ -245,7 +248,7 @@ async function solve(G, alpha, outerN, iters, dz, onPass) {
     for (let q = 0; q < U.length; q++) {
       const i = U[q];
       out[i] = (a1 * (u[i + 1] - u[i - 1]) + a2 * (u[i + gw] - u[i - gw])) * inv2h
-        + alpha * (Lv[i + 1] + Lv[i - 1] + Lv[i + gw] + Lv[i - gw] - 4 * Lv[i]) * invh2 + bk[i] * v[i];
+        + alpha * (Lv[i + 1] + Lv[i - 1] + Lv[i + gw] + Lv[i - gw] - 4 * Lv[i]) * invh2 + (bk[i] + pw[i]) * v[i];
     }
   };
   const b = new Float32Array(n), rhs = new Float32Array(n), Minv = new Float32Array(n);
@@ -270,10 +273,10 @@ async function solve(G, alpha, outerN, iters, dz, onPass) {
     u.fill(0);
     for (let q = 0; q < D.length; q++) { const k = D[q]; u[k] = c[k] * wd[k] * b[k]; }
     rhs.fill(0);
-    for (let q = 0; q < U.length; q++) { const i = U[q]; rhs[i] = (a1 * (u[i + 1] - u[i - 1]) + a2 * (u[i + gw] - u[i - gw])) * inv2h; }
+    for (let q = 0; q < U.length; q++) { const i = U[q]; rhs[i] = (a1 * (u[i + 1] - u[i - 1]) + a2 * (u[i + gw] - u[i - gw])) * inv2h + pwt[i]; }
     for (let q = 0; q < U.length; q++) {
       const i = U[q];
-      let d = bk[i] + alpha * 20 * invh2 * invh2;
+      let d = bk[i] + pw[i] + alpha * 20 * invh2 * invh2;
       for (const k of [i - 1, i + 1]) d += wd[k] * (c[k] * a1 * inv2h) ** 2;
       for (const k of [i - gw, i + gw]) d += wd[k] * (c[k] * a2 * inv2h) ** 2;
       Minv[i] = 1 / d;
@@ -307,6 +310,13 @@ async function solve(G, alpha, outerN, iters, dz, onPass) {
 /** A grid at 1/f resolution (block averages; a node is face if most of its block is). */
 function coarsen(F, f) {
   const { gw, gh } = F, cw = Math.ceil(gw / f), ch = Math.ceil(gh / f), n2 = cw * ch, out = { gw: cw, gh: ch, h: F.h * f, L: F.L };
+  // pins add up in a block (a pin keeps its full pull); everything else is averaged
+  for (const key of ['pw', 'pwt']) {
+    if (!F[key]) continue;
+    const o = new Float32Array(n2);
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) o[((j / f) | 0) * cw + ((i / f) | 0)] += F[key][j * gw + i];
+    out[key] = o;
+  }
   for (const key of ['z0', 'rho', 'T', 'wd', 'bk', 'act']) {
     const a = F[key], o = new Float32Array(n2), cnt = new Float32Array(n2), on = new Float32Array(n2);
     for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
@@ -345,7 +355,7 @@ function refine(dzC, C, F, f) {
  * full grid only as far as `detail` allows.
  */
 async function build(inp, onProgress) {
-  const { gw, gh, h, act, z0 } = inp, trust = inp.trust == null ? .5 : inp.trust, detail = inp.detail == null ? .15 : inp.detail;
+  const { gw, gh, h, act, z0 } = inp, trust = inp.trust == null ? .5 : inp.trust, detail = inp.detail == null ? .35 : inp.detail;
   const P = prepare(inp), n = P.n, hint = inp.hint, prior = inp.prior;
   // the brightness to match: the photo's, pushed up / down where highlights / shadows are marked
   const T = new Float32Array(n), wd = new Float32Array(n);
@@ -358,10 +368,27 @@ async function build(inp, onProgress) {
     wd[k] = P.skin[k] * (P.Is[k] > .97 * Imax && !hk ? 0 : 1) * (s0 < .12 ? .25 : 1) * (1 + 1.5 * hk);
     if (hk && !wd[k]) wd[k] = hk;
   }
-  const beta = .02, bk = new Float32Array(n);
+  // build 23: a much softer pull and smoothness than before — the shading was being smoothed away
+  // and the surface stayed at the dots' shape ("too smooth"); tested against a known face
+  const beta = .005, bk = new Float32Array(n);
   for (let k = 0; k < n; k++) bk[k] = beta * (1 + 30 * (prior ? prior[k] : 0));
-  const F = { gw, gh, h, act, z0, rho: P.rho, T, wd, bk, L: P.L };
-  const alpha = .08 * Math.pow(10, (.5 - trust) * 2.4);
+  // pins: { k (node), z (cm) } — spread over a small neighbourhood so one dot shapes its area
+  let pw = null, pwt = null;
+  if (inp.pins && inp.pins.length) {
+    pw = new Float32Array(n); pwt = new Float32Array(n);
+    const rr = Math.max(1, Math.round(.3 / h));
+    for (const { k, z } of inp.pins) {
+      const pi = k % gw, pj = (k / gw) | 0;
+      for (let dj = -rr; dj <= rr; dj++) for (let di = -rr; di <= rr; di++) {
+        const i = pi + di, j = pj + dj, q = j * gw + i;
+        if (i < 0 || j < 0 || i >= gw || j >= gh || !act[q]) continue;
+        const w = 40 * Math.exp(-(di * di + dj * dj) / (2 * (rr * .6) ** 2));
+        pw[q] += w; pwt[q] += w * (z - z0[q]);
+      }
+    }
+  }
+  const F = { gw, gh, h, act, z0, rho: P.rho, T, wd, bk, L: P.L, pw, pwt };
+  const alpha = .006 * Math.pow(10, (.5 - trust) * 2.4);
   // coarse pass (≈ 5 mm grid)
   const f = Math.max(2, Math.round(.5 / h)), C = coarsen(F, f);
   const dzC = await solve(C, alpha, 5, 160, new Float32Array(C.gw * C.gh), k => onProgress && onProgress(k / 5 * (detail > 0 ? .7 : 1)));
@@ -372,7 +399,7 @@ async function build(inp, onProgress) {
     dz = blur(dz, gw, gh, 1, act, 1);
   }
   const z = new Float32Array(n);
-  for (let k = 0; k < n; k++) z[k] = z0[k] + (act[k] ? Math.max(-1, Math.min(1, dz[k])) : 0);
+  for (let k = 0; k < n; k++) z[k] = z0[k] + (act[k] ? Math.max(-2, Math.min(2, dz[k])) : 0);
   const g1 = gradient(z, gw, gh, h, act), S0 = new Float32Array(n), S1 = new Float32Array(n);
   for (let k = 0; k < n; k++) if (act[k]) { S0[k] = P.rho[k] * shade(P.L, P.g0.gx[k], P.g0.gy[k]); S1[k] = P.rho[k] * shade(P.L, g1.gx[k], g1.gy[k]); }
   return {
@@ -507,145 +534,110 @@ function pca(src, w, h, comp) {
   return out;
 }
 
-/* ------------------------------------------------------------ 3D viewer -- */
-
-const VS3 = `#version 300 es
-in vec3 aPos; in vec3 aNrm; in vec2 aUv;
-uniform mat4 uMvp; uniform mat3 uRot;
-out vec3 vN; out vec2 vUv;
-void main() { vN = uRot * aNrm; vUv = aUv; gl_Position = uMvp * vec4(aPos, 1.0); }`;
-const FS3 = `#version 300 es
+/* ------------------------------------------------------- the 3D stage --
+   The photo itself as a 3D relief (Face map → Surface): one mesh over the face's box (the surface,
+   falling off smoothly to the photo plane around it) plus the rest of the photo as a flat plane
+   behind. Model space is the photo's own pixels (x right, y down) with depth z in pixels toward the
+   camera, so with no rotation it projects exactly onto the 2D photo. The caller supplies the matrix
+   (rotation about the face + the photo → screen transform). */
+const VSS = `#version 300 es
+in vec3 aPos; in vec3 aNrm; in vec2 aUv; in vec2 aOv;
+uniform mat4 uM; uniform mat3 uR;
+out vec3 vN; out vec2 vUv; out vec2 vOv;
+void main() { vN = uR * aNrm; vUv = aUv; vOv = aOv; gl_Position = uM * vec4(aPos, 1.0); }`;
+const FSS = `#version 300 es
 precision highp float;
-in vec3 vN; in vec2 vUv;
-uniform sampler2D uTex; uniform int uMode; uniform vec3 uLight; uniform vec4 uColor;
+in vec3 vN; in vec2 vUv; in vec2 vOv;
+uniform sampler2D uTex; uniform sampler2D uOv;
+uniform int uMode; uniform float uOvA; uniform vec3 uLight; uniform vec4 uColor;
 out vec4 o;
 void main() {
+  if (uMode == 3) { o = uColor; return; }
   vec3 n = normalize(vN);
-  if (!gl_FrontFacing) n = -n;
+  if (n.z < 0.0) n = -n;
   float l = max(dot(n, normalize(uLight)), 0.0);
-  if (uMode == 0) o = vec4(texture(uTex, vUv).rgb, 1.0);
-  else if (uMode == 1) { vec3 base = vec3(0.82, 0.76, 0.72); float rim = pow(1.0 - max(n.z, 0.0), 3.0) * 0.18; o = vec4(base * (0.24 + 0.86 * l) + rim, 1.0); }
-  else o = uColor;
+  vec3 c = uMode == 0 ? texture(uTex, vUv).rgb : vec3(0.82, 0.76, 0.72) * (0.24 + 0.86 * l);
+  if (uOvA > 0.0 && vOv.x >= 0.0) { vec4 ov = texture(uOv, vOv); c = mix(c, ov.rgb, ov.a * uOvA); }
+  o = vec4(c, 1.0);
 }`;
-const mat = {
-  mul(a, b) { const o = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; o[i * 4 + j] = s; } return o; },
-  persp(fov, asp, nr, fr) { const f = 1 / Math.tan(fov / 2), o = new Float32Array(16); o[0] = f / asp; o[5] = f; o[10] = (fr + nr) / (nr - fr); o[11] = -1; o[14] = 2 * fr * nr / (nr - fr); return o; },
-  rot(yaw, pitch) {
-    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-    // R = Rx(pitch) · Ry(yaw), column-major
-    return new Float32Array([cy, sp * sy, -cp * sy, 0, 0, cp, sp, 0, sy, -sp * cy, cp * cy, 0, 0, 0, 0, 1]);
-  },
-};
-/** A small orbit viewer for the surface: drag to turn it, wheel to zoom, double-click to reset. */
-function createViewer(canvas) {
-  const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, preserveDrawingBuffer: true });
+function createStage(canvas) {
+  const gl = canvas.getContext('webgl2', { antialias: true, alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: true });
   if (!gl) return null;
   const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) console.warn(gl.getShaderInfoLog(o)); return o; };
   const pr = gl.createProgram();
-  gl.attachShader(pr, sh(gl.VERTEX_SHADER, VS3)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FS3)); gl.linkProgram(pr);
+  gl.attachShader(pr, sh(gl.VERTEX_SHADER, VSS)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FSS)); gl.linkProgram(pr);
   const U = {};
-  ['uMvp', 'uRot', 'uTex', 'uMode', 'uLight', 'uColor'].forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
-  const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ibo = gl.createBuffer(), lbo = gl.createBuffer(), tex = gl.createTexture();
-  let nTri = 0, nLine = 0, radius = 10, light = [0, .4, 1];
-  const st = { yaw: 0, pitch: 0, zoom: 1, mode: 'photo' };
-  function setSurface(s, texSrc) {
-    const { gw, gh, h, act, z } = s, idx = new Int32Array(gw * gh).fill(-1), vert = [];
-    let cx = 0, cy = 0, cz = 0, cnt = 0;
-    for (let k = 0; k < gw * gh; k++) if (act[k]) { cx += k % gw; cy += (k / gw) | 0; cz += z[k]; cnt++; }
-    cx /= cnt || 1; cy /= cnt || 1; cz /= cnt || 1;
-    const g = gradient(z, gw, gh, h, act);
-    let r = 0;
-    for (let k = 0; k < gw * gh; k++) {
-      if (!act[k]) continue;
-      const i = k % gw, j = (k / gw) | 0, X = (i - cx) * h, Y = -(j - cy) * h, Z = z[k] - cz;
-      const N = Math.sqrt(1 + g.gx[k] ** 2 + g.gy[k] ** 2);
-      idx[k] = vert.length / 8;
-      vert.push(X, Y, Z, -g.gx[k] / N, g.gy[k] / N, 1 / N, (i + .5) / gw, (j + .5) / gh);
-      r = Math.max(r, Math.hypot(X, Y));
-    }
-    radius = r || 10;
-    const tri = [], lines = [], every = Math.max(2, Math.round(.45 / h));
-    for (let j = 0; j < gh - 1; j++) for (let i = 0; i < gw - 1; i++) {
-      const a = idx[j * gw + i], b = idx[j * gw + i + 1], c = idx[(j + 1) * gw + i], d = idx[(j + 1) * gw + i + 1];
-      // whole quads, and half quads along the edge (a smoother outline)
-      if (a >= 0 && b >= 0 && c >= 0) tri.push(a, c, b);
-      if (b >= 0 && c >= 0 && d >= 0) tri.push(b, c, d);
-      else if (a >= 0 && b >= 0 && d >= 0 && c < 0) tri.push(a, d, b);
-      if (a >= 0 && c >= 0 && d >= 0 && b < 0) tri.push(a, c, d);
-      if (j % every === 0 && a >= 0 && b >= 0) lines.push(a, b);
-      if (i % every === 0 && a >= 0 && c >= 0) lines.push(a, c);
-    }
-    gl.bindVertexArray(vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vert), gl.STATIC_DRAW);
-    const loc = n => gl.getAttribLocation(pr, n);
-    gl.enableVertexAttribArray(loc('aPos')); gl.vertexAttribPointer(loc('aPos'), 3, gl.FLOAT, false, 32, 0);
-    gl.enableVertexAttribArray(loc('aNrm')); gl.vertexAttribPointer(loc('aNrm'), 3, gl.FLOAT, false, 32, 12);
-    gl.enableVertexAttribArray(loc('aUv')); gl.vertexAttribPointer(loc('aUv'), 2, gl.FLOAT, false, 32, 24);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(tri), gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(lines), gl.STATIC_DRAW);
-    gl.bindVertexArray(null);
-    nTri = tri.length; nLine = lines.length;
-    if (texSrc) {
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texSrc);
-      gl.generateMipmap(gl.TEXTURE_2D);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    }
-    if (s.dir) light = [s.dir[0], -s.dir[1], s.dir[2]];
-    render();
-  }
-  function render() {
-    const dpr = Math.min(2, devicePixelRatio || 1), W = Math.max(1, Math.round(canvas.clientWidth * dpr)), H = Math.max(1, Math.round(canvas.clientHeight * dpr));
-    if (canvas.width !== W) canvas.width = W;
-    if (canvas.height !== H) canvas.height = H;
-    gl.viewport(0, 0, W, H);
-    gl.clearColor(.07, .08, .1, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    if (!nTri) return;
-    const R = mat.rot(st.yaw, st.pitch), dist = radius / Math.tan(.28) * 1.08 / st.zoom;
-    const view = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -dist, 1]);
-    const mvp = mat.mul(mat.persp(.56, W / H, dist * .2, dist * 3), mat.mul(view, R));
-    const r3 = new Float32Array([R[0], R[1], R[2], R[4], R[5], R[6], R[8], R[9], R[10]]);
-    gl.useProgram(pr); gl.bindVertexArray(vao);
-    gl.enable(gl.DEPTH_TEST);
-    gl.uniformMatrix4fv(U.uMvp, false, mvp); gl.uniformMatrix3fv(U.uRot, false, r3);
-    // the light turns with the face (it's the photo's light on this face)
-    const lr = [r3[0] * light[0] + r3[3] * light[1] + r3[6] * light[2], r3[1] * light[0] + r3[4] * light[1] + r3[7] * light[2], r3[2] * light[0] + r3[5] * light[1] + r3[8] * light[2]];
-    gl.uniform3fv(U.uLight, lr);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(U.uTex, 0);
-    gl.uniform1i(U.uMode, st.mode === 'photo' ? 0 : 1);
-    gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-    gl.drawElements(gl.TRIANGLES, nTri, gl.UNSIGNED_INT, 0);
-    gl.disable(gl.POLYGON_OFFSET_FILL);
-    if (st.mode === 'wire' && nLine) {
-      gl.uniform1i(U.uMode, 2); gl.uniform4f(U.uColor, .35, .55, 1, 1);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo);
-      gl.drawElements(gl.LINES, nLine, gl.UNSIGNED_INT, 0);
-    }
-    gl.bindVertexArray(null);
-  }
-  // orbit
-  let drag = null;
-  canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw: st.yaw, pitch: st.pitch }; try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not a real pointer */ } });
-  canvas.addEventListener('pointermove', e => {
-    if (!drag) return;
-    st.yaw = drag.yaw + (e.clientX - drag.x) * .01;
-    st.pitch = Math.max(-1.3, Math.min(1.3, drag.pitch + (e.clientY - drag.y) * .01));
-    render();
-  });
-  const end = () => { drag = null; };
-  canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
-  canvas.addEventListener('wheel', e => { e.preventDefault(); st.zoom = Math.max(.5, Math.min(4, st.zoom * Math.exp(-e.deltaY * .0015))); render(); }, { passive: false });
-  canvas.addEventListener('dblclick', () => { st.yaw = 0; st.pitch = 0; st.zoom = 1; render(); });
+  ['uM', 'uR', 'uTex', 'uOv', 'uMode', 'uOvA', 'uLight', 'uColor'].forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
+  const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ibo = gl.createBuffer(), lbo = gl.createBuffer();
+  const tex = gl.createTexture(), ovTex = gl.createTexture();
+  const texInit = (t, src) => {
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  };
+  texInit(ovTex, new ImageData(1, 1));
+  let nTri = 0, nLine = 0, hasOv = false;
+  const loc = n => gl.getAttribLocation(pr, n);
   return {
-    setSurface, render,
-    setMode(m) { st.mode = m; render(); },
-    setView(yaw, pitch) { st.yaw = yaw; st.pitch = pitch; render(); },
-    get state() { return { ...st }; },
+    maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+    /** The photo (an image or canvas; its pixels map onto the photo's full width and height). */
+    setPhoto(src) { texInit(tex, src); },
+    /**
+     * The mesh: { pos (x, y, z per vertex, photo px), nrm (3 per vertex), uv (photo 0…1),
+     * ov (overlay 0…1, or −1 for none), tri (Uint32Array), lines (Uint32Array, for Wire) }.
+     */
+    setMesh(M) {
+      const nv = M.pos.length / 3, data = new Float32Array(nv * 10);
+      for (let v = 0; v < nv; v++) {
+        data.set([M.pos[3 * v], M.pos[3 * v + 1], M.pos[3 * v + 2], M.nrm[3 * v], M.nrm[3 * v + 1], M.nrm[3 * v + 2], M.uv[2 * v], M.uv[2 * v + 1], M.ov[2 * v], M.ov[2 * v + 1]], 10 * v);
+      }
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(loc('aPos')); gl.vertexAttribPointer(loc('aPos'), 3, gl.FLOAT, false, 40, 0);
+      gl.enableVertexAttribArray(loc('aNrm')); gl.vertexAttribPointer(loc('aNrm'), 3, gl.FLOAT, false, 40, 12);
+      gl.enableVertexAttribArray(loc('aUv')); gl.vertexAttribPointer(loc('aUv'), 2, gl.FLOAT, false, 40, 24);
+      gl.enableVertexAttribArray(loc('aOv')); gl.vertexAttribPointer(loc('aOv'), 2, gl.FLOAT, false, 40, 32);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, M.tri, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, M.lines, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      nTri = M.tri.length; nLine = M.lines.length;
+    },
+    /** A view drawn over the face (contours, relief…), covering the surface grid; null for none. */
+    setOverlay(src) { hasOv = !!src; if (src) texInit(ovTex, src); },
+    /** p: { m (column-major 4×4), r (3×3 rotation), light [x, y, z], mode ('photo' | 'clay' | 'wire'), ovA, w, h (device px) } */
+    render(p) {
+      if (canvas.width !== p.w) canvas.width = p.w;
+      if (canvas.height !== p.h) canvas.height = p.h;
+      gl.viewport(0, 0, p.w, p.h);
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (!nTri) return;
+      gl.useProgram(pr); gl.bindVertexArray(vao);
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+      gl.uniformMatrix4fv(U.uM, false, p.m); gl.uniformMatrix3fv(U.uR, false, p.r);
+      const L = p.light || [0, -.3, .95], r = p.r;
+      gl.uniform3fv(U.uLight, [r[0] * L[0] + r[3] * L[1] + r[6] * L[2], r[1] * L[0] + r[4] * L[1] + r[7] * L[2], r[2] * L[0] + r[5] * L[1] + r[8] * L[2]]);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(U.uTex, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, ovTex); gl.uniform1i(U.uOv, 1);
+      gl.uniform1f(U.uOvA, hasOv ? p.ovA : 0);
+      gl.uniform1i(U.uMode, p.mode === 'photo' ? 0 : 1);
+      gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+      gl.drawElements(gl.TRIANGLES, nTri, gl.UNSIGNED_INT, 0);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+      if (p.mode === 'wire' && nLine) {
+        gl.uniform1i(U.uMode, 3); gl.uniform4f(U.uColor, .35, .55, 1, 1);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo);
+        gl.drawElements(gl.LINES, nLine, gl.UNSIGNED_INT, 0);
+      }
+      gl.bindVertexArray(null);
+    },
+    clear() { gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); },
   };
 }
 
-window.CraniSurface = { buildSurface: build, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '22' };
+window.CraniSurface = { buildSurface: build, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '23' };
 })();
