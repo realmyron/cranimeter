@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '25';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '26';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -146,7 +146,7 @@ const DEFAULTS = {
   loupe: false, names: true, gridFx: true,
   mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
   mShowLayers: true, mShade: .6, mOpen: 'bone',
-  surfView: 'contours', surfAlpha: .8, surfTrust: .5, surfBrush: '', surfSweep: .5, surfPca: 0, surfUse: true, surfV: 3, surfDetail: .35, surfMode: 'photo', lightView: 'shading',
+  surfView: 'contours', surfAlpha: .8, surfTrust: .5, surfBrush: '', surfSweep: .5, surfPca: 0, surfUse: true, surfV: 4, surfDetail: 0, surfMode: 'photo', lightView: 'shading',
   mapSoft: false, mapSoftR: .3, mapMirror: false, mapAutoDetail: true,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
@@ -154,10 +154,12 @@ const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A
 const SKEY = 'cranimeter:settings';
 let cfg = (() => {
   try {
-    const c = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(SKEY) || '{}') };
+    const st = JSON.parse(localStorage.getItem(SKEY) || '{}'), c = { ...DEFAULTS, ...st };
     for (const k of ['mSmooth', 'mLevels', 'mLevelStrict', 'mShowLevels', 'mProtect', 'mLevel', 'mSub']) delete c[k];
     if (/^s[A-Z]/.test(c.mMode)) c.mMode = 'push';   // the 3D sculpt brushes of build 13 are gone
-    if ((c.surfV || 0) < 3) { c.surfTrust = .5; c.surfDetail = .35; c.surfV = 3; }   // build 23: more detail on by default
+    // build 26: free detail off by default — on real photos it read shine, stubble and side light as humps
+    // (the stored version decides: saved settings without one are older)
+    if ((st.surfV || 0) < 4) { c.surfTrust = .5; c.surfDetail = 0; c.surfV = 4; }
     return c;
   } catch (e) { return { ...DEFAULTS }; }
 })();
@@ -855,7 +857,8 @@ function boxBlur(a, gw, gh, r, act) {
    view). The face's starting depth reads it through a smooth photo → template map: a dot placed
    a little off then only shifts the depth sideways, instead of raising a bump (as interpolating
    each dot's own depth value would). */
-const COLOUR_ONLY = pt => (pt.group === 'brows' && pt.id !== 'gl') || pt.group === 'hair' || /^ir[IO]/.test(pt.id);
+// (the iris edges are shape: they're on the cornea, which bulges in front of the lids)
+const COLOUR_ONLY = pt => (pt.group === 'brows' && pt.id !== 'gl') || pt.group === 'hair';
 const tdCache = {}, SHARP_GROUPS = new Set(['nose', 'lips']), SHARP_IDS = new Set(['supra', 'so1', 'so3', 'so4', 'malar', 'zr1', 'chin', 'mental', 'cpl', 'ms']);
 function templateDepth(yaw) {
   if (tdCache[yaw]) return tdCache[yaw];
@@ -1603,7 +1606,7 @@ function drawLightStep(ctx) {
   const P_ = mapScreenPts();
   ctx.save(); ctx.globalAlpha = .4;
   FM.POINTS.forEach((pt, i) => {
-    if (!dotShown(i) || pt.detail) return;
+    if (!dotShown(i) || pt.detail || P_[i].hid) return;
     ctx.beginPath(); ctx.arc(P_[i].x, P_[i].y, 1.6, 0, TAU); ctx.fillStyle = MAP_COLORS[pt.group]; ctx.fill();
   });
   ctx.restore();
@@ -2874,12 +2877,36 @@ const qfitId = st => st.id.replace('#', FM.nearSide(S.map ? S.map.yaw : 0));
 const dotShown = i => S.map.vis[i] && !S.hideGroups.has(FM.POINTS[i].group);
 /** Screen positions of every scan dot (on the photo as it was). */
 const mapScreenPts = () => {
-  if (stageOn()) {   // on the 3D relief
-    const F = stageFrame(), k = S.surf.pxcm;
-    return FM.POINTS.map((_, i) => proj3(F, S.map.p[2 * i], S.map.p[2 * i + 1], dotDepth(i) * k));
+  if (stageOn()) {   // on the 3D relief; turned, dots behind it are marked hidden
+    const F = stageFrame(), k = S.surf.pxcm, P = FM.POINTS.map((_, i) => proj3(F, S.map.p[2 * i], S.map.p[2 * i + 1], dotDepth(i) * k));
+    if (rotated()) {
+      const zb = stageZBuffer(F), tol = .35 * k;
+      P.forEach(p => {
+        const i = Math.floor(p.x / zb.cs), j = Math.floor(p.y / zb.cs);
+        if (i < 0 || j < 0 || i >= zb.w || j >= zb.h) return;
+        // the nearest surface in a small neighbourhood (the buffer has gaps on steep sides)
+        let z = -Infinity;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) { const ii = i + di, jj = j + dj; if (ii >= 0 && jj >= 0 && ii < zb.w && jj < zb.h) z = Math.max(z, zb.z[jj * zb.w + ii]); }
+        if (p.z < z - tol) p.hid = true;
+      });
+    }
+    return P;
   }
   return FM.POINTS.map((_, i) => mapToScreen(mapPt(i)));
 };
+/** The relief's nearest depth per 4-px screen cell for the current turn (to hide the dots behind it). */
+let zbCache = { key: '' };
+function stageZBuffer(F) {
+  const G = stageDepth(), key = [G.key, ...F.L, ...F.t, S.rot3.yaw, S.rot3.pitch, W, H].join('|');
+  if (zbCache.key === key) return zbCache;
+  const cs = 4, w = Math.ceil(W / cs), h = Math.ceil(H / cs), z = new Float32Array(w * h).fill(-Infinity), k = S.surf.pxcm;
+  for (let j = 0; j < G.gh; j++) for (let i = 0; i < G.gw; i++) {
+    const p = proj3(F, G.x0 + i * G.cell, G.y0 + j * G.cell, G.z[j * G.gw + i] * k), ci = Math.floor(p.x / cs), cj = Math.floor(p.y / cs);
+    if (ci >= 0 && cj >= 0 && ci < w && cj < h && p.z > z[cj * w + ci]) z[cj * w + ci] = p.z;
+  }
+  zbCache = { key, cs, w, h, z };
+  return zbCache;
+}
 function drawMap(ctx) {
   const P_ = mapScreenPts(), m = S.map, busy = !!S.mapDrag;
   ctx.save();
@@ -2890,15 +2917,24 @@ function drawMap(ctx) {
     const g = FM.POINTS[c.idx[0]].group;
     ctx.setLineDash(c.bone ? [4, 4] : []);   // bone lines (rims, ridges) dashed, soft features solid
     if (S.hideGroups.has(c.boundary ? 'outline' : g) || c.idx.some(i => !m.vis[i])) continue;
-    const pts = FM.spline(c.idx.map(i => P_[i]), c.closed, 8);
-    ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); if (c.closed) ctx.closePath();
+    const pts = FM.spline(c.idx.map(i => P_[i]), c.closed, 8), n = c.idx.length, segs = c.closed ? n : n - 1;
+    ctx.beginPath();
+    if (c.idx.some(i => P_[i].hid)) {
+      // turned: the line breaks where it passes behind the head
+      let pen = false;
+      pts.forEach((p, q) => {
+        const s = Math.min(segs - 1, Math.floor(q * segs / pts.length)), a = c.idx[s], b = c.idx[(s + 1) % n];
+        if (P_[a].hid || P_[b].hid) { pen = false; return; }
+        if (pen) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); pen = true; }
+      });
+    } else { pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); if (c.closed) ctx.closePath(); }
     ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 3; ctx.stroke();
     ctx.strokeStyle = rgba(MAP_COLORS[c.boundary ? 'outline' : g], busy ? .4 : .8); ctx.lineWidth = 1.2; ctx.stroke();
   }
   ctx.setLineDash([]);
   // dots
   FM.POINTS.forEach((pt, i) => {
-    if (!dotShown(i)) return;
+    if (!dotShown(i) || P_[i].hid) return;
     const p = P_[i], sel = S.mapSel.has(i), hov = S.mapHover === i, col = MAP_COLORS[pt.group];
     // detail dots (between the named ones) are drawn smaller
     const auto = autoDot(i), r = sel || hov ? 4.6 : auto ? 1.6 : pt.detail ? 2.1 : 3.2;
@@ -3597,7 +3633,7 @@ function mapHitAt(sx, sy) {
   if (!S.map || !mapping() || S.qfit || lightStep() || (surfStep() && (fixBrush() || !S.surf))) return null;
   const P_ = mapScreenPts();
   let best = null, bd = 9;
-  P_.forEach((p, i) => { if (!dotShown(i) || autoDot(i)) return; const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
+  P_.forEach((p, i) => { if (!dotShown(i) || autoDot(i) || p.hid) return; const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
   return best;
 }
 /** A new scan changes nothing on the photo, so it isn't an undo step. */
@@ -3833,7 +3869,7 @@ function morphMove(sx, sy, e) {
     if (b.moved) {
       const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
       S.mapSel = new Set(b.base);
-      mapScreenPts().forEach((p, i) => { if (dotShown(i) && !autoDot(i) && p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) S.mapSel.add(i); });
+      mapScreenPts().forEach((p, i) => { if (dotShown(i) && !autoDot(i) && !p.hid && p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) S.mapSel.add(i); });
     }
   }
   wake();
@@ -3865,6 +3901,69 @@ function startQuickFit() {
   S.qfit = { step: 0, hist: [], snap: snapshot() };
   S.mapSel.clear();
   syncUI(); refreshCursor(); wake();
+}
+
+/* ---- Auto-place: Google's MediaPipe Face Landmarker (open source, Apache-2.0) finds 478 points on the
+   face, in the browser — the photo never leaves the device. The library and model (≈ 6 MB) are fetched
+   the first time it's used and then cached by the browser.
+   MP_TEMPLATE says where each of those 478 points sits on our template (cm, front view). It was measured
+   once by running MediaPipe on faces rendered from the template (8 renders: four lights, with and
+   without stubble; the median, made left-right symmetric). So the 478 points pull the whole template —
+   every dot, face lines and edges included — onto this face through a smooth warp.
+   (Its depth isn't used: tested on rendered faces, it didn't follow changes in chin, brow or cheekbone
+   projection — like any single front photo, it can't see them.) */
+const MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const MP_TEMPLATE = '0,1.27;0,-1.2;0,-0.45;-0.53,-3.24;0,-1.89;0,-2.68;0,-4.71;-4.25,-5.32;0,-6.36;0,-7.24;0,-10.88;0,1.47;0,1.71;0,1.93;0,1.99;0,2.29;0,2.64;0,2.95;0,3.58;0,-0.8;-0.73,-0.8;-6.8,-7.06;-2.6,-4.65;-3.21,-4.59;-3.79,-4.62;-4.49,-5.09;-2.08,-4.8;-3.68,-6.59;-2.82,-6.54;-4.39,-6.41;-4.75,-6.15;-4.97,-4.62;-2.1,4.58;-4.47,-5.55;-6.7,-5.09;-5.66,-5.12;-3.13,-1.65;-0.79,1.15;-0.71,1.72;-1.48,1.36;-1.92,1.57;-1.27,1.78;-1.68,1.82;-2.8,2.5;-0.61,-1.18;-0.66,-1.85;-5.59,-6.41;-1.82,-3.44;-1.95,-1.3;-1.93,-1.65;-4.85,-1.51;-0.57,-2.61;-4.25,-7.05;-5.1,-6.8;-6.34,-7.81;-1.26,-6.57;-2.12,-6.21;-3.27,1.91;-6.2,2.28;-1.52,-0.95;-1.05,-0.75;-2.43,1.91;-2.31,1.87;-5.44,-7.09;-1.98,-1;-2.95,-7.08;-3.11,-7.58;-3.91,-9.63;-5.86,-7.51;-3.42,-8.66;-5.94,-6.61;-6.38,-6.82;-0.77,1.43;-1.37,1.57;-1.8,1.68;-1.39,-0.82;-2.36,1.88;-2.13,2.09;-2.24,1.92;-1.3,-1.19;-1.61,1.98;-1.18,1.94;-0.65,1.92;-0.81,3.54;-0.75,2.88;-0.74,2.58;-0.71,2.25;-0.73,1.99;-1.63,2.01;-1.73,2.16;-1.81,2.32;-1.9,2.44;-2.66,0.75;-6.89,-1.94;-0.15,-0.62;-1.91,1.97;-2.04,2.03;-0.91,-0.53;-1.81,-0.61;-1,-0.61;-2.46,-3.04;-3.48,-2.53;-2.06,-1.38;-5.46,-8.5;-4.93,-8.09;-4.52,-7.46;-2.26,2.95;-1.47,-7.42;-1.76,-8.97;-2.02,-10.6;-4.24,-4.78;-5.5,-4.18;-1.74,-4.94;-5.23,-5.81;-1.41,-3.85;-1.65,-1.56;-6.14,-3.8;-5.12,-3.58;-4.42,-3.22;-3.34,-3.38;-2.48,-3.69;-1.85,-3.98;-0.61,-4.58;-6.22,-1.8;-5.69,-5.84;-0.51,-0.85;-1.73,-2.74;-6.94,-5.16;-1.39,-4.29;-2.1,-1.34;-4.79,-5.5;-1.58,-1.99;-6.78,0.44;-1.73,-5.18;-1.12,-2.38;-4.65,3.61;-4.63,4.34;-6.71,-1.94;-5.46,2.86;-6.57,-6.02;-2.2,5.21;-0.42,-0.65;-2.33,-2.23;-6.11,-5.08;-3.72,-5.02;-3.23,-4.97;-2.19,2.18;-6.16,0.03;-1.15,5.78;-2.95,5.41;-3.75,5.06;0,-9.04;0,5.8;-2.72,-5.03;-2.23,-5.1;-1.89,-5.13;-6.09,-5.94;-2.32,-5.82;-2.86,-6.05;-3.45,-6.09;-3.95,-5.98;-4.23,-5.83;-6.94,-6.2;-4.04,-5.16;0,0.15;-2.08,0.36;-1.53,-1.06;-0.93,0.14;0,-5.57;-3.84,4.34;-3.1,4.86;-1.18,5.37;-5.41,3.47;-1.94,-5.44;-0.99,-3.56;0,5.4;-2.06,5.64;-6.58,0.24;-1.22,2.07;-1.33,2.22;-1.35,2.43;-1.39,2.69;-1.62,3.33;-2,1.85;-2.15,1.84;-2.22,1.8;-3.07,1.3;-5.34,0.27;-1.02,-4.27;-1.29,-5.63;-1.67,-5.63;-1.93,1.96;-5.25,1.9;-0.76,-5.52;-1.91,3.96;0,-3.33;-0.58,-3.86;0,-3.97;-1.36,-2.57;0,4.83;0,4.17;-0.96,4.15;-3.29,2.89;-2.7,-0.77;-2.65,3.55;-4.05,-0.66;-3.24,-0.03;-4.5,0.56;-1.11,4.8;-1.71,-2.2;-3.68,3.52;-2.94,4.17;-3.79,2.14;-5.9,1.22;-4.47,2.43;-6.22,1.78;-3.65,0.91;-1.33,-3.18;-1.48,-1.29;-1.79,-1.1;-1.21,-1.74;-1.73,-6.27;-2.86,-6.71;-3.9,-6.73;-4.68,-6.54;-5.11,-6.25;-5.18,-5.28;-6.69,-3.83;-4.63,-4.28;-4.06,-4.02;-3.28,-4.04;-2.52,-4.21;-1.94,-4.42;-1.53,-4.59;-6.86,-3.89;-1.77,-0.91;-0.98,-2.98;-1.08,-1.28;-0.79,-0.94;-1.07,-1.16;-1.63,-0.7;-0.7,-0.9;-0.62,-0.74;-1.52,-5.13;-1.21,-4.93;-1.04,-4.76;-4.36,-5.69;-4.89,-5.85;0.53,-3.24;4.25,-5.32;0.62,-0.74;6.8,-7.06;2.6,-4.65;3.21,-4.59;3.79,-4.62;4.49,-5.09;2.08,-4.8;3.68,-6.59;2.82,-6.54;4.39,-6.41;4.75,-6.15;4.97,-4.62;2.1,4.58;4.47,-5.55;6.7,-5.09;5.66,-5.12;3.13,-1.65;0.79,1.15;0.71,1.72;1.48,1.36;1.92,1.57;1.27,1.78;1.68,1.82;2.8,2.5;0.61,-1.18;0.66,-1.85;5.59,-6.41;1.82,-3.44;1.95,-1.3;1.93,-1.65;4.85,-1.51;0.57,-2.61;4.25,-7.05;5.1,-6.8;6.34,-7.81;1.26,-6.57;2.12,-6.21;3.27,1.91;6.2,2.28;1.52,-0.95;1.05,-0.75;2.36,1.88;2.22,1.8;5.44,-7.09;1.98,-1;2.95,-7.08;3.11,-7.58;3.91,-9.63;5.86,-7.51;3.42,-8.66;5.94,-6.61;6.38,-6.82;0.77,1.43;1.37,1.57;1.8,1.68;1.39,-0.82;2.31,1.87;2.04,2.03;2.15,1.84;1.3,-1.19;1.54,1.87;1.16,1.87;0.65,1.92;0.81,3.54;0.75,2.88;0.74,2.58;0.71,2.25;0.56,1.94;1.53,1.89;1.63,2.01;1.73,2.16;1.81,2.32;2.66,0.75;7.11,-1.53;1.86,1.88;1.93,1.96;0.81,-0.47;1.81,-0.61;0.91,-0.53;2.46,-3.04;3.48,-2.53;2.1,-1.34;5.46,-8.5;4.93,-8.09;4.52,-7.46;2.26,2.95;1.47,-7.42;1.76,-8.97;2.02,-10.6;4.24,-4.78;5.5,-4.18;1.74,-4.94;5.23,-5.81;1.41,-3.85;1.65,-1.56;6.14,-3.8;5.12,-3.58;4.42,-3.22;3.34,-3.38;2.48,-3.69;1.85,-3.98;0.61,-4.58;6.22,-1.8;5.69,-5.84;0.31,-0.83;1.73,-2.74;6.94,-5.16;1.39,-4.29;2.14,-1.31;4.79,-5.5;1.58,-1.99;6.98,0.68;1.73,-5.18;1.12,-2.38;4.65,3.61;4.63,4.34;6.94,-1.58;5.46,2.86;6.57,-6.02;2.2,5.21;0.15,-0.62;2.33,-2.23;6.11,-5.08;3.72,-5.02;3.23,-4.97;2.13,2.09;6.16,0.03;1.15,5.78;2.95,5.41;3.75,5.06;2.72,-5.03;2.23,-5.1;1.89,-5.13;6.09,-5.94;2.32,-5.82;2.86,-6.05;3.45,-6.09;3.95,-5.98;4.23,-5.83;6.94,-6.2;4.04,-5.16;2.08,0.36;1.53,-1.06;0.93,0.14;3.84,4.34;3.1,4.86;1.18,5.37;5.41,3.47;1.94,-5.44;0.99,-3.56;2.06,5.64;6.78,0.44;1.18,1.94;1.22,2.07;1.35,2.43;1.39,2.69;1.62,3.33;2,1.85;2.08,1.74;2.18,1.69;3.07,1.3;5.34,0.27;1.02,-4.27;1.29,-5.63;1.67,-5.63;1.85,1.86;5.25,1.9;0.76,-5.52;1.91,3.96;0.58,-3.86;1.36,-2.57;0.96,4.15;3.29,2.89;2.7,-0.77;2.65,3.55;4.05,-0.66;3.24,-0.03;4.5,0.56;1.11,4.8;1.71,-2.2;3.68,3.52;2.94,4.17;3.79,2.14;5.9,1.22;4.47,2.43;6.22,1.78;3.65,0.91;1.33,-3.18;1.48,-1.29;1.79,-1.1;1.21,-1.74;1.73,-6.27;2.86,-6.71;3.9,-6.73;4.68,-6.54;5.11,-6.25;5.18,-5.28;6.69,-3.83;4.63,-4.28;4.06,-4.02;3.28,-4.04;2.52,-4.21;1.94,-4.42;1.53,-4.59;6.86,-3.89;1.77,-0.91;0.98,-2.98;1.08,-1.28;0.7,-0.9;1.07,-1.16;1.63,-0.7;0.51,-0.85;0.42,-0.65;1.52,-5.13;1.21,-4.93;1.04,-4.76;4.36,-5.69;4.89,-5.85;-3.2,-5.53;-2.6,-5.5;-3.19,-6.03;-3.8,-5.52;-3.16,-4.94;3.2,-5.53;3.8,-5.52;3.19,-6.03;2.6,-5.5;3.16,-4.94';
+let mpTab = null, mpTask = null;
+const mpTable = () => mpTab || (mpTab = MP_TEMPLATE.split(';').map(s => s.split(',').map(Number)));
+function mpLoad() {
+  if (!mpTask) mpTask = (async () => {
+    const mp = await import(`${MP_BASE}/vision_bundle.mjs`);
+    const fs = await mp.FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+    const make = d => mp.FaceLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_MODEL, delegate: d }, runningMode: 'IMAGE', numFaces: 1, outputFacialTransformationMatrixes: true });
+    try { return await make('GPU'); } catch (e) { return await make('CPU'); }
+  })().catch(e => { mpTask = null; throw e; });
+  return mpTask;
+}
+let autoBusy = false;
+async function autoPlace() {
+  if (!S.img || !FM || autoBusy) return;
+  if (S.map && isProfile()) { toast('Auto-place works on front photos — use Quick fit for a profile', 5000); return; }
+  autoBusy = true; syncUI();
+  toast(mpTask ? 'Finding the face…' : 'Loading the face finder (the first time ≈ 6 MB, then it’s cached)…', 8000);
+  let L = null, pose = null;
+  try {
+    const fl = await mpLoad();
+    // a copy of the photo no larger than 2048 px (the finder crops the face itself)
+    const sc = Math.min(1, 2048 / Math.max(S.iw, S.ih)), c = document.createElement('canvas');
+    c.width = Math.round(S.iw * sc); c.height = Math.round(S.ih * sc);
+    c.getContext('2d').drawImage(S.img, 0, 0, c.width, c.height);
+    const r = fl.detect(c);
+    L = r.faceLandmarks && r.faceLandmarks[0];
+    const M = r.facialTransformationMatrixes && r.facialTransformationMatrixes[0];
+    if (M && M.data) { const d = M.data; pose = { yaw: Math.atan2(d[8], d[10]) * 180 / Math.PI, pitch: Math.atan2(-d[9], Math.hypot(d[8], d[10])) * 180 / Math.PI }; }
+  } catch (e) { console.error(e); autoBusy = false; syncUI(); toast('Couldn’t load the face finder — check the internet connection (Quick fit works offline)', 7000); return; }
+  autoBusy = false;
+  if (!L) { syncUI(); toast('No face found in this photo — try Quick fit', 5000); return; }
+  const tab = mpTable(), ctl = [];
+  L.forEach((p, i) => { const t = tab[i]; if (t && Number.isFinite(t[0])) ctl.push(t[0], t[1], p.x * S.iw, p.y * S.ih); });
+  // template → photo, smooth through all of them; every dot of the map goes through it
+  const W2 = FM.tpsFit(ctl, ctl.length / 4, 20, 2e-3), pairs = [];
+  FM.POINTS.forEach((pt, i) => { const [x, y] = FM.tpsEval(W2, pt.x, pt.y); pairs.push({ i, b: { x, y } }); });
+  const before = snapshot();
+  openFaceMap(true);
+  S.mapStep = 'points'; S.qfit = null;
+  fitMap('front', pairs);
+  // the hairline, hair and neck aren't among the finder's points: let them find the photo's edges
+  const keep = new Set();
+  FM.POINTS.forEach((pt, i) => { if (!/^(tri|hl|tem|vertex|hair|hts|hsu|hse|hsl|nt|nm|nb|neck)/.test(pt.id) && !(pt.mid && /outline|hair|neck/.test(pt.group) && pt.y < -8)) keep.add(i); });
+  snapEdges({ pinned: keep, gentle: true });
+  pushUndo(before);
+  S.mapSel.clear();
+  syncPts(); syncUI(); wake();
+  const turned = pose && (Math.abs(pose.yaw) > 12 || Math.abs(pose.pitch) > 15);
+  toast(`Face map placed from the face finder${turned ? ` — the head is turned about ${Math.round(Math.abs(pose.yaw))}° ${pose.yaw > 0 ? 'one way' : 'the other'}, so the 3D will be less exact (a straight-on photo is best)` : ''}. Check the hairline, ears and neck — Quick fit or a drag fixes them. Ctrl+Z undoes it`, 7000);
 }
 /** The darkness-weighted centre of the pupil near a click (photo coords). */
 function refinePupil(b) {
@@ -3974,7 +4073,8 @@ async function importFaceMap(file) {
   const G = hintGrid();
   s.hints = doc.marks && doc.marks.gw === G.gw && doc.marks.gh === G.gh ? { ...G, hl: dec8(doc.marks.highlight, G.gw * G.gh), ig: dec8(doc.marks.notShape, G.gw * G.gh), rev: ++surfRev } : null;
   s.surf = null;
-  if (doc.surface) { cfg.surfTrust = doc.surface.trust ?? cfg.surfTrust; cfg.surfDetail = doc.surface.detail ?? cfg.surfDetail; saveCfg(); }
+  // (a map saved before build 26 carries the old Fine detail default, which raised humps: not taken)
+  if (doc.surface) { cfg.surfTrust = doc.surface.trust ?? cfg.surfTrust; if ((+doc.build || 0) >= 26) cfg.surfDetail = doc.surface.detail ?? cfg.surfDetail; saveCfg(); }
   pushUndo(before);
   restore(s);
   S.mapSel.clear();
@@ -5335,7 +5435,8 @@ function buildFaceMapPanel() {
     </div>
     <p class="to-note" id="mMapStatus"></p>
     <div class="to-actions" style="margin:2px 0 10px">
-      <button type="button" class="btn sm" id="mQuick">Quick fit · guided</button>
+      <button type="button" class="btn sm" id="mFind" title="Find the face and place every dot automatically (Google’s MediaPipe face finder, run in your browser — the photo isn’t uploaded; the first time it loads ≈ 6 MB)">Auto-place</button>
+      <button type="button" class="btn ghost sm" id="mQuick">Quick fit · guided</button>
       <button type="button" class="btn ghost sm" id="mSnap" title="Pull the edge dots (face edge, hairline, hair, neck) and the eye and lip outlines onto the edges in the photo">Snap to edges</button>
       <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the map from your measured landmarks">Fit to landmarks</button>
     </div>
@@ -5378,11 +5479,11 @@ function buildFaceMapPanel() {
         <button type="button" class="btn ghost sm" id="sfSide" title="Load the face map of a side (profile) photo of the same person: its profile sets the depths a front photo can't show">Side photo…</button>
       </div>
       <div id="sfAnat" class="sf-anat" hidden></div>
-      ${sliderRow('sfTrust', 'Follow the photo', 0, 100, 1, 'How much the surface follows the photo’s light and shade (right) or keeps the face map’s shape (left). Rebuild to apply.')}
+      ${sliderRow('sfTrust', 'Follow the photo', 0, 100, 1, 'How far the photo’s light and shade may change the anatomy from the average face (right) or keep it (left). Rebuild to apply.')}
       <p class="to-note">The photo is now 3D: <b>drag it to turn</b> the face, double-click to face it again. <b>Turned, drag a dot</b> to set its depth (the chin forward, a cheek back): it stays where it is on the photo and the surface bends to it. Facing you, dots move on the photo as usual.</p>
       <div class="to-label">Look</div>
       <div class="seg full" id="sfMode" style="margin-bottom:10px"><button type="button" data-v="photo">Photo</button><button type="button" data-v="clay">Clay</button><button type="button" data-v="wire">Wire</button></div>
-      ${sliderRow('sfDetail', 'Fine detail', 0, 100, 1, 'How much small-scale relief the photo may add. Low keeps the surface smooth (skin texture and stubble can’t raise bumps). Rebuild to apply.')}
+      ${sliderRow('sfDetail', 'Fine detail', 0, 100, 1, 'Free relief read straight from the photo’s brightness, on top of the anatomy. Off (0) by default: on real photos shine, stubble and side light come out as humps. Raise it a little for more texture. Rebuild to apply.')}
       <div class="to-label">View</div>
       <div class="chips looks" id="sfViews">${SURF_VIEWS.map(([v, n, tip]) => `<button type="button" class="chip-dot look" data-v="${v}" title="${esc(tip)}">${n}</button>`).join('')}</div>
       <div id="sfSweepRow">${sliderRow('sfSweep', 'Level', 0, 100, 1, 'The brightness level to magnify')}</div>
@@ -5467,6 +5568,7 @@ function buildFaceMapPanel() {
     syncUI(); wake();
   });
   $('#mQuick').addEventListener('click', () => { if (S.qfit) qfitCancel(); else startQuickFit(); });
+  $('#mFind').addEventListener('click', autoPlace);
   $('#mSnap').addEventListener('click', () => {
     if (!S.map) return;
     const snap = snapshot(), n = snapEdges();
@@ -5518,10 +5620,13 @@ function syncFaceMapPanel() {
   const qb = $('#mQuick');
   setText(qb, S.qfit ? `Stop quick fit (${S.qfit.step + 1}/${qfitSteps().length})` : 'Quick fit · guided');
   qb.classList.toggle('on', !!S.qfit);
+  const fb = $('#mFind');
+  setText(fb, autoBusy ? 'Finding the face…' : 'Auto-place');
+  fb.disabled = autoBusy || !!S.qfit || (!!m && isProfile(m));
   $('#mAuto').disabled = !m || !FM.POINTS.some(pt => { const l = lmLabel(pt, m.view); return l && landmarkS(l); });
   $('#mSnap').disabled = !m || !!S.qfit;
   $$('#mGroups [data-g]').forEach(b => b.classList.toggle('off', S.hideGroups.has(b.dataset.g)));
-  setText($('#mMapStatus'), !m ? 'Not placed yet — use Quick fit.'
+  setText($('#mMapStatus'), !m ? 'Not placed yet — use Auto-place (or Quick fit).'
     : S.qfit ? `Step ${S.qfit.step + 1} of ${qfitSteps().length}: ${qfitSteps()[S.qfit.step].label}. The ring shows the current guess.`
     : S.mapSel.size ? `${S.mapSel.size} dot${S.mapSel.size === 1 ? '' : 's'} selected of ${shown}.`
     : m.snapped ? `${shown} dots in view, ${m.snapped} placed from your landmarks or clicks. Check the edges.`
@@ -5919,7 +6024,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis,
+window.cranimeter = { loadFile, state: S, build: BUILD, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
