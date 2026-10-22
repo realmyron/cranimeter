@@ -106,7 +106,7 @@ pair('nos', 'Nostril', 0.75, -0.75, 10.6, 'nose', 'face', 4);
 // ---- cheeks, chin (interior skin) ----
 pair('infra', 'Under-eye', 2.6, -4.0, 8.2, 'skin', 'face', 7);
 pair('malar', 'Cheekbone (malar)', 4.5, -2.8, 7.3, 'skin', 'face', 7);
-pair('buc', 'Cheek hollow (buccal)', 4.7, 0.5, 6.1, 'skin', 'face', 22);
+pair('buc', 'Buccal fat pad (side of the cheek)', 4.7, 0.5, 6.1, 'skin', 'face', 22);
 pair('nl1', 'Nasolabial fold', 2.0, -0.4, 9.3, 'skin', 'face', 13);
 pair('nl2', 'Nasolabial fold · lower', 2.9, 1.3, 8.8, 'skin', 'face', 13);
 pair('jowl', 'Jowl', 3.9, 3.2, 6.9, 'skin', 'face', 12);
@@ -155,12 +155,16 @@ pair('cr4', 'Eyelid crease', 4.35, -6.2, 7.4, 'skin', 'face', 4);
 pair('tt1', 'Tear trough', 1.95, -4.6, 8.1, 'skin', 'face', 5);
 pair('tt2', 'Under-eye line', 2.9, -4.4, 8.0, 'skin', 'face', 6);
 pair('tt3', 'Under-eye line', 3.9, -4.45, 7.3, 'skin', 'face', 6);
-// cheekbone ridge (malar body → zygomatic arch) and the submalar hollow beneath it
+// cheekbone ridge (malar body → zygomatic arch); below it, the cheekbone's underside (where its
+// shadow starts: from beside the nostril out and up toward the arch) and the cheek hollow (the
+// shadow line of a lean face: from under the cheekbone's high point, down to the end of the smile
+// line by the mouth corner, bowing in toward the nose)
 pair('zr1', 'Cheekbone ridge', 5.35, -3.2, 6.2, 'skin', 'face', 6.5);
 pair('zr2', 'Cheekbone ridge', 6.1, -3.6, 4.8, 'skin', 'face', 6.5);
-pair('sm1', 'Under-cheekbone hollow', 3.6, -0.9, 7.8, 'skin', 'face', 16);
-pair('sm2', 'Under-cheekbone hollow', 4.6, -0.3, 6.6, 'skin', 'face', 20);
-pair('sm3', 'Under-cheekbone hollow', 5.6, 0.2, 4.6, 'skin', 'face', 18);
+pair('sm1', 'Cheekbone underside · inner', 3.4, -1.2, 8.0, 'skin', 'face', 12);
+pair('sm2', 'Cheekbone underside (cheek hollow starts)', 4.6, -1.65, 7.0, 'skin', 'face', 10);
+pair('sm3', 'Cheekbone underside · outer', 5.8, -2.2, 5.0, 'skin', 'face', 8);
+pair('hcm', 'Cheek hollow', 3.55, 0.3, 7.9, 'skin', 'face', 14);
 // nasolabial fold (alar base → past the mouth corner) and marionette line
 pair('nl0', 'Nasolabial fold · top', 1.85, -0.85, 9.3, 'skin', 'face', 12);
 pair('nl3', 'Nasolabial fold · end', 3.15, 2.15, 8.3, 'skin', 'face', 13);
@@ -279,6 +283,7 @@ const FRONT_CONTOURS = [
     { id: 'trough' + s, line: true, ids: ['tt1', 'tt2', 'tt3'].map(i => i + s) },
     { id: 'cheekbone' + s, line: true, ids: ['malar', 'zr1', 'zr2', 'zy'].map(i => i + s) },
     { id: 'submalar' + s, line: true, ids: ['sm1', 'sm2', 'sm3'].map(i => i + s) },
+    { id: 'hollow' + s, line: true, ids: ['sm2', 'hcm', 'nl3'].map(i => i + s) },
     { id: 'nasolabial' + s, line: true, ids: ['nl0', 'nl1', 'nl2', 'nl3'].map(i => i + s) },
     { id: 'dorsum' + s, line: true, ids: ['dl1', 'dl2', 'tdp'].map(i => i + s) },
     { id: 'noseEdge' + s, line: true, ids: ['ne1', 'nsd', 'ne2', 'nsw', 'ar1', 'al', 'ac'].map(i => i + s) },
@@ -316,6 +321,7 @@ const PROFILE_CONTOURS = [
   { id: 'trough', line: true, ids: ['tt1#', 'tt2#', 'tt3#'] },
   { id: 'cheekbone', line: true, ids: ['malar#', 'zr1#', 'zr2#', 'za#'] },
   { id: 'submalar', line: true, ids: ['sm1#', 'sm2#', 'sm3#'] },
+  { id: 'hollow', line: true, ids: ['sm2#', 'hcm#', 'nl3#'] },
   { id: 'nasolabial', line: true, ids: ['nl0#', 'nl1#', 'nl2#', 'nl3#'] },
   { id: 'lowerCrease', line: true, ids: ['lc1#', 'lc2#', 'lc3#', 'lc4#'] },
   { id: 'orbit', line: true, ids: ['so1#', 'supra#', 'so3#', 'so4#', 'lor#', 'ior#', 'tt3#'] },
@@ -345,7 +351,7 @@ function midpoint(a, b, profileOnly) {
     // named after the plainer neighbour (a landmark's name belongs to the landmark alone)
     id: 'd' + (++midCount), name: A.lm && !B.lm ? B.name : A.name,
     x, y: (A.y + B.y) / 2, z: (A.z + B.z) / 2, group: A.group, field: A.field === 'both' || B.field === 'both' ? 'both' : A.field,
-    t: (A.t + B.t) / 2, lm: null, side: Math.abs(x) < 1e-6 ? 0 : Math.sign(x), detail: true,
+    t: (A.t + B.t) / 2, lm: null, side: Math.abs(x) < 1e-6 ? 0 : Math.sign(x), detail: true, mid: true,
   };
   if (A.views === 'all' || B.views === 'all') p.views = 'all';
   else if (profileOnly || A.views === 'profile' || B.views === 'profile') { p.views = 'profile'; p.ownViews = A.views === 'profile' || B.views === 'profile'; }
@@ -655,6 +661,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '20',
+  mls, tpsFit, tpsEval, spline, build: '22',
 };
 })();
