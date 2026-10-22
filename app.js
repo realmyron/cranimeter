@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '23';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '24';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -750,9 +750,47 @@ function snapEdges(opt = {}) {
         moved.add(i);
       });
     }
+    // an eye's lids and a brow's edges are smooth curves between their corners: no wiggles
+    const s = FM.POINTS[c.idx[0]].id.slice(-1);
+    if (c.id.startsWith('eye')) smoothArcs(c, 'en' + s, 'ex' + s, pinned, moved);
+    else if (brow) smoothArcs(c, 'bi' + s, 'bt' + s, pinned, moved);
   }
   if (moved.size) { mapTouched(true); buildMask(); }
   return moved.size;
+}
+/**
+ * Make a closed feature outline two smooth arcs between its corners (an eye's upper and lower lid,
+ * a brow's upper and lower edge): across the line between the corners, each arc's dots are fitted
+ * to v(u) = u(1 − u)(a + b·u) — a smooth curve through both corners with its peak anywhere along it.
+ * Dots placed by hand stay put (and count ten times in the fit).
+ */
+function smoothArcs(c, ca, cb, pinned, moved) {
+  const m = S.map, idx = c.idx, n = idx.length, ka = idx.indexOf(FM.INDEX[ca]), kb = idx.indexOf(FM.INDEX[cb]);
+  if (ka < 0 || kb < 0) return;
+  const A = mapPt(idx[ka]), B = mapPt(idx[kb]), L = Math.hypot(B.x - A.x, B.y - A.y);
+  if (L < 2) return;
+  const ux = (B.x - A.x) / L, uy = (B.y - A.y) / L, nx = -uy, ny = ux;
+  for (const [from, to] of [[ka, kb], [kb, ka]]) {
+    const arc = [];
+    for (let k = (from + 1) % n; k !== to; k = (k + 1) % n) arc.push(idx[k]);
+    if (arc.length < 3) continue;
+    const uv = arc.map(i => { const px = m.p[2 * i] - A.x, py = m.p[2 * i + 1] - A.y; return [(px * ux + py * uy) / L, (px * nx + py * ny) / L]; });
+    let s11 = 0, s12 = 0, s22 = 0, r1 = 0, r2 = 0;
+    uv.forEach(([u, v], q) => {
+      const w = pinned.has(arc[q]) ? 10 : 1, f1 = u * (1 - u), f2 = f1 * u;
+      s11 += w * f1 * f1; s12 += w * f1 * f2; s22 += w * f2 * f2; r1 += w * f1 * v; r2 += w * f2 * v;
+    });
+    const det = s11 * s22 - s12 * s12;
+    if (!(Math.abs(det) > 1e-12)) continue;
+    const a = (r1 * s22 - r2 * s12) / det, b = (s11 * r2 - s12 * r1) / det;
+    uv.forEach(([u, v], q) => {
+      if (pinned.has(arc[q]) || u <= 0 || u >= 1) return;
+      const vf = u * (1 - u) * (a + b * u), i = arc[q];
+      if (Math.abs(vf - v) * L < .3) return;
+      m.p[2 * i] = A.x + (u * ux + vf * nx) * L; m.p[2 * i + 1] = A.y + (u * uy + vf * ny) * L;
+      moved.add(i);
+    });
+  }
 }
 const mapPt = i => ({ x: S.map.p[2 * i], y: S.map.p[2 * i + 1] });
 /** Photo → screen (while mapping the photo is shown unchanged) and back. */
@@ -1567,8 +1605,8 @@ function syncLightPane() {
 const FEATURES = {
   front: [['Eye ◀', ['eyeL', 'irisL', 'creaseL']], ['Eye ▶', ['eyeR', 'irisR', 'creaseR']],
     ['Brow ◀', ['browShapeL', 'browL']], ['Brow ▶', ['browShapeR', 'browR']], ['Nose', ['ridge', 'nostrils', 'noseEdgeL', 'noseEdgeR', 'dorsumL', 'dorsumR', 'lobule']],
-    ['Lips', ['lips', 'mouth', 'philtrumL', 'philtrumR', 'philMid']], ['Face edge', ['outline']], ['Ear ◀', ['earL', 'antihelixL', 'lowerCrusL', 'conchaL']], ['Ear ▶', ['earR', 'antihelixR', 'lowerCrusR', 'conchaR']]],
-  profile: [['Eye', ['eye', 'crease']], ['Brow', ['browShape', 'brow']], ['Nose', ['nostril', 'noseEdge']], ['Lips', ['lip']],
+    ['Lips', ['lips', 'mouth', 'philtrumL', 'philtrumR', 'philMid']], ['Cheek ◀', ['cheekboneL', 'hollowL', 'nasolabialL']], ['Cheek ▶', ['cheekboneR', 'hollowR', 'nasolabialR']], ['Face edge', ['outline']], ['Ear ◀', ['earL', 'antihelixL', 'lowerCrusL', 'conchaL']], ['Ear ▶', ['earR', 'antihelixR', 'lowerCrusR', 'conchaR']]],
+  profile: [['Eye', ['eye', 'crease']], ['Brow', ['browShape', 'brow']], ['Nose', ['nostril', 'noseEdge']], ['Lips', ['lip']], ['Cheek', ['cheekbone', 'hollow', 'nasolabial']],
     ['Profile', ['face']], ['Ear', ['ear', 'antihelix', 'lowerCrus', 'concha']]],
 };
 function selectFeature(ids) {
@@ -1673,6 +1711,9 @@ function stageDepth() {
   // soften the streaks the nearest-edge fill leaves, outside the face only (more further out)
   const sm = SF.blur(Z, gw, gh, Math.max(1, Math.round(.25 / h)), null, 2), lg = SF.blur(Z, gw, gh, Math.max(2, Math.round(.7 / h)), null, 2);
   for (let k = 0; k < n; k++) if (!act[k]) { const t = smooth01(.1, .8, d[k] * h); Z[k] = sm[k] + (lg[k] - sm[k]) * t; }
+  // the face's own edge is a staircase of grid cells: feather the relief across it (shown only)
+  const fe = SF.blur(Float32Array.from(act), gw, gh, Math.max(1, Math.round(.15 / h)), null, 2), Zs = SF.blur(Z, gw, gh, Math.max(1, Math.round(.3 / h)), null, 2);
+  for (let k = 0; k < n; k++) { const w = 1 - Math.abs(2 * fe[k] - 1); if (w > 0) Z[k] += (Zs[k] - Z[k]) * w; }
   stageZ = { key, z: Z };
   return Z;
 }
@@ -2650,6 +2691,8 @@ const QFIT = {
     { id: 'puR', label: 'Centre of the other pupil', refine: 'pupil' },
     { id: 'exL', label: 'Outer corner of the eye on the left' },
     { id: 'exR', label: 'Outer corner of the eye on the right' },
+    { id: 'enL', label: 'Inner corner of the eye on the left (by the nose)' },
+    { id: 'enR', label: 'Inner corner of the eye on the right' },
     { id: 'biL', label: 'Inner end of the brow on the left' },
     { id: 'biR', label: 'Inner end of the brow on the right' },
     { id: 'btL', label: 'Outer end (tail) of the brow on the left' },
@@ -2669,6 +2712,8 @@ const QFIT = {
     { id: 'goR', label: 'Jaw angle — right' },
     { id: 'saL', label: 'Top of the ear — left (Shift Enter if hidden)' },
     { id: 'saR', label: 'Top of the ear — right' },
+    { id: 'eoL', label: 'Outermost point of the ear’s rim — left (how far the ear sticks out)' },
+    { id: 'eoR', label: 'Outermost point of the ear’s rim — right' },
     { id: 'lobL', label: 'Bottom of the earlobe — left' },
     { id: 'lobR', label: 'Bottom of the earlobe — right' },
   ],
@@ -2689,9 +2734,11 @@ const QFIT = {
     { id: 'go#', label: 'Jaw angle' },
     { id: 'tra#', label: 'Ear opening (tragus)' },
     { id: 'sa#', label: 'Top of the ear' },
+    { id: 'eo#', label: 'Back edge of the ear’s rim' },
     { id: 'lob#', label: 'Bottom of the earlobe' },
   ],
-};const qfitSteps = () => QFIT[isProfile() ? 'profile' : 'front'];
+};
+const qfitSteps = () => QFIT[isProfile() ? 'profile' : 'front'];
 const qfitId = st => st.id.replace('#', FM.nearSide(S.map ? S.map.yaw : 0));
 /** Is this dot shown (and grabbable) in Map? */
 const dotShown = i => S.map.vis[i] && !S.hideGroups.has(FM.POINTS[i].group);
@@ -3754,15 +3801,19 @@ async function importFaceMap(file) {
   const sx = S.iw / (doc.image.width || S.iw), sy = S.ih / (doc.image.height || S.ih);
   if (Math.abs(sx / sy - 1) > .02) toast('This photo has a different shape than the one the map was made on — check the dots', 6000);
   const before = snapshot();
-  // the face map: every saved dot exactly where it was; dots this version has but the file doesn't, fitted around them
+  // the face map: every saved dot exactly where it was; dots this version has but the file doesn't, fitted around them.
+  // The small detail dots are numbered, and the numbers change between builds: from another build
+  // only the named dots are taken and the detail dots are placed between them again.
   if (doc.map && doc.map.points && FM) {
+    const same = String(doc.build) === BUILD, take = id => { const i = FM.INDEX[id]; return i != null && (same || !FM.POINTS[i].mid) ? i : null; };
     const pairs = [];
-    for (const [id, xy] of Object.entries(doc.map.points)) { const i = FM.INDEX[id]; if (i != null && xy) pairs.push({ i, b: { x: xy[0] * sx, y: xy[1] * sy } }); }
+    for (const [id, xy] of Object.entries(doc.map.points)) { const i = take(id); if (i != null && xy) pairs.push({ i, b: { x: xy[0] * sx, y: xy[1] * sy } }); }
     fitMap(FM.VIEWS[doc.map.view] != null ? doc.map.view : 'front', pairs);
+    if (!same) placeDetail(null);
     S.map.snapped = doc.map.snapped || pairs.length;
     if (doc.map.depth && Object.keys(doc.map.depth).length) {
       S.map.zo = new Float32Array(NMAP).fill(NaN);
-      for (const [id, z] of Object.entries(doc.map.depth)) { const i = FM.INDEX[id]; if (i != null) S.map.zo[i] = z; }
+      for (const [id, z] of Object.entries(doc.map.depth)) { const i = take(id); if (i != null) S.map.zo[i] = z; }
       S.map.zoRev = (S.map.zoRev || 0) + 1;
     }
   }
