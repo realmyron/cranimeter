@@ -72,7 +72,7 @@ mid('me', 'Chin bottom (menton)', 0, 6.3, 7.8, 'outline', 'both', 7.5, 'Menton',
 mid('fhC', 'Forehead · centre', 0, -9.4, 9.2, 'skin', 'face', 5);
 mid('fhT', 'Upper forehead · centre', 0, -10.85, 8.75, 'skin', 'face', 5);
 pair('fh', 'Forehead', 3.7, -9.6, 8.2, 'skin', 'face', 5);
-pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -8.1, 8.75, 'skin', 'face', 6);
+pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -8.1, 9.3, 'skin', 'face', 6);
 pair('temH', 'Temple hollow', 5.4, -6.4, 5.4, 'skin', 'face', 9);
 mid('gl', 'Glabella', 0, -6.9, 9.8, 'brows', 'face', 5.5, 'Glabella');
 pair('bi', 'Brow · inner', 1.2, -6.7, 9.0, 'brows', 'face', 6);
@@ -145,10 +145,10 @@ pair('nb', 'Neck · base', 5.9, 13.0, -1.0, 'neck', 'back', 15);
 
 // ---- the lines retouchers and surgeons read a face by ----
 // upper eyelid crease (where the brow fold sits; hooding covers it)
-pair('cr1', 'Eyelid crease', 2.2, -6.35, 8.5, 'skin', 'face', 4);
-pair('cr2', 'Eyelid crease', 2.9, -6.5, 8.45, 'skin', 'face', 4);
-pair('cr3', 'Eyelid crease', 3.6, -6.48, 8.2, 'skin', 'face', 4);
-pair('cr4', 'Eyelid crease', 4.35, -6.2, 7.4, 'skin', 'face', 4);
+pair('cr1', 'Eyelid crease', 2.2, -6.35, 8.15, 'skin', 'face', 4);
+pair('cr2', 'Eyelid crease', 2.9, -6.5, 8.05, 'skin', 'face', 4);
+pair('cr3', 'Eyelid crease', 3.6, -6.48, 7.85, 'skin', 'face', 4);
+pair('cr4', 'Eyelid crease', 4.35, -6.2, 7.15, 'skin', 'face', 4);
 // the lower half of the eye socket's rim: tear trough (inner) → infraorbital rim (under the eye)
 pair('tt1', 'Tear trough', 1.95, -4.6, 8.1, 'skin', 'face', 5);
 pair('tt2', 'Infraorbital rim (under the eye)', 2.9, -4.4, 8.0, 'skin', 'face', 6);
@@ -184,8 +184,8 @@ pair('nsw', 'Nose side wall', 1.35, -2.2, 10.0, 'nose', 'face', 4);
 pair('el0', 'Lower lid · inner', 2.05, -5.27, 8.2, 'eyes', 'face');
 pair('el4', 'Lower lid · outer', 4.4, -5.3, 7.25, 'eyes', 'face');
 // orbit: the bony rim around the eye — supraorbital (above), lateral, infraorbital (below), medial
-pair('so1', 'Supraorbital rim · inner', 1.4, -7.75, 9.25, 'skin', 'face', 6);
-pair('so3', 'Supraorbital rim · outer', 4.35, -7.8, 7.7, 'skin', 'face', 6);
+pair('so1', 'Supraorbital rim · inner', 1.4, -7.75, 9.5, 'skin', 'face', 6);
+pair('so3', 'Supraorbital rim · outer', 4.35, -7.8, 8.3, 'skin', 'face', 6);
 pair('lor', 'Lateral orbital rim', 5.25, -5.5, 6.0, 'skin', 'face', 6.5);
 pair('ior', 'Infraorbital rim · outer', 4.55, -4.55, 6.9, 'skin', 'face', 6.5);
 pair('mor', 'Medial orbital rim', 1.25, -5.05, 8.9, 'skin', 'face', 6);
@@ -217,7 +217,7 @@ pair('hx3', 'Helix · lower back', 7.75, -0.9, -1.9, 'ears', 'back');
 // sulcus), and the temporal line where the front of the forehead turns sharply into the temple
 mid('sg', 'Supraglabella (above the brow ridge)', 0, -7.95, 9.65, 'skin', 'face', 5.5);
 mid('rx', 'Radix (between glabella and nasion)', 0, -6.25, 9.45, 'nose', 'face', 6);
-pair('so4', 'Brow ridge · lateral end', 5.5, -7.25, 6.0, 'skin', 'face', 5.5);
+pair('so4', 'Brow ridge · lateral end', 5.5, -7.25, 6.5, 'skin', 'face', 5.5);
 pair('ss1', 'Above the brow ridge', 1.5, -8.65, 9.35, 'skin', 'face', 5);
 pair('ss2', 'Above the brow ridge', 3.0, -9.0, 8.8, 'skin', 'face', 5);
 pair('ss3', 'Above the brow ridge', 4.45, -8.65, 7.55, 'skin', 'face', 5);
@@ -412,9 +412,9 @@ const OPS = [
     help: 'The malar body toward / away from the camera — moves the highlight and the shadow below it' },
   { key: 'infraorbital', label: 'Infraorbital rim', level: 'bone', mag: .45, dir: 'fwd', regions: [[2.6, -4.1, 8.0, 1.0], [3.9, -3.7, 7.3, 1.0]], affects: SKIN,
     help: 'Support under the eyes — negative recesses the rim (shadowed, hollow under-eyes)' },
-  { key: 'browRidge', label: 'Brow ridge projection', level: 'bone', mag: .45, dir: 'fwd', regions: [[0, -7.0, 9.8, 1.4], [3.0, -7.4, 8.8, 1.4]], affects: SKIN,
+  { key: 'browRidge', label: 'Brow ridge projection', level: 'bone', mag: .45, dir: 'fwd', regions: [[0, -7.0, 9.8, 1.4], [3.0, -7.4, 9.2, 1.4]], affects: SKIN,
     help: 'Supraorbital and glabellar projection — a stronger ridge throws the eyes into shadow' },
-  { key: 'browDrop', label: 'Brow ridge height', level: 'bone', mag: .5, dir: 'browDrop', regions: [[2.9, -7.2, 8.7, 1.25], [4.8, -6.8, 7.0, 1.15], [1.4, -6.9, 9.2, .8]], affects: ['outline', 'skin', 'brows'],
+  { key: 'browDrop', label: 'Brow ridge height', level: 'bone', mag: .5, dir: 'browDrop', regions: [[2.9, -7.2, 9.1, 1.25], [4.8, -6.8, 7.3, 1.15], [1.4, -6.9, 9.2, .8]], affects: ['outline', 'skin', 'brows'],
     help: 'Lowers the supraorbital rim and brows: the brow fold drops over the upper lid (hooded, deep-set look) while the eye opening stays' },
   { key: 'jawWidth', label: 'Jaw width', level: 'bone', mag: .9, dir: 'out', regions: [[5.3, 3.0, .9, 2.2]],
     help: 'Bigonial width — the mandibular angles' },
@@ -657,6 +657,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '24',
+  mls, tpsFit, tpsEval, spline, build: '25',
 };
 })();
