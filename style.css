@@ -5,7 +5,7 @@
    ========================================================================== */
 
 :root {
-  --cm-build: 24;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+  --cm-build: 25;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
   --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --c1: #7CCBF5;
@@ -460,6 +460,9 @@ body.topts-open .modal { padding-left: calc(var(--rail-w) + 272px + 10px); }
 .to-title { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
 .to-sub { font-size: 11.5px; color: var(--faint); }
 .to-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; margin: 2px 0 6px; }
+.sf-anat { margin: 0 0 8px; }
+.sf-an-list { display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 11.5px; color: var(--muted); margin: 2px 0 4px; }
+.sf-an-list b { font-weight: 500; color: inherit; opacity: .85; }
 .seg.full { display: flex; width: 100%; margin-bottom: 8px; }
 .seg.full button { flex: 1; padding: 0 6px; height: 27px; font-size: 12px; }
 .srow { display: grid; grid-template-columns: 78px 1fr 58px; align-items: center; gap: 10px; padding: 4px 0; font-size: 12px; color: var(--muted); }
