@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '18';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '19';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -690,11 +690,12 @@ function estimateLight() {
  * kind: the white of the eye is brighter than the lash line around it, lips darker than the skin.
  * Returns how many dots moved.
  */
-function snapEdges() {
-  const m = S.map, lum = photoLum(), sc = mapScale(), step = lum.step, moved = new Set();
+function snapEdges(opt = {}) {
+  const m = S.map, lum = photoLum(), sc = mapScale(), step = lum.step, moved = new Set(), pinned = opt.pinned || new Set();
   for (const c of m.contours) {
     if (!(c.snap || c.snapFine) || c.idx.some(i => !m.vis[i])) continue;
-    const fine = !c.snap, R = (fine ? .045 : .15) * sc, e = (fine ? 1 : 1.5) * step;
+    if (opt.gentle && !c.snap) continue;   // after a quick fit: only the outer edges, and only a little
+    const fine = !c.snap, R = (fine ? .045 : opt.gentle ? .07 : .15) * sc, e = (fine ? 1 : 1.5) * step;
     const sign = !fine ? 0 : c.id.startsWith('eye') ? 1 : -1;   // + inside brighter, − inside darker
     const st = fine ? Math.max(.5, Math.min(step, R / 8)) : step;
     // two passes, so a dot that starts a little far from the edge can walk onto it
@@ -713,10 +714,19 @@ function snapEdges() {
       });
       // an offset far from both neighbours' is probably a wrong catch (a shadow, a strand): use the median
       const n = offs.length, tol = (fine ? .03 : .12) * sc;
-      const fixed = offs.map((v, k) => {
+      let fixed = offs.map((v, k) => {
         const a = offs[c.closed ? (k + n - 1) % n : Math.max(0, k - 1)], b = offs[c.closed ? (k + 1) % n : Math.min(n - 1, k + 1)];
         return Math.abs(v - a) > tol && Math.abs(v - b) > tol ? [a, v, b].sort((x, y) => x - y)[1] : v;
       });
+      // Dots you placed yourself stay where they are, and the moves are smoothed along the line
+      // (so it can't wiggle): two passes of a [1 2 1] filter, re-pinning after each.
+      const pin = c.idx.map(i => pinned.has(i));
+      const nb = (k, d) => c.closed ? (k + d + n) % n : Math.min(n - 1, Math.max(0, k + d));
+      for (let it = 0; it < 2; it++) {
+        fixed = fixed.map((v, k) => pin[k] ? 0 : (fixed[nb(k, -1)] + 2 * v + fixed[nb(k, 1)]) / 4);
+      }
+      // and the dots right next to a placed one move less
+      fixed = fixed.map((v, k) => pin[nb(k, -1)] || pin[nb(k, 1)] ? v * .35 : pin[nb(k, -2)] || pin[nb(k, 2)] ? v * .7 : v);
       N.forEach(([nx, ny], k) => {
         const i = c.idx[k], t = fixed[k];
         if (Math.abs(t) < .5) return;
@@ -2237,7 +2247,11 @@ const QFIT = {
   front: [
     { id: 'puL', label: 'Centre of the pupil — the eye on the left of the photo', refine: 'pupil' },
     { id: 'puR', label: 'Centre of the other pupil', refine: 'pupil' },
+    { id: 'exL', label: 'Outer corner of the eye on the left' },
+    { id: 'exR', label: 'Outer corner of the eye on the right' },
     { id: 'prn', label: 'Tip of the nose' },
+    { id: 'alL', label: 'Outer edge of the nostril wing — left' },
+    { id: 'alR', label: 'Outer edge of the nostril wing — right' },
     { id: 'chL', label: 'Mouth corner on the left of the photo' },
     { id: 'chR', label: 'Mouth corner on the right' },
     { id: 'me', label: 'Bottom of the chin' },
@@ -2251,13 +2265,17 @@ const QFIT = {
     { id: 'tri', label: 'The hairline (Enter if it’s hidden)' },
     { id: 'gl', label: 'Brow between the eyes (glabella) — its most forward point' },
     { id: 'n', label: 'Nasion — the dip between forehead and nose' },
+    { id: 'ex#', label: 'Outer corner of the eye' },
     { id: 'prn', label: 'Tip of the nose' },
+    { id: 'al#', label: 'Back edge of the nostril wing' },
     { id: 'sn', label: 'Base of the nose, where it meets the upper lip' },
+    { id: 'ls', label: 'Front of the upper lip' },
     { id: 'sto', label: 'Where the lips meet' },
     { id: 'pog', label: 'Front of the chin' },
     { id: 'me', label: 'Bottom of the chin' },
     { id: 'go#', label: 'Jaw angle' },
     { id: 'tra#', label: 'Ear opening (tragus)' },
+    { id: 'sa#', label: 'Top of the ear' },
   ],
 };const qfitSteps = () => QFIT[isProfile() ? 'profile' : 'front'];
 const qfitId = st => st.id.replace('#', FM.nearSide(S.map ? S.map.yaw : 0));
@@ -3271,10 +3289,10 @@ function qfitFinish() {
   S.qfit = null;
   pushUndo(q.snap);
   // then pull the edge contours (and the eyes and lips) onto the photo's edges — its own undo step
-  const snap2 = snapshot();
-  if (snapEdges()) { pushUndo(snap2); estimateLight(); }
+  const snap2 = snapshot(), clicked = new Set(q.hist.filter(Boolean).map(c => c.i));
+  if (snapEdges({ pinned: clicked, gentle: true })) { pushUndo(snap2); estimateLight(); }
   syncPts(); syncUI();
-  toast('Face map placed and snapped to the edges — check the face edge, hairline, eyes and ears', 5000);
+  toast('Face map placed — the outer edge was nudged onto the photo’s edges (Ctrl+Z undoes that). Snap to edges also fits the eyes and lips.', 6000);
 }
 function qfitCancel() {
   const q = S.qfit;
