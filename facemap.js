@@ -159,14 +159,18 @@ pair('tt3', 'Infraorbital rim', 3.9, -4.45, 7.3, 'skin', 'face', 6);
 // line by the mouth corner, bowing in toward the nose)
 pair('zr1', 'Cheekbone ridge', 5.35, -3.2, 6.2, 'skin', 'face', 6.5);
 pair('zr2', 'Cheekbone ridge', 6.1, -3.6, 4.8, 'skin', 'face', 6.5);
-pair('sm1', 'Cheekbone underside · inner', 3.4, -1.2, 8.0, 'skin', 'face', 12);
-pair('sm2', 'Cheekbone underside (cheek hollow starts)', 4.6, -1.65, 7.0, 'skin', 'face', 10);
-pair('sm3', 'Cheekbone underside · outer', 5.8, -2.2, 5.0, 'skin', 'face', 8);
-pair('hcm', 'Cheek hollow', 3.55, 0.3, 7.9, 'skin', 'face', 14);
+// The cheek hollow as one line: it starts under the outer cheekbone, runs in under it, curves down
+// and in to the end of the smile line beside the mouth, and goes on down the marionette line to the
+// jaw beside the chin (where the hollow of a lean face ends). Its dots sit a little below the
+// surface around them — a hollow, not a ridge.
+pair('sm3', 'Under the cheekbone · outer (the hollow starts)', 5.8, -2.2, 5.0, 'skin', 'face', 8);
+pair('sm2', 'Under the cheekbone', 4.6, -1.65, 6.75, 'skin', 'face', 10);
+pair('hcm', 'Cheek hollow', 3.6, 0.35, 7.55, 'skin', 'face', 14);
 // nasolabial fold (alar base → past the mouth corner) and marionette line
 pair('nl0', 'Nasolabial fold · top', 1.85, -0.85, 9.3, 'skin', 'face', 12);
 pair('nl3', 'Nasolabial fold · end', 3.15, 2.15, 8.3, 'skin', 'face', 13);
-pair('mar', 'Marionette line', 2.7, 3.2, 8.4, 'skin', 'face', 11);
+pair('mar', 'Marionette line', 2.95, 3.55, 7.95, 'skin', 'face', 11);
+pair('pjs', 'Marionette line · at the jaw (pre-jowl)', 3.05, 5.2, 7.5, 'skin', 'face', 9);
 // forehead and chin pad
 pair('fhU', 'Upper forehead', 2.0, -10.8, 8.6, 'skin', 'face', 5);
 pair('cpl', 'Chin pad · lower', 0.9, 5.45, 9.2, 'skin', 'face', 9);
@@ -264,7 +268,8 @@ const FRONT_CONTOURS = [
   { id: 'eyeL', closed: true, snapFine: true, ids: ['enL', 'eu1L', 'eu2L', 'eu3L', 'exL', 'el4L', 'el3L', 'el2L', 'el1L', 'el0L'] },
   { id: 'eyeR', closed: true, snapFine: true, ids: ['enR', 'eu1R', 'eu2R', 'eu3R', 'exR', 'el4R', 'el3R', 'el2R', 'el1R', 'el0R'] },
   { id: 'ridge', ids: ['n', 'rhi', 'dor', 'prn', 'col', 'sn'] },
-  { id: 'nostrils', ids: ['acL', 'alL', 'nosL', 'sn', 'nosR', 'alR', 'acR'] },
+  // the nostril sills: alar base → nostril → nose base (the wing itself is the end of noseEdge, ar1 → al → ac)
+  { id: 'nostrils', ids: ['acL', 'nosL', 'sn', 'nosR', 'acR'] },
   { id: 'lips', closed: true, snapFine: true, ids: ['chL', 'ulL', 'cphL', 'ls', 'cphR', 'ulR', 'chR', 'llR', 'li', 'llL'] },
   { id: 'mouth', ids: ['chL', 'sto', 'chR'] },
   { id: 'earL', closed: true, ids: ['obsL', 'saL', 'hxUL', 'eoL', 'hbL', 'hx3L', 'lobL', 'obiL', 'traL'] },
@@ -275,8 +280,7 @@ const FRONT_CONTOURS = [
   ...['L', 'R'].flatMap(s => [
     { id: 'crease' + s, line: true, ids: ['cr1', 'cr2', 'cr3', 'cr4'].map(i => i + s) },
     { id: 'cheekbone' + s, line: true, bone: true, ids: ['malar', 'zr1', 'zr2', 'zy'].map(i => i + s) },
-    { id: 'submalar' + s, line: true, bone: true, ids: ['sm1', 'sm2', 'sm3'].map(i => i + s) },
-    { id: 'hollow' + s, line: true, ids: ['sm2', 'hcm', 'nl3'].map(i => i + s) },
+    { id: 'hollow' + s, line: true, ids: ['sm3', 'sm2', 'hcm', 'nl3', 'mar', 'pjs'].map(i => i + s) },
     { id: 'nasolabial' + s, line: true, ids: ['nl0', 'nl1', 'nl2', 'nl3'].map(i => i + s) },
     { id: 'dorsum' + s, line: true, ids: ['dl1', 'dl2', 'tdp'].map(i => i + s) },
     { id: 'noseEdge' + s, line: true, ids: ['ne1', 'nsd', 'ne2', 'nsw', 'ar1', 'al', 'ac'].map(i => i + s) },
@@ -311,8 +315,7 @@ const PROFILE_CONTOURS = [
   { id: 'neckBack', snap: true, ids: ['nape', 'neckB'] },
   { id: 'crease', line: true, ids: ['cr1#', 'cr2#', 'cr3#', 'cr4#'] },
   { id: 'cheekbone', line: true, bone: true, ids: ['malar#', 'zr1#', 'zr2#', 'za#'] },
-  { id: 'submalar', line: true, bone: true, ids: ['sm1#', 'sm2#', 'sm3#'] },
-  { id: 'hollow', line: true, ids: ['sm2#', 'hcm#', 'nl3#'] },
+  { id: 'hollow', line: true, ids: ['sm3#', 'sm2#', 'hcm#', 'nl3#', 'mar#', 'pjs#'] },
   { id: 'nasolabial', line: true, ids: ['nl0#', 'nl1#', 'nl2#', 'nl3#'] },
   { id: 'browRidge', line: true, bone: true, ids: ['so1#', 'supra#', 'so3#', 'so4#'] },
   { id: 'orbit', line: true, bone: true, ids: ['so4#', 'lor#', 'ior#', 'tt3#', 'tt2#'] },
@@ -438,8 +441,9 @@ const OPS = [
   // ---- soft tissue ----
   { key: 'fat', label: 'Facial fat', level: 'soft', mag: .35, dir: 'normal', all: true, affects: SOFT_GROUPS.concat(['neck']),
     help: 'Overall soft-tissue volume — moves most where the tissue is thickest (cheeks, jowls, under the chin)' },
-  { key: 'buccal', label: 'Cheek hollows', level: 'soft', mag: -.42, dir: 'normal', regions: [[4.7, .6, 6.0, 1.6]], affects: SKIN,
-    help: 'Buccal fat — positive hollows the cheeks below the cheekbones' },
+  // along the cheek-hollow line: under the cheekbone, down beside the mouth and the marionette line to the jaw by the chin
+  { key: 'buccal', label: 'Cheek hollows', level: 'soft', mag: -.42, dir: 'normal', regions: [[4.7, .2, 6.3, 1.5], [3.9, 2.0, 7.2, 1.25], [3.25, 3.9, 7.7, 1.05]], affects: ['outline', 'skin'],
+    help: 'Buccal fat — positive hollows the cheeks: under the cheekbones and down beside the mouth along the marionette lines to the jaw' },
   { key: 'underEye', label: 'Under-eye hollows', level: 'soft', mag: -.25, dir: 'normal', regions: [[2.6, -3.9, 8.1, .8]], affects: ['skin', 'outline'] },
   { key: 'hooding', label: 'Upper lid fold', level: 'soft', mag: .32, dir: 'browDrop', regions: [[3.1, -6.25, 8.3, .7], [4.2, -6.0, 7.4, .7], [2.0, -6.2, 8.6, .6]], affects: ['skin', 'brows'],
     help: 'The skin and fat between brow and lid crease hang over the upper lid — the lid itself stays where it is' },
@@ -653,6 +657,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '23',
+  mls, tpsFit, tpsEval, spline, build: '24',
 };
 })();
