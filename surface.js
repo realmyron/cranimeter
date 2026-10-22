@@ -127,25 +127,50 @@ function corr(a, b, w) {
 
 /* ------------------------------------------------------------------- build -- */
 
+/** Median of the values where the weight is above .5 (a sample of up to 4000). */
+function wmedian(a, w) {
+  const v = [];
+  const step = Math.max(1, Math.floor(a.length / 4000));
+  for (let k = 0; k < a.length; k += step) if (w[k] > .5) v.push(a[k]);
+  if (!v.length) return 0;
+  v.sort((x, y) => x - y);
+  return v[v.length >> 1];
+}
 /**
  * inp: { gw, gh, h (cm per node), act (Uint8, the face), skin (0…1 data weight: face minus eyes,
  *        brows, lips, nostrils, faded at the edge), z0 (prior depth, cm), lum (linear luminance),
- *        trust (0 = keep the map's shape … 1 = follow the photo's shading) }
+ *        rgb (optional, linear colour per node), prior (optional 0…1: where the dots pin the shape
+ *        down well — nose, eyes, mouth), hint (optional −1…1: painted shadow … highlight),
+ *        ignore (optional 0…1: painted "not shape"), trust (0 = keep the map's shape … 1 = follow the photo) }
  * Returns { z, z0, light [a0, ax, ay, az], rho, I, fit0, fit1, … } — async, yields between passes.
  */
 async function build(inp, onProgress) {
-  const { gw, gh, h, act, skin, z0, lum } = inp, trust = inp.trust == null ? .6 : inp.trust;
-  const n = gw * gh;
+  const { gw, gh, h, act, z0, lum } = inp, trust = inp.trust == null ? .5 : inp.trust;
+  const n = gw * gh, hint = inp.hint, ign = inp.ignore, prior = inp.prior;
+  const skin = Float32Array.from(inp.skin);
+  // Light and shade change brightness, not colour. Where the colour differs from the face's skin
+  // (stubble, lashes, dark circles, moles, make-up) the brightness isn't shape: trust it less.
+  if (ign) for (let k = 0; k < n; k++) skin[k] *= 1 - ign[k];
+  if (inp.rgb) {
+    const rgb = inp.rgb, cr = new Float32Array(n), cg = new Float32Array(n);
+    for (let k = 0; k < n; k++) { const t = rgb[3 * k] + rgb[3 * k + 1] + rgb[3 * k + 2] || 1e-6; cr[k] = rgb[3 * k] / t; cg[k] = rgb[3 * k + 1] / t; }
+    const sr = blur(cr, gw, gh, 1, act, 1), sg = blur(cg, gw, gh, 1, act, 1);
+    const mr = wmedian(sr, skin), mg = wmedian(sg, skin), d = new Float32Array(n);
+    for (let k = 0; k < n; k++) d[k] = Math.hypot(sr[k] - mr, sg[k] - mg);
+    const sig = Math.max(.004, 1.4826 * wmedian(d, skin));
+    for (let k = 0; k < n; k++) skin[k] *= Math.exp(-((d[k] / (2.5 * sig)) ** 2));
+  }
   // brightness, normalised to the skin's mean; pores and stubble smoothed away
   let ms = 0, mc = 0;
-  for (let k = 0; k < n; k++) if (skin[k] > .5) { ms += lum[k]; mc++; }
-  const mean = ms / Math.max(1, mc) || 1, I = new Float32Array(n);
+  for (let k = 0; k < n; k++) if (skin[k] > .3) { ms += lum[k] * skin[k]; mc += skin[k]; }
+  const mean = ms / Math.max(1e-6, mc) || 1, I = new Float32Array(n);
   for (let k = 0; k < n; k++) I[k] = lum[k] / mean;
   const Is = blur(I, gw, gh, 1, act, 1);
   // light from the prior's normals
   const g0 = gradient(z0, gw, gh, h, act);
   const L = fitLight(Is, g0.gx, g0.gy, skin);
-  // albedo: what the light doesn't explain, kept smooth (skin colour changes slowly)
+  // albedo: what the light doesn't explain, kept smooth (skin colour changes slowly). Painted
+  // highlights and shadows are shape, so they stay out of it.
   const rho = new Float32Array(n), wr = new Float32Array(n);
   let Imax = 0;
   for (let k = 0; k < n; k++) if (skin[k] > .5) Imax = Math.max(Imax, Is[k]);
@@ -153,17 +178,22 @@ async function build(inp, onProgress) {
     if (!act[k]) continue;
     const s0 = shade(L, g0.gx[k], g0.gy[k]);
     rho[k] = Is[k] / Math.max(.05, s0);
-    wr[k] = skin[k] * (s0 > .15 ? 1 : 0);
+    wr[k] = skin[k] * (s0 > .15 ? 1 : 0) * (hint ? 1 - Math.min(1, Math.abs(hint[k])) : 1);
   }
   const rhoLP = blur(rho, gw, gh, Math.max(2, Math.round(.9 / h)), wr, 2);
   for (let k = 0; k < n; k++) rhoLP[k] = Math.min(2.5, Math.max(.4, rhoLP[k] || 1));
-  // data weights: skin, minus blown highlights and deep attached shadow
-  const wd = new Float32Array(n);
+  // the brightness to match: the photo's, pushed up / down where highlights / shadows were painted
+  const T = new Float32Array(n);
+  for (let k = 0; k < n; k++) T[k] = hint && hint[k] ? Is[k] * (1 + .45 * hint[k]) : Is[k];
+  // data weights: skin, minus blown highlights and deep attached shadow; painted hints count more
+  const wd0 = new Float32Array(n);
   for (let k = 0; k < n; k++) {
     if (!skin[k]) continue;
-    const s0 = shade(L, g0.gx[k], g0.gy[k]);
-    wd[k] = skin[k] * (Is[k] > .97 * Imax ? 0 : 1) * (s0 < .12 ? .25 : 1);
+    const s0 = shade(L, g0.gx[k], g0.gy[k]), hk = hint ? Math.abs(hint[k]) : 0;
+    wd0[k] = skin[k] * (Is[k] > .97 * Imax && !hk ? 0 : 1) * (s0 < .12 ? .25 : 1) * (1 + 1.5 * hk);
+    if (hk && !wd0[k]) wd0[k] = hk;
   }
+  const wd = Float32Array.from(wd0);
   // node sets: U = unknowns (face nodes away from its edge), D = data rows, R = smoothness rows
   const inner = k => { const i = k % gw, j = (k / gw) | 0; return i > 0 && j > 0 && i < gw - 1 && j < gh - 1 && act[k] && act[k - 1] && act[k + 1] && act[k - gw] && act[k + gw]; };
   const Ul = [], Dl = [], Rl = [];
@@ -174,7 +204,10 @@ async function build(inp, onProgress) {
     if (inner(k)) { Dl.push(k); if (inner(k - 1) && inner(k + 1) && inner(k - gw) && inner(k + gw)) Ul.push(k); }
   }
   const U = Int32Array.from(Ul), D = Int32Array.from(Dl), R = Int32Array.from(Rl);
-  const alpha = .05 * Math.pow(10, (.5 - trust) * 2.4), beta = .01;
+  // smoothness (alpha) and pull toward the prior (beta, stronger where the dots define the shape)
+  const alpha = .08 * Math.pow(10, (.5 - trust) * 2.4), beta = .02;
+  const bk = new Float32Array(n);
+  for (let k = 0; k < n; k++) bk[k] = beta * (1 + 30 * (prior ? prior[k] : 0));
   const inv2h = 1 / (2 * h), invh2 = 1 / (h * h);
   const [a0, a1, a2, a3] = L;
   const dz = new Float32Array(n), c = new Float32Array(n), u = new Float32Array(n), Lv = new Float32Array(n);
@@ -187,10 +220,10 @@ async function build(inp, onProgress) {
     for (let q = 0; q < U.length; q++) {
       const i = U[q];
       out[i] = (a1 * (u[i + 1] - u[i - 1]) + a2 * (u[i + gw] - u[i - gw])) * inv2h
-        + alpha * (Lv[i + 1] + Lv[i - 1] + Lv[i + gw] + Lv[i - gw] - 4 * Lv[i]) * invh2 + beta * v[i];
+        + alpha * (Lv[i + 1] + Lv[i - 1] + Lv[i + gw] + Lv[i - gw] - 4 * Lv[i]) * invh2 + bk[i] * v[i];
     }
   };
-  const OUTER = 4, ITERS = 140;
+  const OUTER = 5, ITERS = 140;
   const b = new Float32Array(n), rhs = new Float32Array(n), Minv = new Float32Array(n);
   const r = new Float32Array(n), zz = new Float32Array(n), p = new Float32Array(n), Ap = new Float32Array(n);
   for (let outer = 0; outer < OUTER; outer++) {
@@ -204,7 +237,15 @@ async function build(inp, onProgress) {
       c[k] = rhoLP[k] / N;
       // the part of the predicted shading that doesn't depend on dz
       const lin0 = c[k] * (-a1 * g0.gx[k] - a2 * g0.gy[k]);
-      b[k] = Is[k] - rhoLP[k] * (a0 + a3 / N) - lin0;
+      b[k] = T[k] - rhoLP[k] * (a0 + a3 / N) - lin0;
+    }
+    // robust weights (after the first pass): spots the shading can't explain are likely colour, not shape
+    if (outer > 0) {
+      let se = 0, sw = 0;
+      const e = new Float32Array(n);
+      for (let q = 0; q < D.length; q++) { const k = D[q]; e[k] = T[k] - rhoLP[k] * shade(L, g.gx[k], g.gy[k]); se += wd0[k] * e[k] * e[k]; sw += wd0[k]; }
+      const sig = Math.sqrt(se / Math.max(1e-6, sw)) || 1;
+      for (let q = 0; q < D.length; q++) { const k = D[q], t = Math.abs(e[k]) / (1.5 * sig); wd[k] = wd0[k] * (t <= 1 ? 1 : 1 / (t * t)); }
     }
     // right-hand side Gᵀ W b, and a Jacobi preconditioner
     u.fill(0);
@@ -213,7 +254,7 @@ async function build(inp, onProgress) {
     for (let q = 0; q < U.length; q++) { const i = U[q]; rhs[i] = (a1 * (u[i + 1] - u[i - 1]) + a2 * (u[i + gw] - u[i - gw])) * inv2h; }
     for (let q = 0; q < U.length; q++) {
       const i = U[q];
-      let d = beta + alpha * 20 * invh2 * invh2;
+      let d = bk[i] + alpha * 20 * invh2 * invh2;
       for (const k of [i - 1, i + 1]) d += wd[k] * (c[k] * a1 * inv2h) ** 2;
       for (const k of [i - gw, i + gw]) d += wd[k] * (c[k] * a2 * inv2h) ** 2;
       Minv[i] = 1 / d;
@@ -241,18 +282,19 @@ async function build(inp, onProgress) {
     if (onProgress) onProgress((outer + 1) / OUTER);
     await new Promise(res => setTimeout(res, 0));
   }
-  // keep the corrections bounded (a single photo can't move bone by centimetres)
+  // the correction is smoothed a little (fine detail in brightness is mostly skin texture) and
+  // kept bounded (a single photo can't move bone by centimetres)
+  const dzs = blur(dz, gw, gh, Math.max(1, Math.round(.22 / h)), act, 1);
   const z = new Float32Array(n);
-  for (let k = 0; k < n; k++) z[k] = z0[k] + Math.max(-1.2, Math.min(1.2, dz[k]));
+  for (let k = 0; k < n; k++) z[k] = z0[k] + Math.max(-1, Math.min(1, act[k] ? dzs[k] : 0));
   const g1 = gradient(z, gw, gh, h, act), S0 = new Float32Array(n), S1 = new Float32Array(n);
   for (let k = 0; k < n; k++) if (act[k]) { S0[k] = rhoLP[k] * shade(L, g0.gx[k], g0.gy[k]); S1[k] = rhoLP[k] * shade(L, g1.gx[k], g1.gy[k]); }
   const lightDir = [L[1], L[2], L[3]], ll = Math.hypot(...lightDir) || 1;
   return {
     gw, gh, h, act, skin, z0, z, light: L, dir: lightDir.map(v => v / ll), rho: rhoLP, I: Is,
-    fit0: corr(Is, S0, wd), fit1: corr(Is, S1, wd), strength: ll / Math.max(.05, Math.abs(a0) + ll),
+    fit0: corr(Is, S0, wd0), fit1: corr(Is, S1, wd0), strength: ll / Math.max(.05, Math.abs(a0) + ll),
   };
 }
-
 /* ----------------------------------------------------------- topography -- */
 
 const LABELS = [
@@ -439,7 +481,11 @@ function createViewer(canvas) {
     const tri = [], lines = [], every = Math.max(2, Math.round(.45 / h));
     for (let j = 0; j < gh - 1; j++) for (let i = 0; i < gw - 1; i++) {
       const a = idx[j * gw + i], b = idx[j * gw + i + 1], c = idx[(j + 1) * gw + i], d = idx[(j + 1) * gw + i + 1];
-      if (a >= 0 && b >= 0 && c >= 0 && d >= 0) tri.push(a, c, b, b, c, d);
+      // whole quads, and half quads along the edge (a smoother outline)
+      if (a >= 0 && b >= 0 && c >= 0) tri.push(a, c, b);
+      if (b >= 0 && c >= 0 && d >= 0) tri.push(b, c, d);
+      else if (a >= 0 && b >= 0 && d >= 0 && c < 0) tri.push(a, d, b);
+      if (a >= 0 && c >= 0 && d >= 0 && b < 0) tri.push(a, c, d);
       if (j % every === 0 && a >= 0 && b >= 0) lines.push(a, b);
       if (i % every === 0 && a >= 0 && c >= 0) lines.push(a, c);
     }
@@ -496,7 +542,7 @@ function createViewer(canvas) {
   }
   // orbit
   let drag = null;
-  canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw: st.yaw, pitch: st.pitch }; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw: st.yaw, pitch: st.pitch }; try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not a real pointer */ } });
   canvas.addEventListener('pointermove', e => {
     if (!drag) return;
     st.yaw = drag.yaw + (e.clientX - drag.x) * .01;
@@ -515,5 +561,5 @@ function createViewer(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '17' };
+window.CraniSurface = { buildSurface: build, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '18' };
 })();
