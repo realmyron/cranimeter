@@ -1,474 +1,918 @@
 /* ==========================================================================
-   Cranimeter · measurement presets & landmark glossary
-   --------------------------------------------------------------------------
-   Reference ranges are approximate norms gathered from the facial
-   anthropometry / aesthetics literature (Farkas, Martin–Saller facial index,
-   neoclassical canons, soft-tissue profile analysis). They vary with sex,
-   age and ancestry — treat them as orientation, not diagnosis.
-
-   kinds
-     ratio     4 points → line 1 (p0–p1) ÷ line 2 (p2–p3)
-     angle     3 points → angle at the middle point
-     tilt      2 points → angle of p0→p1 against the horizontal
-     segments  n points → lengths along the p0→pn axis, relative to `base`
+   Cranimeter · styles
+   Layout: one left rail (brand · tools · view · settings), the canvas,
+   and one right panel (file actions · measurements). Hint is plain text.
    ========================================================================== */
 
-window.CRANI = {
-  build: '19',
-  LANDMARKS: {
-    'Trichion': 'Midpoint of the hairline at the top of the forehead.',
-    'Glabella': 'Most prominent midline point between the eyebrows.',
-    'Nasion': 'Deepest point of the nasal root, where the nose meets the forehead.',
-    'Pupil': 'Centre of the pupil, with the eyes looking straight ahead.',
-    'Mid-pupil': 'Midline point on the line joining the two pupils.',
-    'Endocanthion': 'Inner corner of the eye, where the upper and lower lids meet.',
-    'Exocanthion': 'Outer corner of the eye, where the upper and lower lids meet.',
-    'Upper lid': 'Highest point of the upper eyelid margin.',
-    'Lower lid': 'Lowest point of the lower eyelid margin.',
-    'Frontotemporale': 'Narrowest point of the forehead at the temples, just above the brow tail.',
-    'Zygion': 'Most lateral point of the cheekbone (zygomatic arch) — the widest point of the face.',
-    'Face edge': 'Outer soft-tissue edge of the face at eye level.',
-    'Alare': 'Most lateral point of the nostril wing.',
-    'Alar crease': 'Deepest point of the crease where the nostril wing joins the cheek.',
-    'Subnasale': 'Point where the base of the columella meets the upper lip.',
-    'Pronasale': 'Most projecting point of the nasal tip.',
-    'Columella': 'A point on the underside of the nose (columella), setting its tangent.',
-    'Nasal dorsum': 'A point on the nasal bridge below nasion, setting the dorsum tangent.',
-    'Labrale superius': 'Upper border of the upper lip at the midline (centre of the cupid’s bow).',
-    'Stomion': 'Midpoint of the line where the lips meet.',
-    'Labrale inferius': 'Lower border of the lower lip at the midline.',
-    'Cheilion': 'Corner of the mouth.',
-    'Soft-tissue B point': 'Deepest point of the curve between the lower lip and the chin.',
-    'Pogonion': 'Most forward-projecting point of the soft-tissue chin.',
-    'Gnathion': 'Lowest, most forward point of the chin at the midline.',
-    'Menton': 'Lowest point of the chin.',
-    'Gonion': 'Corner of the jaw — where the jawline turns upward toward the ear.',
-    'Ramus': 'A point high on the back border of the jaw (ramus), setting its tangent.',
-    'Cervical point': 'Deepest point where the underside of the chin meets the neck.',
-    'Neck': 'A point lower on the front of the neck, setting the neck tangent.',
-  },
+:root {
+  --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --c1: #7CCBF5;
+  --c2: #F2A7C6;
+  --c3: #F0CD6E;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  --gap: 12px;
+  --rail-w: 60px;
+  --panel-w: 328px;
+  --r: 16px;
+}
 
-  GROUPS: [
-    {
-      name: 'Proportions',
-      items: [
-        {
-          id: 'fwhr', name: 'FWHR', full: 'Facial width-to-height ratio', kind: 'ratio',
-          lines: ['Bizygomatic width', 'Upper face height'],
-          pts: ['Zygion · left', 'Zygion · right', 'Nasion', 'Labrale superius'],
-          ref: [1.8, 2.0], dom: [1.4, 2.4],
-          desc: 'Cheekbone width divided by the height from the nasal root to the upper lip. Higher values read broader and more robust. Some studies measure height from the brow line instead — stay consistent.',
-        },
-        {
-          id: 'facial-index', name: 'Facial index', full: 'Morphological face height ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Face height (n–me)', 'Bizygomatic width'],
-          pts: ['Nasion', 'Menton', 'Zygion · left', 'Zygion · right'],
-          ref: [0.81, 0.88], dom: [0.70, 1.00],
-          desc: 'The classic facial index (×100). Male: euryprosopic 0.79–0.84, mesoprosopic 0.84–0.88, leptoprosopic 0.88–0.93. Female: euryprosopic 0.77–0.81, mesoprosopic 0.81–0.85, leptoprosopic 0.85–0.90.',
-          classify(v) {
-            const m = v < 0.79 ? 'hyper-eury' : v < 0.84 ? 'euryprosopic' : v < 0.88 ? 'mesoprosopic' : v < 0.93 ? 'leptoprosopic' : 'hyper-lepto';
-            const f = v < 0.77 ? 'hyper-eury' : v < 0.81 ? 'euryprosopic' : v < 0.85 ? 'mesoprosopic' : v < 0.90 ? 'leptoprosopic' : 'hyper-lepto';
-            return m === f ? m[0].toUpperCase() + m.slice(1) : `♂ ${m} · ♀ ${f}`;
-          },
-        },
-        {
-          id: 'width-height', name: 'Face width / height', full: 'Bizygomatic ÷ trichion–menton', kind: 'ratio',
-          lines: ['Bizygomatic width', 'Physiognomic face height'],
-          pts: ['Zygion · left', 'Zygion · right', 'Trichion', 'Menton'],
-          ref: [0.70, 0.75], dom: [0.58, 0.88],
-          desc: 'Face width as a share of the full face height from hairline to chin. Around 70–75% is typical; lower values read longer and more oval.',
-        },
-        {
-          id: 'midface', name: 'Midface ratio', full: 'Interpupillary distance ÷ midface height', kind: 'ratio',
-          lines: ['Interpupillary distance', 'Midface height'],
-          pts: ['Pupil · left', 'Pupil · right', 'Mid-pupil', 'Labrale superius'],
-          ref: [0.95, 1.05], dom: [0.75, 1.25],
-          desc: 'Pupil-to-pupil distance divided by the vertical drop from the pupil line to the upper lip. Values near 1.0 give a compact midface; lower values read as a longer midface.',
-        },
-        {
-          id: 'esr', name: 'Eye separation', full: 'Interpupillary ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Interpupillary distance', 'Bizygomatic width'],
-          pts: ['Pupil · left', 'Pupil · right', 'Zygion · left', 'Zygion · right'],
-          ref: [0.45, 0.47], dom: [0.38, 0.54],
-          desc: 'How far apart the eyes sit relative to face width. Around 0.45–0.47 is commonly cited as balanced.',
-        },
-        {
-          id: 'eye-spacing', name: 'Eye spacing', full: 'Intercanthal width ÷ eye width', kind: 'ratio',
-          lines: ['Intercanthal width', 'Eye width'],
-          pts: ['Endocanthion · left', 'Endocanthion · right', 'Exocanthion · one eye', 'Endocanthion · same eye'],
-          ref: [0.95, 1.05], dom: [0.70, 1.30],
-          desc: 'Rule of fifths: the gap between the eyes ideally equals one eye width. Higher reads wide-set, lower close-set.',
-        },
-        {
-          id: 'eye-ar', name: 'Eye aspect ratio', full: 'Palpebral width ÷ height', kind: 'ratio',
-          lines: ['Eye width', 'Eye height'],
-          pts: ['Exocanthion', 'Endocanthion', 'Upper lid', 'Lower lid'],
-          ref: [3.0, 3.5], dom: [2.2, 4.3],
-          desc: 'Width of the eye opening divided by its height. Higher values read narrower and more almond-shaped; lower values rounder.',
-        },
-        {
-          id: 'temple-cheek', name: 'Temple / cheek width', full: 'Bitemporal ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Bitemporal width', 'Bizygomatic width'],
-          pts: ['Frontotemporale · left', 'Frontotemporale · right', 'Zygion · left', 'Zygion · right'],
-          ref: [0.80, 0.85], dom: [0.68, 0.98],
-          desc: 'Upper-face width at the temples relative to cheekbone width. Typically 80–85%.',
-        },
-        {
-          id: 'jaw-cheek', name: 'Jaw / cheek width', full: 'Bigonial ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Bigonial width', 'Bizygomatic width'],
-          pts: ['Gonion · left', 'Gonion · right', 'Zygion · left', 'Zygion · right'],
-          ref: [0.70, 0.80], dom: [0.58, 0.95],
-          desc: 'Jaw width relative to cheekbone width — about 70–75% on average. Higher values give a squarer, more angular lower face; lower values a tapered, V-shaped one.',
-        },
-        {
-          id: 'nose-eye', name: 'Nose / eye gap', full: 'Alar width ÷ intercanthal width', kind: 'ratio',
-          lines: ['Alar width', 'Intercanthal width'],
-          pts: ['Alare · left', 'Alare · right', 'Endocanthion · left', 'Endocanthion · right'],
-          ref: [0.9, 1.1], dom: [0.7, 1.5],
-          desc: 'Neoclassical canon: nose width roughly equals the distance between the inner eye corners.',
-        },
-        {
-          id: 'mouth-nose', name: 'Mouth / nose width', full: 'Cheilion–cheilion ÷ alar width', kind: 'ratio',
-          lines: ['Mouth width', 'Alar width'],
-          pts: ['Cheilion · left', 'Cheilion · right', 'Alare · left', 'Alare · right'],
-          ref: [1.5, 1.62], dom: [1.1, 2.0],
-          desc: 'Mouth width relative to nose width. About 1.5–1.6 (close to the golden ratio) is a common aesthetic reference.',
-        },
-        {
-          id: 'chin-philtrum', name: 'Chin / philtrum', full: 'Chin height ÷ philtrum length', kind: 'ratio',
-          lines: ['Chin height', 'Philtrum length'],
-          pts: ['Labrale inferius', 'Menton', 'Subnasale', 'Labrale superius'],
-          ref: [2.0, 2.5], dom: [1.3, 3.3],
-          desc: 'Lower lip to menton, divided by subnasale to upper lip. Around 2.0–2.5 is often cited; lower values suggest a short chin or a long philtrum.',
-        },
-        {
-          id: 'lips', name: 'Lip ratio', full: 'Lower ÷ upper vermilion height', kind: 'ratio',
-          lines: ['Lower lip height', 'Upper lip height'],
-          pts: ['Stomion', 'Labrale inferius', 'Labrale superius', 'Stomion'],
-          ref: [1.4, 1.8], dom: [0.8, 2.5],
-          desc: 'Lower-lip height over upper-lip height. A lower lip about 1.6× the upper is a common aesthetic reference.',
-        },
-      ],
-    },
-    {
-      name: 'Divisions',
-      items: [
-        {
-          id: 'thirds', name: 'Facial thirds', full: 'Trichion · glabella · subnasale · menton', kind: 'segments',
-          pts: ['Trichion', 'Glabella', 'Subnasale', 'Menton'], ideal: [1, 1, 1], base: 1,
-          desc: 'Vertical canon: forehead, midface and lower face roughly equal. Each third is shown relative to the middle third. Lengths are projected onto the trichion–menton axis, so head tilt does not skew them.',
-        },
-        {
-          id: 'fifths', name: 'Facial fifths', full: 'Face width in five eye-widths', kind: 'segments',
-          pts: ['Face edge · left', 'Exocanthion · left', 'Endocanthion · left', 'Endocanthion · right', 'Exocanthion · right', 'Face edge · right'],
-          ideal: [1, 1, 1, 1, 1], base: 2,
-          desc: 'Horizontal canon: the face splits into five equal parts — two outer segments, two eye widths and the gap between the eyes. Shown relative to the central fifth.',
-        },
-        {
-          id: 'lower-third', name: 'Lower third', full: 'Subnasale · stomion · menton', kind: 'segments',
-          pts: ['Subnasale', 'Stomion', 'Menton'], ideal: [1, 2], base: 0,
-          desc: 'Upper lip (subnasale → stomion) against lips-and-chin (stomion → menton). A 1 : 2 split is the classic ideal.',
-        },
-      ],
-    },
-    {
-      name: 'Front angles',
-      items: [
-        {
-          id: 'canthal-left', name: 'Canthal tilt · left', full: 'Eye on the left of the image', kind: 'tilt',
-          pts: ['Endocanthion', 'Exocanthion'], ref: [4, 8], dom: [-6, 14],
-          desc: 'Angle of the inner→outer eye-corner line against the horizontal. Slightly positive (outer corner higher, about 4–8°) is the most commonly cited ideal. Level the head first — any head roll adds straight onto this.',
-        },
-        {
-          id: 'canthal-right', name: 'Canthal tilt · right', full: 'Eye on the right of the image', kind: 'tilt',
-          pts: ['Endocanthion', 'Exocanthion'], ref: [4, 8], dom: [-6, 14],
-          desc: 'Angle of the inner→outer eye-corner line against the horizontal. Slightly positive (outer corner higher, about 4–8°) is the most commonly cited ideal. Level the head first — any head roll adds straight onto this.',
-        },
-        {
-          id: 'jaw-frontal', name: 'Jaw frontal angle', full: 'Gonion · menton · gonion', kind: 'angle',
-          pts: ['Gonion · left', 'Menton', 'Gonion · right'], ref: [85, 95], dom: [65, 120],
-          desc: 'Angle at the chin formed by both jaw corners. Smaller angles give a narrower, more tapered chin; larger ones a broader, squarer jaw. Sources vary — treat the range loosely.',
-        },
-      ],
-    },
-    {
-      name: 'Profile',
-      items: [
-        {
-          id: 'gonial', name: 'Gonial angle', full: 'Ramus · gonion · menton', kind: 'angle',
-          pts: ['Ramus', 'Gonion', 'Menton'], ref: [120, 130], dom: [100, 145],
-          desc: 'Jaw angle in profile, between the back border of the ramus and the lower border of the mandible. Roughly 120–130° is typical; lower values give a sharper, more defined angle.',
-        },
-        {
-          id: 'convexity', name: 'Facial convexity', full: 'Glabella · subnasale · pogonion', kind: 'angle',
-          pts: ['Glabella', 'Subnasale', 'Pogonion'], ref: [164, 172], dom: [148, 180],
-          desc: 'Soft-tissue contour angle — on average about 12 ± 4° short of a straight line (≈ 168°). Smaller values mean a more convex profile (retruded chin). A concave profile also reads close to 180° here.',
-        },
-        {
-          id: 'nasofrontal', name: 'Nasofrontal angle', full: 'Glabella · nasion · nasal dorsum', kind: 'angle',
-          pts: ['Glabella', 'Nasion', 'Nasal dorsum'], ref: [115, 135], dom: [100, 150],
-          desc: 'Angle at the root of the nose between forehead and nasal bridge. About 115–135° is the commonly cited range.',
-        },
-        {
-          id: 'nasolabial', name: 'Nasolabial angle', full: 'Columella · subnasale · upper lip', kind: 'angle',
-          pts: ['Columella', 'Subnasale', 'Labrale superius'], ref: [90, 110], dom: [70, 130],
-          desc: 'Angle between the underside of the nose and the upper lip. About 90–95° is typical for men and 95–110° for women; it reflects nasal tip rotation.',
-        },
-        {
-          id: 'mentolabial', name: 'Mentolabial angle', full: 'Lower lip · sulcus · pogonion', kind: 'angle',
-          pts: ['Labrale inferius', 'Soft-tissue B point', 'Pogonion'], ref: [110, 130], dom: [85, 155],
-          desc: 'Depth of the fold between lower lip and chin. Around 110–130° is typical; smaller means a deeper fold.',
-        },
-        {
-          id: 'cervicomental', name: 'Cervicomental angle', full: 'Chin · cervical point · neck', kind: 'angle',
-          pts: ['Menton', 'Cervical point', 'Neck'], ref: [105, 120], dom: [85, 145],
-          desc: 'Angle between the underside of the chin and the neck. About 105–120° reads as a crisp jaw–neck transition; larger values look softer.',
-        },
-        {
-          id: 'goode', name: 'Goode ratio', full: 'Nasal tip projection ÷ nasal length', kind: 'ratio',
-          lines: ['Tip projection', 'Nasal length'],
-          pts: ['Alar crease', 'Pronasale', 'Nasion', 'Pronasale'],
-          ref: [0.55, 0.60], dom: [0.42, 0.72],
-          desc: 'Tip projection (alar crease → tip) over nasal length (nasion → tip). 0.55–0.60 is the classic ideal; higher means an over-projected tip.',
-        },
-      ],
-    },
-  ],
-};
-a/* ==========================================================================
-   Cranimeter · measurement presets & landmark glossary
-   --------------------------------------------------------------------------
-   Reference ranges are approximate norms gathered from the facial
-   anthropometry / aesthetics literature (Farkas, Martin–Saller facial index,
-   neoclassical canons, soft-tissue profile analysis). They vary with sex,
-   age and ancestry — treat them as orientation, not diagnosis.
+:root[data-theme="dark"] {
+  --bg: #080A0F;
+  --panel: rgba(16, 20, 30, .78);
+  --panel-solid: #121724;
+  --line: rgba(150, 175, 235, .08);
+  --line-strong: rgba(150, 175, 235, .15);
+  --text: #E7EBF4;
+  --muted: #8B94A8;
+  --faint: #5A6377;
+  --hover: rgba(130, 160, 240, .06);
+  --press: rgba(130, 160, 240, .11);
+  --blue: #7EA6FF;
+  --sel: rgba(110, 150, 255, .13);
+  --sel-ring: rgba(126, 166, 255, .32);
+  --accent: #E7EBF4;
+  --accent-ink: #0A0F1C;
+  --dot-rgb: 175, 195, 255;
+  --shadow: 0 20px 50px -20px rgba(0, 0, 0, .8), 0 2px 8px rgba(0, 0, 0, .3);
+  --ok: #6EE7B7;
+  --backdrop:
+    radial-gradient(1100px 760px at 22% -8%, rgba(72, 108, 220, .17), transparent 62%),
+    radial-gradient(900px 700px at 92% 108%, rgba(132, 92, 220, .11), transparent 60%),
+    radial-gradient(700px 520px at 70% 40%, rgba(40, 150, 200, .05), transparent 70%);
+  --rim-hi: rgba(200, 215, 255, .30);
+  --rim-mid: rgba(170, 190, 255, .09);
+  --rim-lo: rgba(170, 190, 255, .035);
+  --rim-base: rgba(170, 190, 255, .055);
+  --sheen: rgba(170, 195, 255, .05);
+  --inset-hi: rgba(200, 215, 255, .07);
+  color-scheme: dark;
+}
 
-   kinds
-     ratio     4 points → line 1 (p0–p1) ÷ line 2 (p2–p3)
-     angle     3 points → angle at the middle point
-     tilt      2 points → angle of p0→p1 against the horizontal
-     segments  n points → lengths along the p0→pn axis, relative to `base`
-   ========================================================================== */
+:root[data-theme="light"] {
+  --bg: #EFF2F7;
+  --panel: rgba(255, 255, 255, .74);
+  --panel-solid: #FFFFFF;
+  --line: rgba(25, 45, 95, .09);
+  --line-strong: rgba(25, 45, 95, .16);
+  --text: #111827;
+  --muted: #5E6779;
+  --faint: #98A0B0;
+  --hover: rgba(40, 80, 190, .05);
+  --press: rgba(40, 80, 190, .09);
+  --blue: #2F62D9;
+  --sel: rgba(47, 98, 217, .1);
+  --sel-ring: rgba(47, 98, 217, .28);
+  --accent: #111827;
+  --accent-ink: #FFFFFF;
+  --dot-rgb: 30, 50, 100;
+  --shadow: 0 20px 50px -22px rgba(20, 35, 80, .3), 0 2px 8px rgba(20, 35, 80, .07), 0 0 0 1px rgba(20, 35, 80, .05);
+  --ok: #059669;
+  --backdrop:
+    radial-gradient(1100px 760px at 22% -8%, rgba(90, 135, 245, .16), transparent 62%),
+    radial-gradient(900px 700px at 92% 108%, rgba(240, 160, 200, .14), transparent 60%),
+    radial-gradient(700px 520px at 70% 40%, rgba(120, 200, 230, .08), transparent 70%);
+  --rim-hi: rgba(255, 255, 255, 1);
+  --rim-mid: rgba(255, 255, 255, .6);
+  --rim-lo: rgba(25, 45, 95, .04);
+  --rim-base: rgba(25, 45, 95, .08);
+  --sheen: rgba(255, 255, 255, .6);
+  --inset-hi: rgba(255, 255, 255, .9);
+  color-scheme: light;
+}
 
-window.CRANI = {
-  build: '19',
-  LANDMARKS: {
-    'Trichion': 'Midpoint of the hairline at the top of the forehead.',
-    'Glabella': 'Most prominent midline point between the eyebrows.',
-    'Nasion': 'Deepest point of the nasal root, where the nose meets the forehead.',
-    'Pupil': 'Centre of the pupil, with the eyes looking straight ahead.',
-    'Mid-pupil': 'Midline point on the line joining the two pupils.',
-    'Endocanthion': 'Inner corner of the eye, where the upper and lower lids meet.',
-    'Exocanthion': 'Outer corner of the eye, where the upper and lower lids meet.',
-    'Upper lid': 'Highest point of the upper eyelid margin.',
-    'Lower lid': 'Lowest point of the lower eyelid margin.',
-    'Frontotemporale': 'Narrowest point of the forehead at the temples, just above the brow tail.',
-    'Zygion': 'Most lateral point of the cheekbone (zygomatic arch) — the widest point of the face.',
-    'Face edge': 'Outer soft-tissue edge of the face at eye level.',
-    'Alare': 'Most lateral point of the nostril wing.',
-    'Alar crease': 'Deepest point of the crease where the nostril wing joins the cheek.',
-    'Subnasale': 'Point where the base of the columella meets the upper lip.',
-    'Pronasale': 'Most projecting point of the nasal tip.',
-    'Columella': 'A point on the underside of the nose (columella), setting its tangent.',
-    'Nasal dorsum': 'A point on the nasal bridge below nasion, setting the dorsum tangent.',
-    'Labrale superius': 'Upper border of the upper lip at the midline (centre of the cupid’s bow).',
-    'Stomion': 'Midpoint of the line where the lips meet.',
-    'Labrale inferius': 'Lower border of the lower lip at the midline.',
-    'Cheilion': 'Corner of the mouth.',
-    'Soft-tissue B point': 'Deepest point of the curve between the lower lip and the chin.',
-    'Pogonion': 'Most forward-projecting point of the soft-tissue chin.',
-    'Gnathion': 'Lowest, most forward point of the chin at the midline.',
-    'Menton': 'Lowest point of the chin.',
-    'Gonion': 'Corner of the jaw — where the jawline turns upward toward the ear.',
-    'Ramus': 'A point high on the back border of the jaw (ramus), setting its tangent.',
-    'Cervical point': 'Deepest point where the underside of the chin meets the neck.',
-    'Neck': 'A point lower on the front of the neck, setting the neck tangent.',
-  },
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--backdrop), var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font: 13px/1.45 var(--font);
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color .35s ease;
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+input { font: inherit; color: inherit; }
+svg { display: block; }
+kbd {
+  font: 500 10.5px var(--mono);
+  padding: 1px 5px;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px var(--line-strong), inset 0 -1px 0 var(--line);
+  color: var(--text);
+}
+.ic { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
-  GROUPS: [
-    {
-      name: 'Proportions',
-      items: [
-        {
-          id: 'fwhr', name: 'FWHR', full: 'Facial width-to-height ratio', kind: 'ratio',
-          lines: ['Bizygomatic width', 'Upper face height'],
-          pts: ['Zygion · left', 'Zygion · right', 'Nasion', 'Labrale superius'],
-          ref: [1.8, 2.0], dom: [1.4, 2.4],
-          desc: 'Cheekbone width divided by the height from the nasal root to the upper lip. Higher values read broader and more robust. Some studies measure height from the brow line instead — stay consistent.',
-        },
-        {
-          id: 'facial-index', name: 'Facial index', full: 'Morphological face height ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Face height (n–me)', 'Bizygomatic width'],
-          pts: ['Nasion', 'Menton', 'Zygion · left', 'Zygion · right'],
-          ref: [0.81, 0.88], dom: [0.70, 1.00],
-          desc: 'The classic facial index (×100). Male: euryprosopic 0.79–0.84, mesoprosopic 0.84–0.88, leptoprosopic 0.88–0.93. Female: euryprosopic 0.77–0.81, mesoprosopic 0.81–0.85, leptoprosopic 0.85–0.90.',
-          classify(v) {
-            const m = v < 0.79 ? 'hyper-eury' : v < 0.84 ? 'euryprosopic' : v < 0.88 ? 'mesoprosopic' : v < 0.93 ? 'leptoprosopic' : 'hyper-lepto';
-            const f = v < 0.77 ? 'hyper-eury' : v < 0.81 ? 'euryprosopic' : v < 0.85 ? 'mesoprosopic' : v < 0.90 ? 'leptoprosopic' : 'hyper-lepto';
-            return m === f ? m[0].toUpperCase() + m.slice(1) : `♂ ${m} · ♀ ${f}`;
-          },
-        },
-        {
-          id: 'width-height', name: 'Face width / height', full: 'Bizygomatic ÷ trichion–menton', kind: 'ratio',
-          lines: ['Bizygomatic width', 'Physiognomic face height'],
-          pts: ['Zygion · left', 'Zygion · right', 'Trichion', 'Menton'],
-          ref: [0.70, 0.75], dom: [0.58, 0.88],
-          desc: 'Face width as a share of the full face height from hairline to chin. Around 70–75% is typical; lower values read longer and more oval.',
-        },
-        {
-          id: 'midface', name: 'Midface ratio', full: 'Interpupillary distance ÷ midface height', kind: 'ratio',
-          lines: ['Interpupillary distance', 'Midface height'],
-          pts: ['Pupil · left', 'Pupil · right', 'Mid-pupil', 'Labrale superius'],
-          ref: [0.95, 1.05], dom: [0.75, 1.25],
-          desc: 'Pupil-to-pupil distance divided by the vertical drop from the pupil line to the upper lip. Values near 1.0 give a compact midface; lower values read as a longer midface.',
-        },
-        {
-          id: 'esr', name: 'Eye separation', full: 'Interpupillary ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Interpupillary distance', 'Bizygomatic width'],
-          pts: ['Pupil · left', 'Pupil · right', 'Zygion · left', 'Zygion · right'],
-          ref: [0.45, 0.47], dom: [0.38, 0.54],
-          desc: 'How far apart the eyes sit relative to face width. Around 0.45–0.47 is commonly cited as balanced.',
-        },
-        {
-          id: 'eye-spacing', name: 'Eye spacing', full: 'Intercanthal width ÷ eye width', kind: 'ratio',
-          lines: ['Intercanthal width', 'Eye width'],
-          pts: ['Endocanthion · left', 'Endocanthion · right', 'Exocanthion · one eye', 'Endocanthion · same eye'],
-          ref: [0.95, 1.05], dom: [0.70, 1.30],
-          desc: 'Rule of fifths: the gap between the eyes ideally equals one eye width. Higher reads wide-set, lower close-set.',
-        },
-        {
-          id: 'eye-ar', name: 'Eye aspect ratio', full: 'Palpebral width ÷ height', kind: 'ratio',
-          lines: ['Eye width', 'Eye height'],
-          pts: ['Exocanthion', 'Endocanthion', 'Upper lid', 'Lower lid'],
-          ref: [3.0, 3.5], dom: [2.2, 4.3],
-          desc: 'Width of the eye opening divided by its height. Higher values read narrower and more almond-shaped; lower values rounder.',
-        },
-        {
-          id: 'temple-cheek', name: 'Temple / cheek width', full: 'Bitemporal ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Bitemporal width', 'Bizygomatic width'],
-          pts: ['Frontotemporale · left', 'Frontotemporale · right', 'Zygion · left', 'Zygion · right'],
-          ref: [0.80, 0.85], dom: [0.68, 0.98],
-          desc: 'Upper-face width at the temples relative to cheekbone width. Typically 80–85%.',
-        },
-        {
-          id: 'jaw-cheek', name: 'Jaw / cheek width', full: 'Bigonial ÷ bizygomatic width', kind: 'ratio',
-          lines: ['Bigonial width', 'Bizygomatic width'],
-          pts: ['Gonion · left', 'Gonion · right', 'Zygion · left', 'Zygion · right'],
-          ref: [0.70, 0.80], dom: [0.58, 0.95],
-          desc: 'Jaw width relative to cheekbone width — about 70–75% on average. Higher values give a squarer, more angular lower face; lower values a tapered, V-shaped one.',
-        },
-        {
-          id: 'nose-eye', name: 'Nose / eye gap', full: 'Alar width ÷ intercanthal width', kind: 'ratio',
-          lines: ['Alar width', 'Intercanthal width'],
-          pts: ['Alare · left', 'Alare · right', 'Endocanthion · left', 'Endocanthion · right'],
-          ref: [0.9, 1.1], dom: [0.7, 1.5],
-          desc: 'Neoclassical canon: nose width roughly equals the distance between the inner eye corners.',
-        },
-        {
-          id: 'mouth-nose', name: 'Mouth / nose width', full: 'Cheilion–cheilion ÷ alar width', kind: 'ratio',
-          lines: ['Mouth width', 'Alar width'],
-          pts: ['Cheilion · left', 'Cheilion · right', 'Alare · left', 'Alare · right'],
-          ref: [1.5, 1.62], dom: [1.1, 2.0],
-          desc: 'Mouth width relative to nose width. About 1.5–1.6 (close to the golden ratio) is a common aesthetic reference.',
-        },
-        {
-          id: 'chin-philtrum', name: 'Chin / philtrum', full: 'Chin height ÷ philtrum length', kind: 'ratio',
-          lines: ['Chin height', 'Philtrum length'],
-          pts: ['Labrale inferius', 'Menton', 'Subnasale', 'Labrale superius'],
-          ref: [2.0, 2.5], dom: [1.3, 3.3],
-          desc: 'Lower lip to menton, divided by subnasale to upper lip. Around 2.0–2.5 is often cited; lower values suggest a short chin or a long philtrum.',
-        },
-        {
-          id: 'lips', name: 'Lip ratio', full: 'Lower ÷ upper vermilion height', kind: 'ratio',
-          lines: ['Lower lip height', 'Upper lip height'],
-          pts: ['Stomion', 'Labrale inferius', 'Labrale superius', 'Stomion'],
-          ref: [1.4, 1.8], dom: [0.8, 2.5],
-          desc: 'Lower-lip height over upper-lip height. A lower lip about 1.6× the upper is a common aesthetic reference.',
-        },
-      ],
-    },
-    {
-      name: 'Divisions',
-      items: [
-        {
-          id: 'thirds', name: 'Facial thirds', full: 'Trichion · glabella · subnasale · menton', kind: 'segments',
-          pts: ['Trichion', 'Glabella', 'Subnasale', 'Menton'], ideal: [1, 1, 1], base: 1,
-          desc: 'Vertical canon: forehead, midface and lower face roughly equal. Each third is shown relative to the middle third. Lengths are projected onto the trichion–menton axis, so head tilt does not skew them.',
-        },
-        {
-          id: 'fifths', name: 'Facial fifths', full: 'Face width in five eye-widths', kind: 'segments',
-          pts: ['Face edge · left', 'Exocanthion · left', 'Endocanthion · left', 'Endocanthion · right', 'Exocanthion · right', 'Face edge · right'],
-          ideal: [1, 1, 1, 1, 1], base: 2,
-          desc: 'Horizontal canon: the face splits into five equal parts — two outer segments, two eye widths and the gap between the eyes. Shown relative to the central fifth.',
-        },
-        {
-          id: 'lower-third', name: 'Lower third', full: 'Subnasale · stomion · menton', kind: 'segments',
-          pts: ['Subnasale', 'Stomion', 'Menton'], ideal: [1, 2], base: 0,
-          desc: 'Upper lip (subnasale → stomion) against lips-and-chin (stomion → menton). A 1 : 2 split is the classic ideal.',
-        },
-      ],
-    },
-    {
-      name: 'Front angles',
-      items: [
-        {
-          id: 'canthal-left', name: 'Canthal tilt · left', full: 'Eye on the left of the image', kind: 'tilt',
-          pts: ['Endocanthion', 'Exocanthion'], ref: [4, 8], dom: [-6, 14],
-          desc: 'Angle of the inner→outer eye-corner line against the horizontal. Slightly positive (outer corner higher, about 4–8°) is the most commonly cited ideal. Level the head first — any head roll adds straight onto this.',
-        },
-        {
-          id: 'canthal-right', name: 'Canthal tilt · right', full: 'Eye on the right of the image', kind: 'tilt',
-          pts: ['Endocanthion', 'Exocanthion'], ref: [4, 8], dom: [-6, 14],
-          desc: 'Angle of the inner→outer eye-corner line against the horizontal. Slightly positive (outer corner higher, about 4–8°) is the most commonly cited ideal. Level the head first — any head roll adds straight onto this.',
-        },
-        {
-          id: 'jaw-frontal', name: 'Jaw frontal angle', full: 'Gonion · menton · gonion', kind: 'angle',
-          pts: ['Gonion · left', 'Menton', 'Gonion · right'], ref: [85, 95], dom: [65, 120],
-          desc: 'Angle at the chin formed by both jaw corners. Smaller angles give a narrower, more tapered chin; larger ones a broader, squarer jaw. Sources vary — treat the range loosely.',
-        },
-      ],
-    },
-    {
-      name: 'Profile',
-      items: [
-        {
-          id: 'gonial', name: 'Gonial angle', full: 'Ramus · gonion · menton', kind: 'angle',
-          pts: ['Ramus', 'Gonion', 'Menton'], ref: [120, 130], dom: [100, 145],
-          desc: 'Jaw angle in profile, between the back border of the ramus and the lower border of the mandible. Roughly 120–130° is typical; lower values give a sharper, more defined angle.',
-        },
-        {
-          id: 'convexity', name: 'Facial convexity', full: 'Glabella · subnasale · pogonion', kind: 'angle',
-          pts: ['Glabella', 'Subnasale', 'Pogonion'], ref: [164, 172], dom: [148, 180],
-          desc: 'Soft-tissue contour angle — on average about 12 ± 4° short of a straight line (≈ 168°). Smaller values mean a more convex profile (retruded chin). A concave profile also reads close to 180° here.',
-        },
-        {
-          id: 'nasofrontal', name: 'Nasofrontal angle', full: 'Glabella · nasion · nasal dorsum', kind: 'angle',
-          pts: ['Glabella', 'Nasion', 'Nasal dorsum'], ref: [115, 135], dom: [100, 150],
-          desc: 'Angle at the root of the nose between forehead and nasal bridge. About 115–135° is the commonly cited range.',
-        },
-        {
-          id: 'nasolabial', name: 'Nasolabial angle', full: 'Columella · subnasale · upper lip', kind: 'angle',
-          pts: ['Columella', 'Subnasale', 'Labrale superius'], ref: [90, 110], dom: [70, 130],
-          desc: 'Angle between the underside of the nose and the upper lip. About 90–95° is typical for men and 95–110° for women; it reflects nasal tip rotation.',
-        },
-        {
-          id: 'mentolabial', name: 'Mentolabial angle', full: 'Lower lip · sulcus · pogonion', kind: 'angle',
-          pts: ['Labrale inferius', 'Soft-tissue B point', 'Pogonion'], ref: [110, 130], dom: [85, 155],
-          desc: 'Depth of the fold between lower lip and chin. Around 110–130° is typical; smaller means a deeper fold.',
-        },
-        {
-          id: 'cervicomental', name: 'Cervicomental angle', full: 'Chin · cervical point · neck', kind: 'angle',
-          pts: ['Menton', 'Cervical point', 'Neck'], ref: [105, 120], dom: [85, 145],
-          desc: 'Angle between the underside of the chin and the neck. About 105–120° reads as a crisp jaw–neck transition; larger values look softer.',
-        },
-        {
-          id: 'goode', name: 'Goode ratio', full: 'Nasal tip projection ÷ nasal length', kind: 'ratio',
-          lines: ['Tip projection', 'Nasal length'],
-          pts: ['Alar crease', 'Pronasale', 'Nasion', 'Pronasale'],
-          ref: [0.55, 0.60], dom: [0.42, 0.72],
-          desc: 'Tip projection (alar crease → tip) over nasal length (nasion → tip). 0.55–0.60 is the classic ideal; higher means an over-projected tip.',
-        },
-      ],
-    },
-  ],
-};
+/* ---------- layers ---------- */
+#bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+#stage { position: fixed; inset: 0; z-index: 1; overflow: hidden; }
+#imgcv, #glcv { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+#overlay { position: absolute; inset: 0; touch-action: none; }
+
+#loupe {
+  position: fixed; left: 0; top: 0; z-index: 9;
+  width: 132px; height: 132px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: #0B0B0D;
+  box-shadow: 0 0 0 1px rgba(200, 215, 255, .22), 0 0 0 4px rgba(0, 0, 0, .25), 0 14px 34px -8px rgba(0, 0, 0, .6);
+  opacity: 0;
+  transform: scale(.9);
+  transition: opacity .2s ease, transform .3s var(--ease);
+}
+#loupe.on { opacity: 1; transform: none; }
+
+/* ---------- liquid glass ---------- */
+.glass {
+  background: linear-gradient(180deg, var(--sheen) 0%, transparent 40%), var(--panel);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: 0;
+  box-shadow: var(--shadow), inset 0 1px 0 var(--inset-hi);
+}
+.glass::before {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(180deg, var(--rim-hi) 0%, var(--rim-mid) 18%, var(--rim-lo) 60%, var(--rim-base) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  z-index: 1;
+}
+
+/* ---------- buttons ---------- */
+.icon-btn {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  color: var(--muted);
+  transition: background .18s, color .18s, opacity .18s;
+}
+.icon-btn:hover { background: var(--hover); color: var(--text); }
+.icon-btn:active { background: var(--press); }
+.icon-btn:disabled { opacity: .3; pointer-events: none; }
+.icon-btn.sm { width: 30px; height: 30px; border-radius: 8px; }
+.icon-btn.sm .ic { width: 16px; height: 16px; }
+
+.btn {
+  position: relative;
+  height: 34px; padding: 0 14px;
+  border-radius: 10px;
+  background: var(--accent); color: var(--accent-ink);
+  font-weight: 550; font-size: 12.5px;
+  display: inline-flex; align-items: center; gap: 7px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 1px 2px rgba(0, 0, 0, .2);
+  transition: transform .15s var(--ease), opacity .2s, background .2s;
+  white-space: nowrap;
+}
+.btn .ic { width: 15px; height: 15px; }
+.btn:hover { opacity: .9; }
+.btn:active { transform: scale(.97); }
+.btn.ghost { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong), inset 0 1px 0 var(--inset-hi); }
+.btn.ghost:hover { background: var(--hover); opacity: 1; }
+.btn.sm { height: 30px; padding: 0 11px; font-size: 12px; border-radius: 9px; gap: 6px; }
+.btn:disabled { opacity: .4; pointer-events: none; }
+
+.chip {
+  height: 26px; padding: 0 11px;
+  border-radius: 999px;
+  font-size: 11.5px; font-weight: 500;
+  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  transition: background .2s, color .2s, box-shadow .2s;
+}
+.chip:hover { color: var(--text); background: var(--hover); }
+.chip.on { background: var(--sel); color: var(--text); box-shadow: inset 0 0 0 1px var(--sel-ring), inset 0 1px 0 var(--inset-hi); }
+
+.link { color: var(--text); font-weight: 500; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.link:hover { text-decoration-color: var(--blue); }
+
+/* tooltips */
+[data-tip] { position: relative; }
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute; z-index: 5;
+  left: calc(100% + 12px); top: 50%;
+  transform: translateY(-50%);
+  white-space: pre;
+  background: var(--panel-solid); color: var(--text);
+  border: 1px solid var(--line);
+  padding: 5px 9px; border-radius: 8px;
+  font-size: 12px; font-weight: 500;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  animation: tipIn .2s var(--ease) both;
+}
+.panel-top [data-tip]:hover::after { left: 50%; top: calc(100% + 8px); transform: translateX(-50%); }
+.ro-actions [data-tip]:hover::after { left: auto; right: 0; top: calc(100% + 6px); transform: none; }
+@keyframes tipIn { from { opacity: 0; } to { opacity: 1; } }
+
+body:not(.has-img) .needs-img { display: none !important; }
+.mobile-only { display: none !important; }
+
+/* ---------- left rail ---------- */
+/* Both side columns are docked flush to the window edges; the glass rim
+   runs only along their inner edge (bright at the top, fading downward). */
+.rail {
+  position: fixed; z-index: 10;
+  left: 0; top: 0; bottom: 0;
+  width: var(--rail-w);
+  border-radius: 0;
+  padding: 10px 10px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  box-shadow: 18px 0 44px -26px rgba(0, 0, 0, .6);
+}
+.rail::before { padding: 0 1px 0 0; }
+.rail-brand {
+  width: 40px; height: 40px;
+  display: grid; place-items: center;
+  flex: none;
+}
+.rail-brand .logo { width: 24px; height: 24px; color: var(--text); }
+.rail-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.rail-sep { width: 22px; height: 1px; background: var(--line-strong); margin: 6px 0; flex: none; }
+.rail-sep.sm { width: 14px; margin: 4px 0; background: var(--line); }
+@media (max-height: 760px) and (min-width: 861px) {
+  .tool { height: 35px; }
+  .tool.sm { height: 30px; }
+  .rail-brand { height: 34px; }
+}
+@media (max-height: 660px) and (min-width: 861px) {
+  .rail { gap: 1px; padding-top: 6px; padding-bottom: 6px; }
+  .tool { height: 31px; }
+  .tool.sm { height: 27px; }
+  .zoom-pct { height: 18px; }
+  .rail-sep { margin: 3px 0; }
+  .rail-brand { height: 30px; }
+}
+.rail-spacer { flex: 1; min-height: 8px; }
+#toolbar { animation: rise .6s var(--ease) both; }
+
+.tool {
+  position: relative;
+  width: 40px; height: 40px;
+  border-radius: 11px;
+  display: grid; place-items: center;
+  color: var(--muted);
+  flex: none;
+  transition: background .18s, color .18s, box-shadow .18s;
+}
+.tool.sm { height: 34px; }
+.tool:hover { background: var(--hover); color: var(--text); }
+.tool:active { background: var(--press); }
+.tool.on { background: var(--sel); color: var(--text); box-shadow: inset 0 0 0 1px var(--sel-ring), inset 0 1px 0 var(--inset-hi); }
+#toolbar .tool.on::before {
+  content: ''; position: absolute;
+  left: -10px; top: 11px; bottom: 11px; width: 2px;
+  border-radius: 2px; background: var(--blue);
+}
+#toolbar.locked .tool.on::before { background: var(--c1); }
+.zoom-pct {
+  width: 40px; height: 24px;
+  border-radius: 7px;
+  font: 500 10px var(--mono);
+  color: var(--muted);
+  transition: background .18s, color .18s;
+}
+.zoom-pct:hover { background: var(--hover); color: var(--text); }
+:root[data-theme="dark"] .i-sun, :root[data-theme="light"] .i-moon { display: none; }
+
+/* ---------- right panel ---------- */
+.panel {
+  position: fixed; z-index: 10;
+  right: 0; top: 0; bottom: 0;
+  width: var(--panel-w);
+  border-radius: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  box-shadow: -18px 0 44px -26px rgba(0, 0, 0, .6);
+  transform: translateX(calc(100% + 40px));
+  opacity: 0;
+  transition: transform .65s var(--ease), opacity .4s ease;
+}
+.panel::before { padding: 0 0 0 1px; }
+body.has-img .panel { transform: none; opacity: 1; }
+.panel-top {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 60px; flex: none;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+.pt-group { display: flex; align-items: center; gap: 4px; }
+/* tool options drawer (Morph / Adjust) — slides out from under the left rail */
+.toolpanel {
+  position: fixed; z-index: 9;
+  left: var(--rail-w); top: 0; bottom: 0;
+  width: 272px;
+  border-radius: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  box-shadow: 18px 0 44px -26px rgba(0, 0, 0, .6);
+  transform: translateX(calc(-100% - var(--rail-w)));
+  visibility: hidden;
+  transition: transform .5s var(--ease), visibility 0s linear .5s;
+}
+.toolpanel::before { padding: 0 1px 0 0; }
+.toolpanel.open { transform: none; visibility: visible; transition: transform .5s var(--ease), visibility 0s; }
+.topts-body { padding: 18px 16px 18px; opacity: 0; transition: opacity .3s ease .08s; }
+.toolpanel.open .topts-body { opacity: 1; }
+.topts-body kbd { font-size: 10px; padding: 0 4px; }
+.to-beta { font-size: 11px; color: var(--faint); margin-bottom: 4px; line-height: 1.45; }
+.to-beta span {
+  display: inline-block; margin-right: 6px;
+  font: 600 9.5px var(--font); letter-spacing: .08em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px;
+  color: var(--blue); background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring);
+}
+.to-confirm {
+  margin-top: 10px; padding: 10px 10px 10px;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: box-shadow .25s, background .25s;
+}
+.to-confirm.pending { background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+.to-status { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+.to-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.to-confirm.pending .to-status { color: var(--text); }
+.to-confirm.pending .to-status::before { background: var(--blue); box-shadow: 0 0 0 3px var(--sel); }
+.to-confirm .to-actions { margin-top: 8px; }
+/* Morph sub-modes and the face-map steps */
+.seg.msub { margin-bottom: 12px; }
+.seg.msub button { white-space: nowrap; }
+.seg.msub button b {
+  display: inline-grid; place-items: center;
+  width: 15px; height: 15px; margin-right: 4px;
+  border-radius: 50%;
+  font: 600 9.5px var(--font);
+  color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-strong);
+  transition: color .2s, box-shadow .2s, background .2s;
+}
+.seg.msub button.on b { color: var(--blue); background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+.seg.mmode { margin-bottom: 8px; }
+.seg.mmode button { font-size: 11.5px; padding-left: 0; padding-right: 0; }
+#mTone button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }
+.dim { opacity: .45; }
+.seg.mview { margin-bottom: 10px; }
+.seg.mview button { white-space: nowrap; font-size: 11.5px; }
+#mMapStatus { margin: 0 0 8px; color: var(--text); }
+#mQuick.on { background: var(--sel); color: var(--blue); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+.to-label { font-size: 11px; font-weight: 600; color: var(--text); margin: 4px 0 6px; }
+.to-label small { font-weight: 400; color: var(--faint); margin-left: 4px; }
+/* dot groups (click to hide) */
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.chip-dot {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px 3px 7px; border: 0; border-radius: 999px;
+  font: 500 11px var(--font); color: var(--text);
+  background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong);
+  cursor: pointer; transition: opacity .2s, box-shadow .2s, background .2s;
+}
+.chip-dot i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .3); }
+.chip-dot:hover { background: var(--hover, rgba(255, 255, 255, .05)); }
+.chip-dot.off { opacity: .45; }
+.chip-dot.off i { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c); }
+/* Morph → Looks */
+.chips.looks { margin-bottom: 12px; }
+.chip-dot.look { padding: 4px 10px; }
+.chip-dot.look.on { background: var(--sel); color: var(--blue); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+.chip-dot.look:disabled { opacity: .4; cursor: default; }
+/* Morph → Structure */
+.to-sec {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin: 12px 0 8px; padding-top: 10px; border-top: 1px solid var(--line);
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+}
+.to-sec:first-of-type { border-top: 0; padding-top: 0; margin-top: 2px; }
+.lv-key { font-size: 10.5px; font-weight: 400; color: var(--faint); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.lv-key i, i.lv { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: none; }
+.lv-key i:not(:first-child) { margin-left: 5px; }
+.to-callout { padding: 10px; border-radius: 10px; background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring); margin-bottom: 10px; }
+.to-callout .to-note { margin: 0 0 8px; color: var(--text); }
+.to-callout[hidden] { display: none; }
+.anat.disabled .anat-group { opacity: .45; pointer-events: none; }
+.anat-group { border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line); margin-bottom: 6px; overflow: hidden; }
+.anat-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 10px; border: 0; background: transparent; cursor: pointer;
+  font: 600 12px var(--font); color: var(--text); text-align: left;
+}
+.anat-head span { flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.anat-head small { font-size: 10.5px; font-weight: 400; color: var(--faint); }
+.anat-head .chev { width: 14px; height: 14px; color: var(--faint); transition: transform .25s var(--ease); }
+.anat-group.open .anat-head .chev { transform: rotate(180deg); }
+.anat-cnt { font: 600 10px var(--font); min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; display: inline-grid; place-items: center; color: var(--blue); background: var(--sel); }
+.anat-cnt:empty { display: none; }
+.anat-body { display: none; padding: 0 10px 6px; }
+.anat-group.open .anat-body { display: block; }
+/* label and value on one line, the slider full width below */
+.srow.arow { grid-template-columns: 1fr auto; grid-template-areas: 'l v' 's s'; column-gap: 8px; row-gap: 1px; padding: 4px 0 3px; }
+.srow.arow > span { grid-area: l; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow.arow > b { grid-area: v; font-size: 10.5px; color: var(--faint); }
+.srow.arow > input { grid-area: s; }
+.srow.arow.set > span { color: var(--text); }
+.srow.arow.set > b { color: var(--text); }
+/* two-sided slider: the fill grows from the centre in the level's colour */
+input[type="range"].rng.bi::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(90deg, transparent calc(50% - .5px), var(--faint) calc(50% - .5px), var(--faint) calc(50% + .5px), transparent calc(50% + .5px)) center / 100% 9px no-repeat,
+    linear-gradient(90deg, var(--line-strong) var(--lo, 50%), var(--c, var(--blue)) var(--lo, 50%), var(--c, var(--blue)) var(--hi, 50%), var(--line-strong) var(--hi, 50%));
+}
+input[type="range"].rng.bi::-moz-range-track { background: linear-gradient(90deg, var(--line-strong) var(--lo, 50%), var(--c, var(--blue)) var(--lo, 50%), var(--c, var(--blue)) var(--hi, 50%), var(--line-strong) var(--hi, 50%)); }
+input[type="range"].rng.bi::-moz-range-progress { background: transparent; }
+input[type="range"].rng:disabled { opacity: .5; cursor: default; }
+
+/* new-image popover */
+.popover.newpop { width: 280px; z-index: 35; }
+.new-drop {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 14px;
+  border-radius: 11px;
+  border: 1.5px dashed var(--line-strong);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .2s, background .2s, color .2s;
+}
+.new-drop .ic { width: 22px; height: 22px; color: var(--blue); flex: none; }
+.new-drop span { font-size: 11.5px; line-height: 1.4; }
+.new-drop b { display: block; font-size: 12.5px; color: var(--text); font-weight: 600; }
+.new-drop:hover, .new-drop.over { border-color: var(--sel-ring); background: var(--sel); }
+.new-actions { justify-content: stretch; margin-top: 10px; }
+.new-actions .btn { flex: 1; justify-content: center; }
+.new-note { margin: 10px 0 0; font-size: 11px; color: var(--faint); line-height: 1.5; }
+.tg.sm { font-size: 12.3px; padding: 6px 0; }
+.tg.sm small { font-size: 11px; line-height: 1.4; }
+body.topts-open .hint { left: calc(var(--rail-w) + 272px + 16px); }
+body.topts-open .modal { padding-left: calc(var(--rail-w) + 272px + 10px); }
+.to-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.to-title { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+.to-sub { font-size: 11.5px; color: var(--faint); }
+.to-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; margin: 2px 0 6px; }
+.seg.full { display: flex; width: 100%; margin-bottom: 8px; }
+.seg.full button { flex: 1; padding: 0 6px; height: 27px; font-size: 12px; }
+.srow { display: grid; grid-template-columns: 78px 1fr 58px; align-items: center; gap: 10px; padding: 4px 0; font-size: 12px; color: var(--muted); }
+.srow > span { cursor: default; }
+.srow b { font: 500 11px var(--mono); color: var(--text); text-align: right; white-space: nowrap; }
+.to-group { padding-top: 8px; margin-top: 6px; border-top: 1px solid var(--line); }
+.to-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.to-actions .btn.on { background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring); }
+
+input[type="range"].rng {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 18px; margin: 0;
+  background: transparent; cursor: pointer;
+}
+input[type="range"].rng::-webkit-slider-runnable-track { height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--blue) var(--p, 50%), var(--line-strong) var(--p, 50%)); }
+input[type="range"].rng::-moz-range-track { height: 3px; border-radius: 3px; background: var(--line-strong); }
+input[type="range"].rng::-moz-range-progress { height: 3px; border-radius: 3px; background: var(--blue); }
+input[type="range"].rng::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 13px; height: 13px; margin-top: -5px; border-radius: 50%;
+  background: #fff; border: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .25), 0 1px 3px rgba(0, 0, 0, .35);
+  transition: transform .15s var(--ease);
+}
+input[type="range"].rng::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 0 0 1px rgba(0, 0, 0, .25), 0 1px 3px rgba(0, 0, 0, .35); }
+input[type="range"].rng:active::-webkit-slider-thumb { transform: scale(1.15); }
+
+.panel-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px 10px 16px; }
+/* face map: its own layer above the measurements; its controls open below it when selected */
+.fmap { flex: none; padding: 0 8px 6px; border-bottom: 1px solid var(--line); }
+.fmap-head { padding: 12px 4px 6px 8px; }
+.fmap-item .dot { background: transparent; }
+.fmap-item.measured .dot { background: #7EA6FF; box-shadow: none; }
+.fmap-item.sel.measured .dot { background: #7EA6FF; box-shadow: 0 0 0 3px var(--sel); }
+.fmap-item .it-val { color: var(--faint); font-size: 10.5px; }
+.fmap-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .4s var(--ease); }
+.fmap.open .fmap-body { grid-template-rows: 1fr; }
+.fmap-inner { overflow: hidden; min-height: 0; padding: 0 6px; }
+.fmap.open .fmap-inner { overflow: auto; max-height: 46vh; padding-top: 10px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.fmap .chips { margin-bottom: 4px; }
+.ph-title { display: flex; align-items: baseline; gap: 8px; }
+.panel-head h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: -.005em; }
+.progress { font: 500 11px var(--mono); color: var(--faint); }
+
+.readout {
+  position: relative;
+  margin: 0 10px;
+  padding: 14px 14px 13px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--hover), transparent 140%);
+  box-shadow: inset 0 0 0 1px var(--line), inset 0 1px 0 var(--inset-hi);
+  max-height: 54%;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  flex: none;
+}
+.ro-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.ro-kicker { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); }
+.ro-title { font-size: 15px; font-weight: 600; letter-spacing: -.015em; margin-top: 3px; }
+.ro-sub { font-size: 11.8px; color: var(--muted); margin-top: 1px; }
+.ro-actions { display: flex; gap: 2px; margin: -5px -7px 0 0; }
+.ro-value {
+  font-size: 34px; font-weight: 600; letter-spacing: -.035em;
+  font-variant-numeric: tabular-nums;
+  margin: 10px 0 10px;
+  line-height: 1.05;
+  transition: color .3s;
+}
+.ro-value.empty { color: var(--faint); }
+.ro-value.small { font-size: 24px; }
+.rb { margin-top: 2px; }
+.rb-track { position: relative; height: 4px; border-radius: 4px; background: var(--line-strong); }
+.rb-band { position: absolute; top: 0; bottom: 0; border-radius: 4px; background: color-mix(in srgb, var(--ok) 55%, transparent); }
+.rb-mark {
+  position: absolute; top: 50%; left: 50%;
+  width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 3px var(--panel-solid);
+  opacity: 0; transition: opacity .3s;
+}
+.rb-mark.on { opacity: 1; }
+.rb-foot { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+.rb-status { text-align: right; transition: color .3s; }
+.rb-status.ok { color: var(--ok); }
+.sb { position: relative; display: flex; gap: 2px; height: 6px; }
+.sb i { display: block; height: 100%; border-radius: 3px; min-width: 2px; flex-basis: 0; opacity: .85; }
+.sb b { position: absolute; top: -4px; bottom: -4px; width: 1.5px; margin-left: -.75px; background: var(--text); opacity: .55; border-radius: 1px; }
+.ro-lines { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+.ro-lines i { display: inline-block; width: 14px; height: 2px; border-radius: 2px; vertical-align: middle; margin: -2px 8px 0 0; }
+.ro-desc { margin: 10px 0 0; font-size: 12px; color: var(--muted); line-height: 1.55; }
+.ro-steps { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+.ro-steps li {
+  font-size: 11.2px;
+  padding: 3px 9px 3px 3px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--muted);
+  display: flex; align-items: center; gap: 6px;
+  transition: color .2s, box-shadow .2s;
+}
+.ro-steps li span {
+  width: 17px; height: 17px; border-radius: 50%;
+  display: grid; place-items: center;
+  font: 500 9.5px var(--mono);
+  background: var(--sel);
+}
+.ro-steps li.done { color: var(--text); }
+.ro-steps li.done span { background: var(--blue); color: var(--accent-ink); }
+.ro-steps li.cur { color: var(--text); box-shadow: inset 0 0 0 1.5px var(--blue); }
+.ro-note { font-size: 11px; color: var(--faint); margin-top: 8px; }
+.ro-meta { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--muted); margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ro-meta + .ro-meta { margin-top: 0; border-top: 0; padding-top: 4px; }
+.ro-rows { margin-top: 10px; display: flex; flex-direction: column; }
+.ro-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+.ro-row:first-child { border-top: 0; }
+.ro-row b { color: var(--text); font: 500 12px var(--mono); white-space: nowrap; }
+.ro-row.act span { color: var(--text); }
+
+.search { position: relative; padding: 10px 10px 2px; flex: none; }
+.search .ic { position: absolute; left: 20px; top: 50%; margin-top: 4px; transform: translateY(-50%); width: 15px; height: 15px; color: var(--faint); pointer-events: none; }
+.search input {
+  width: 100%; height: 32px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  padding: 0 10px 0 31px;
+  outline: none;
+  font-size: 12.5px;
+  transition: border-color .2s, background .2s;
+}
+.search input::placeholder { color: var(--faint); }
+.search input:focus { border-color: var(--sel-ring); background: var(--hover); }
+
+.list { flex: 1; overflow: auto; padding: 2px 8px 16px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.grp-head {
+  width: 100%;
+  display: flex; align-items: center; gap: 6px;
+  padding: 12px 8px 6px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--faint);
+  transition: color .2s;
+}
+.grp-head:hover { color: var(--muted); }
+.grp-count { margin-left: auto; font: 500 10.5px var(--mono); letter-spacing: 0; text-transform: none; }
+.chev { width: 12px; height: 12px; transition: transform .3s var(--ease); }
+.grp.collapsed .chev { transform: rotate(-90deg); }
+.grp-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .4s var(--ease); }
+.grp.collapsed .grp-body { grid-template-rows: 0fr; }
+.grp-inner { overflow: hidden; min-height: 0; }
+.grp.hidden { display: none; }
+
+.item {
+  position: relative;
+  display: grid; grid-template-columns: 8px minmax(0, 1fr) auto 22px;
+  align-items: center; gap: 10px;
+  padding: 7px 6px 7px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background .18s, box-shadow .18s;
+}
+.item:hover { background: var(--hover); }
+.item.sel { background: var(--sel); box-shadow: inset 0 1px 0 var(--inset-hi); }
+.item.sel::before { content: ''; position: absolute; left: 0; top: 9px; bottom: 9px; width: 2px; border-radius: 2px; background: var(--blue); }
+.item.active::before { background: var(--c1); }
+.item.picked { box-shadow: inset 0 0 0 1px var(--sel-ring); }
+.item.hidden { display: none; }
+.dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: inset 0 0 0 1.3px var(--faint); transition: background .3s, box-shadow .3s; }
+.item.measured .dot { box-shadow: none; background: var(--muted); }
+.item.sel.measured .dot { background: var(--blue); box-shadow: 0 0 0 3px var(--sel); }
+.item.placing .dot { box-shadow: inset 0 0 0 1.5px var(--blue); animation: pulse 1.3s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: inset 0 0 0 1.5px var(--blue), 0 0 0 4px var(--sel); } }
+.it-name { display: block; font-size: 12.8px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.it-sub { display: block; font-size: 11.2px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.it-val { font: 500 11.5px var(--mono); white-space: nowrap; }
+.it-x {
+  width: 22px; height: 22px; border-radius: 6px;
+  display: grid; place-items: center;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity .15s, background .15s, color .15s;
+}
+.it-x .ic { width: 13px; height: 13px; }
+.item.measured:hover .it-x { opacity: 1; }
+.item:not(.measured) .it-x { visibility: hidden; }
+.it-x:hover { background: var(--press); color: var(--text); }
+.empty { padding: 6px 12px 4px; font-size: 12px; color: var(--faint); }
+
+/* ---------- hint (plain text) & toast ---------- */
+.hint {
+  position: fixed; z-index: 8;
+  bottom: 16px;
+  left: calc(var(--rail-w) + 16px);
+  right: calc(var(--panel-w) + 16px);
+  display: flex; justify-content: center;
+  font-size: 12.3px;
+  color: var(--muted);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .35s ease;
+  text-shadow: 0 0 10px var(--bg), 0 0 3px var(--bg), 0 1px 2px var(--bg);
+}
+body.has-img .hint.show { opacity: 1; }
+.hint-in { display: flex; align-items: center; gap: 9px; white-space: nowrap; overflow: hidden; min-width: 0; }
+.hint b { color: var(--text); font-weight: 600; }
+.h-step { font: 500 10.5px var(--mono); color: var(--blue); }
+.h-desc { overflow: hidden; text-overflow: ellipsis; }
+.hint kbd { text-shadow: none; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+
+.toast {
+  position: fixed; z-index: 40;
+  left: calc(50% + (var(--rail-w) - var(--panel-w)) / 2);
+  bottom: 48px;
+  transform: translate(-50%, 8px);
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease, transform .35s var(--ease);
+  max-width: calc(100vw - 32px);
+  text-align: center;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- landing ---------- */
+.drop {
+  position: fixed; inset: 0; z-index: 5;
+  display: grid; place-items: center;
+  padding: 24px 16px 24px calc(var(--rail-w) + 16px);
+  overflow: auto;
+  transition: opacity .5s var(--ease), transform .5s var(--ease);
+}
+body.has-img .drop { opacity: 0; pointer-events: none; transform: scale(.985); }
+.drop-card { position: relative; width: min(500px, 100%); border-radius: 22px; padding: 10px; animation: rise .8s var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+.drop-brand { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px 12px; }
+.drop-brand span { font-weight: 600; font-size: 14px; letter-spacing: -.015em; }
+.drop-brand small { font-size: 12px; color: var(--faint); }
+.drop-zone {
+  border-radius: 16px;
+  border: 1.5px dashed var(--line-strong);
+  padding: 40px 28px 32px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .25s, background .25s;
+}
+.drop-zone:hover { border-color: var(--sel-ring); background: var(--hover); }
+.drop-icon {
+  width: 52px; height: 52px; margin: 0 auto 18px;
+  border-radius: 15px;
+  display: grid; place-items: center;
+  color: var(--blue);
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--sel-ring), inset 0 1px 0 var(--inset-hi);
+}
+.drop-icon .ic { width: 24px; height: 24px; }
+.drop h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -.025em; }
+.drop p { margin: 8px 0 22px; color: var(--muted); font-size: 13.5px; }
+.drop-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; align-items: center; }
+.drop-or { color: var(--faint); font-size: 12.5px; }
+.drop-tips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 16px 14px 8px; }
+.drop-tips b { display: block; font-size: 12px; font-weight: 600; margin-bottom: 3px; }
+.drop-tips span { display: block; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+
+.dragveil {
+  position: fixed; inset: 0; z-index: 60;
+  display: grid; place-items: center;
+  pointer-events: none;
+  opacity: 0;
+  background: rgba(var(--dot-rgb), .03);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  transition: opacity .2s ease;
+}
+.dragveil::before { content: ''; position: absolute; inset: 14px; border: 1.5px dashed var(--blue); border-radius: 20px; opacity: .6; }
+.dragveil div { font-size: 14px; font-weight: 600; padding: 10px 18px; border-radius: 999px; background: var(--panel-solid); box-shadow: var(--shadow); }
+body.dragging .dragveil { opacity: 1; }
+
+/* ---------- popover ---------- */
+.popover {
+  position: fixed; z-index: 30;
+  width: 250px;
+  border-radius: 14px;
+  padding: 14px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity .2s ease, transform .3s var(--ease);
+}
+.popover.open { opacity: 1; pointer-events: auto; transform: none; }
+.pop-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.pop-row { display: flex; align-items: center; gap: 8px; }
+.pop-row input {
+  flex: 1; height: 34px; min-width: 0;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: var(--hover);
+  padding: 0 10px;
+  outline: none;
+  font: 500 13px var(--mono);
+  user-select: text;
+}
+.pop-row input:focus { border-color: var(--blue); }
+.pop-row span { color: var(--muted); font-size: 12px; }
+.pop-presets { display: flex; gap: 6px; margin: 10px 0 12px; }
+.pop-presets button { font-size: 11px; padding: 4px 8px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--muted); transition: color .15s, background .15s; }
+.pop-presets button:hover { color: var(--text); background: var(--hover); }
+.pop-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+/* ---------- settings sheet (beside the rail, bottom-left) ---------- */
+.modal {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: flex-end; justify-content: flex-start;
+  padding: var(--gap) var(--gap) var(--gap) calc(var(--rail-w) + 10px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .22s ease;
+}
+.modal.open { opacity: 1; pointer-events: auto; }
+.modal-card {
+  position: relative;
+  width: min(392px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  border-radius: var(--r);
+  padding: 4px 18px 14px;
+  --panel: color-mix(in srgb, var(--panel-solid) 90%, transparent);
+  transform-origin: 0 100%;
+  transform: translateX(-8px) scale(.97);
+  transition: transform .45s var(--ease);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.modal.open .modal-card { transform: none; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 0 4px; }
+.modal-head h3 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+.set-sec { padding: 13px 0; border-top: 1px solid var(--line); }
+.modal-head + .set-sec { border-top: 0; }
+.set-label { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); margin-bottom: 10px; }
+.seg { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
+.seg button { height: 28px; padding: 0 14px; border-radius: 7px; font-size: 12.5px; font-weight: 500; color: var(--muted); transition: color .2s, background .2s, box-shadow .2s; }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--sel); color: var(--text); box-shadow: inset 0 0 0 1px var(--sel-ring), inset 0 1px 0 var(--inset-hi); }
+
+.color-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; }
+.cr-name { font-size: 12.8px; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+.cr-name i { width: 16px; height: 2px; border-radius: 2px; }
+.swatches { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.sw {
+  position: relative;
+  width: 19px; height: 19px;
+  border-radius: 50%;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .15), inset 0 1px 0 rgba(255, 255, 255, .35);
+  transition: transform .15s var(--ease), box-shadow .2s;
+}
+.sw:hover { transform: scale(1.12); }
+.sw.on { box-shadow: 0 0 0 2px var(--panel-solid), 0 0 0 3.5px var(--blue); }
+.sw.custom { background: conic-gradient(from 0deg, #F87171, #FBBF24, #A3E635, #34D399, #22D3EE, #818CF8, #E879F9, #F87171); cursor: pointer; }
+.sw.custom.on::after { content: ''; position: absolute; inset: 5px; border-radius: 50%; background: var(--sw); box-shadow: 0 0 0 1px rgba(0, 0, 0, .2); }
+.sw.custom input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
+.warn { display: none; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+.warn.on { display: block; }
+.preview {
+  margin-top: 12px;
+  height: 104px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: radial-gradient(120% 150% at 30% 25%, #D2A688 0%, #A9775D 45%, #5A3E31 85%);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .1);
+}
+.preview canvas { width: 100%; height: 100%; display: block; }
+
+.slider-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 12.8px; }
+.slider-row input { width: 170px; accent-color: var(--blue); }
+.tg { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 7px 0; font-size: 12.8px; cursor: pointer; }
+.tg small { display: block; color: var(--faint); font-size: 11.5px; margin-top: 1px; }
+.tg kbd { margin-left: 4px; }
+.sw-toggle {
+  appearance: none; -webkit-appearance: none;
+  flex: none;
+  width: 34px; height: 20px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  margin: 0;
+  transition: background .25s;
+}
+.sw-toggle::after {
+  content: ''; position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  transition: transform .3s var(--ease);
+}
+.sw-toggle:checked { background: var(--blue); }
+.sw-toggle:checked::after { transform: translateX(14px); }
+.modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 13px; border-top: 1px solid var(--line); }
+.shortcuts { font-size: 10.5px; color: var(--faint); text-align: right; line-height: 1.6; }
+
+/* ---------- small screens: rail becomes a top bar, panel a bottom sheet ---------- */
+@media (max-width: 860px) {
+  :root { --gap: 8px; }
+  .mobile-only { display: grid !important; }
+  .rail { bottom: auto; right: 0; width: auto; height: 56px; flex-direction: row; padding: 8px 10px; overflow-x: auto; overflow-y: hidden; box-shadow: 0 18px 44px -26px rgba(0, 0, 0, .6); }
+  .rail::before { padding: 0 0 1px 0; }
+  .rail-group { flex-direction: row; }
+  .rail-sep { width: 1px; height: 22px; margin: 0 6px; }
+  .rail-spacer { min-height: 0; min-width: 8px; }
+  .zoom-group { display: none !important; }
+  #toolbar .tool.on::before { left: 12px; right: 12px; top: auto; bottom: -6px; width: auto; height: 2px; }
+  [data-tip]:hover::after { display: none; }
+  .panel { left: 0; right: 0; top: auto; bottom: 0; width: auto; height: 64vh; border-radius: 16px 16px 0 0; transform: translateY(calc(100% + 40px)); }
+  .panel::before { padding: 1px 0 0 0; }
+  body.has-img .panel { transform: translateY(calc(100% + 24px)); }
+  body.has-img .panel.open { transform: none; }
+  .hint { left: 12px; right: 12px; bottom: 12px; }
+  .toast { left: 50%; }
+  .modal, body.topts-open .modal { padding: 68px 8px 8px; align-items: flex-start; }
+  .toolpanel { left: 0; right: 0; top: 56px; bottom: auto; width: auto; max-height: 46vh; transform: translateY(-110%); border-radius: 0 0 16px 16px; }
+  .toolpanel::before { padding: 0 0 1px 0; }
+  body.topts-open .hint { left: 12px; }
+  .drop { padding: 72px 16px 24px; }
+  .drop-tips { grid-template-columns: 1fr; }
+}
+
+/* face surface (Face map → Surface) */
+.sf-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 10px; font-size: 10.8px; color: var(--muted); }
+.sf-legend:empty { display: none; }
+.sf-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.sf-legend i { width: 9px; height: 9px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25); }
+.sf-legend .sf-ramp { width: 100%; height: 7px; border-radius: 4px; background: linear-gradient(90deg, rgb(38, 70, 160), rgb(40, 150, 170), rgb(90, 190, 110), rgb(235, 210, 90), rgb(250, 245, 235)); }
+#sfBrush button:disabled, #sfViews button:disabled { opacity: .4; cursor: default; }
+.surf3d {
+  position: fixed; z-index: 12;
+  top: 70px; right: calc(var(--panel-w) + 14px);
+  width: 340px; height: 440px; max-height: calc(100vh - 100px);
+  display: flex; flex-direction: column;
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 18px 50px -18px rgba(0, 0, 0, .7);
+}
+.surf3d[hidden] { display: none; }
+.s3-head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line); }
+.s3-title { font-size: 12.5px; font-weight: 600; margin-right: auto; }
+.s3-head .seg button, .s3-foot .seg button { height: 24px; padding: 0 9px; font-size: 11.5px; }
+#s3Canvas { flex: 1; min-height: 0; width: 100%; display: block; cursor: grab; touch-action: none; }
+#s3Canvas:active { cursor: grabbing; }
+.s3-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-top: 1px solid var(--line); font-size: 10.8px; color: var(--faint); }
+@media (max-width: 860px) { .surf3d { right: 12px; left: 12px; width: auto; top: 64px; height: 50vh; } }#fmPoints[hidden], #fmSurface[hidden], #sfPca[hidden], #sfSweepRow[hidden] { display: none; }
