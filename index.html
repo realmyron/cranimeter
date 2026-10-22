@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
 <!-- dark until the stylesheet arrives (and if it never does, at least not a blank white page) -->
 <style>:where(html:not([data-theme="light"])) body { background: #080a0f; color: #e8eaf0; }</style>
-<link rel="stylesheet" href="style.css?v=22">
+<link rel="stylesheet" href="style.css?v=23">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -156,19 +156,6 @@
   <div class="list" id="list"></div>
 </aside>
 
-<!-- Face surface: 3D view (Face map → Surface) -->
-<div id="surf3d" class="surf3d glass" hidden>
-  <div class="s3-head">
-    <span class="s3-title">3D surface</span>
-    <div class="seg" id="s3Mode"><button type="button" data-v="photo" class="on">Photo</button><button type="button" data-v="clay">Clay</button><button type="button" data-v="wire">Wire</button></div>
-    <button class="icon-btn sm" id="s3Close" type="button" aria-label="Close 3D view"><svg class="ic" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8"/></svg></button>
-  </div>
-  <canvas id="s3Canvas"></canvas>
-  <div class="s3-foot">
-    <div class="seg"><button type="button" id="s3Left">◀ Side</button><button type="button" id="s3Front">Front</button><button type="button" id="s3Right">Side ▶</button></div>
-    <span>Drag to turn · scroll to zoom</span>
-  </div>
-</div>
 <div id="hint" class="hint"><div class="hint-in"></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
@@ -212,6 +199,7 @@
   <p class="new-note">You can also press <kbd class="mod-key">Ctrl</kbd> <kbd>V</kbd> or drop a file anywhere. Swapping images can be undone.</p>
 </div>
 <input type="file" id="file" accept="image/*" hidden>
+<input type="file" id="mapFile" accept=".json,.txt,application/json,text/plain" hidden>
 
 <!-- Calibration popover -->
 <div id="calib" class="popover glass" role="dialog" aria-label="Set scale">
@@ -279,10 +267,10 @@
 
 <!-- Bump the ?v= tags (and BUILD in app.js, presets.js, warp.js and facemap.js) on every release.
      If a browser still has an old copy of a file, app.js fetches it again by itself. -->
-<script src="presets.js?v=22"></script>
-<script src="warp.js?v=22"></script>
-<script src="facemap.js?v=22"></script>
-<script src="surface.js?v=22"></script>
-<script src="app.js?v=22"></script>
+<script src="presets.js?v=23"></script>
+<script src="warp.js?v=23"></script>
+<script src="facemap.js?v=23"></script>
+<script src="surface.js?v=23"></script>
+<script src="app.js?v=23"></script>
 </body>
 </html>
