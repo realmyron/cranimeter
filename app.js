@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '20';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '22';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -147,7 +147,7 @@ const DEFAULTS = {
   mMode: 'push', mSize: .09, mStrength: .55, mHard: .25, mLimit: false,
   mShowLayers: true, mShade: .6, mOpen: 'bone',
   surfView: 'contours', surfAlpha: .8, surfTrust: .5, surfBrush: '', surfSweep: .5, surfPca: 0, surfUse: true, surfV: 2, surfDetail: .15, lightView: 'shading',
-  mapSoft: false, mapSoftR: .3, mapMirror: false,
+  mapSoft: false, mapSoftR: .3, mapMirror: false, mapAutoDetail: true,
   motion: !matchMedia('(prefers-reduced-motion: reduce)').matches,
 };
 const SWATCHES = ['#7CCBF5', '#F2A7C6', '#F0CD6E', '#8FE0B4', '#BCAEF7', '#F5A3A3', '#6ED8CB', '#F2F2F3'];
@@ -1516,7 +1516,7 @@ const FEATURES = {
 };
 function selectFeature(ids) {
   const m = S.map, set = new Set();
-  for (const c of m.contours) if (ids.includes(c.id)) c.idx.forEach(i => { if (dotShown(i)) set.add(i); });
+  for (const c of m.contours) if (ids.includes(c.id)) c.idx.forEach(i => { if (dotShown(i) && !autoDot(i)) set.add(i); });
   S.mapSel = set;
   syncUI(); wake();
 }
@@ -2477,8 +2477,9 @@ function drawMap(ctx) {
     if (!dotShown(i)) return;
     const p = P_[i], sel = S.mapSel.has(i), hov = S.mapHover === i, col = MAP_COLORS[pt.group];
     // detail dots (between the named ones) are drawn smaller
-    const r = sel || hov ? 4.6 : pt.detail ? 2.1 : 3.2;
+    const auto = autoDot(i), r = sel || hov ? 4.6 : auto ? 1.6 : pt.detail ? 2.1 : 3.2;
     if (busy && !sel) ctx.globalAlpha = .55;
+    if (auto) ctx.globalAlpha = .6;   // follows the named dots by itself
     ctx.beginPath(); ctx.arc(p.x, p.y, r + (pt.detail ? 1.1 : 1.5), 0, TAU); ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fill();
     ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fillStyle = sel ? '#FFFFFF' : col; ctx.fill();
     if (sel) { ctx.beginPath(); ctx.arc(p.x, p.y, r - 1.6, 0, TAU); ctx.fillStyle = col; ctx.fill(); }
@@ -2494,8 +2495,9 @@ function drawMap(ctx) {
   // quick fit: the dot to click next (its current guess)
   if (S.qfit) {
     const st = qfitSteps()[S.qfit.step], ti = st && FM.INDEX[qfitId(st)];
-    if (ti != null && m.vis[ti]) {
-      const p = P_[ti], r = 9 + 2.5 * Math.sin(now() / 160);
+    const g = ti != null && m.vis[ti] ? qfitGuess() : null;
+    if (g) {
+      const p = mapToScreen(g), r = 9 + 2.5 * Math.sin(now() / 160);
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU);
       ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = 4; ctx.stroke();
       ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
@@ -3165,7 +3167,7 @@ function mapHitAt(sx, sy) {
   if (!S.map || !mapping() || S.qfit || paintStep()) return null;
   const P_ = mapScreenPts();
   let best = null, bd = 9;
-  P_.forEach((p, i) => { if (!dotShown(i)) return; const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
+  P_.forEach((p, i) => { if (!dotShown(i) || autoDot(i)) return; const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
   return best;
 }
 /** A new scan changes nothing on the photo, so it isn't an undo step. */
@@ -3261,6 +3263,7 @@ function shiftDots(list) {
   const m = S.map, bound = new Set(mapBoundary().idx);
   let edge = false;
   for (const [i, dx, dy] of list) { m.p[2 * i] += dx; m.p[2 * i + 1] += dy; if (bound.has(i)) edge = true; }
+  if (cfg.mapAutoDetail) placeDetail(new Set(list.map(l => l[0])));
   mapTouched(true);
   if (edge) {
     m.maskDirty = true;
@@ -3377,7 +3380,7 @@ function morphMove(sx, sy, e) {
     if (b.moved) {
       const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
       S.mapSel = new Set(b.base);
-      mapScreenPts().forEach((p, i) => { if (dotShown(i) && p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) S.mapSel.add(i); });
+      mapScreenPts().forEach((p, i) => { if (dotShown(i) && !autoDot(i) && p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) S.mapSel.add(i); });
     }
   }
   wake();
@@ -3436,7 +3439,111 @@ function refinePupil(b) {
   const nx = x0 + sx / sw / sc, ny = y0 + sy / sw / sc;
   return Math.hypot(nx - b.x, ny - b.y) <= r * .8 ? { x: nx, y: ny } : b;
 }
-function qfitRefit() { fitMap(S.map.view, S.qfit.hist.filter(Boolean)); }
+/* ---- symmetry and the detail dots ---- */
+/** Is this a detail dot that follows the named dots by itself (and so isn't grabbed)? */
+const autoDot = i => !!cfg.mapAutoDetail && !!FM.POINTS[i].mid;
+/**
+ * Re-place the detail dots (the small ones halfway between named dots) on the curve through their
+ * neighbours — only those next to a moved dot, or all of them with no set given.
+ */
+function placeDetail(moved) {
+  const m = S.map;
+  if (!m || !cfg.mapAutoDetail) return;
+  for (const c of m.contours) {
+    const idx = c.idx, n = idx.length;
+    for (let k = 0; k < n; k++) {
+      const i = idx[k];
+      if (!FM.POINTS[i].mid || !m.vis[i]) continue;
+      const at = d => c.closed ? idx[(k + d + n) % n] : idx[Math.min(n - 1, Math.max(0, k + d))];
+      const p1 = at(-1), p2 = at(1);
+      if (p1 === i || p2 === i) continue;
+      const p0 = c.closed || k - 3 >= 0 ? at(-3) : p1, p3 = c.closed || k + 3 < n ? at(3) : p2;
+      if (moved && !moved.has(p0) && !moved.has(p1) && !moved.has(p2) && !moved.has(p3)) continue;
+      // Catmull-Rom midpoint between p1 and p2
+      for (const a of [0, 1]) m.p[2 * i + a] = (-m.p[2 * p0 + a] + 9 * m.p[2 * p1 + a] + 9 * m.p[2 * p2 + a] - m.p[2 * p3 + a]) / 16;
+    }
+  }
+}
+/** The face's midline on the photo from points on it: { c (a point), u (unit direction) } by total least squares. */
+function lineFit(pts) {
+  if (pts.length < 2) return null;
+  let cx = 0, cy = 0;
+  for (const p of pts) { cx += p.x; cy += p.y; }
+  cx /= pts.length; cy /= pts.length;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (const p of pts) { const dx = p.x - cx, dy = p.y - cy; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; }
+  const a = .5 * Math.atan2(2 * sxy, sxx - syy);
+  let u = { x: Math.cos(a), y: Math.sin(a) };
+  if (u.y < 0) u = { x: -u.x, y: -u.y };
+  return { c: { x: cx, y: cy }, u };
+}
+/** The midline from the map's own midline dots. */
+function mapMidline() {
+  const m = S.map, pts = [];
+  FM.POINTS.forEach((pt, i) => { if (m.vis[i] && !pt.side && pt.field !== 'back' && pt.group !== 'hair' && pt.group !== 'neck') pts.push(mapPt(i)); });
+  return lineFit(pts);
+}
+const reflectPt = (p, ax) => {
+  const dx = p.x - ax.c.x, dy = p.y - ax.c.y, t = dx * ax.u.x + dy * ax.u.y;
+  return { x: ax.c.x + 2 * t * ax.u.x - dx, y: ax.c.y + 2 * t * ax.u.y - dy };
+};
+/** Copy one side of the face onto the other, mirrored about the midline (front view). */
+function copySide(from) {
+  const m = S.map;
+  if (!m || isProfile(m)) return;
+  const ax = mapMidline();
+  if (!ax) return;
+  pushUndo();
+  const moved = new Set();
+  FM.POINTS.forEach((pt, i) => {
+    if (pt.side !== (from === 'L' ? 1 : -1) || !m.vis[i]) return;
+    const j = FM.MIRROR[i];
+    if (j === i || !m.vis[j]) return;
+    const r = reflectPt(mapPt(j), ax);
+    m.p[2 * i] = r.x; m.p[2 * i + 1] = r.y; moved.add(i);
+  });
+  mapTouched(true); buildMask();
+  syncPts(); syncUI();
+  toast(`${from === 'L' ? 'Left' : 'Right'} side copied to the ${from === 'L' ? 'right' : 'left'}, mirrored — now touch up what differs`, 4500);
+}
+function toggleMirror() {
+  cfg.mapMirror = !cfg.mapMirror; saveCfg();
+  syncUI(); wake();
+  toast(cfg.mapMirror ? 'Symmetry on — both sides move together (X turns it off)' : 'Symmetry off — touch up each side on its own', 3000);
+}
+/* quick fit with symmetry: the right-side point starts as the mirror of its clicked left partner */
+function qfitAxis() {
+  const q = S.qfit, by = id => { const c = q.hist.find(h => h && FM.POINTS[h.i].id === id); return c && c.b; };
+  const mids = ['tri', 'gl', 'n', 'prn', 'sn', 'sto', 'me'].map(by).filter(Boolean);
+  const pl = by('puL'), pr = by('puR');
+  if (pl && pr) {
+    // the pupils' perpendicular bisector, nudged through any midline points clicked so far
+    const c = { x: (pl.x + pr.x) / 2, y: (pl.y + pr.y) / 2 }, L = Math.hypot(pr.x - pl.x, pr.y - pl.y) || 1;
+    let u = { x: -(pr.y - pl.y) / L, y: (pr.x - pl.x) / L };
+    if (u.y < 0) u = { x: -u.x, y: -u.y };
+    if (mids.length >= 2) return lineFit([c, ...mids]);
+    if (mids.length === 1) { const d = { x: mids[0].x - c.x, y: mids[0].y - c.y }, dl = Math.hypot(d.x, d.y); if (dl > L * .3) u = d.y < 0 ? { x: -d.x / dl, y: -d.y / dl } : { x: d.x / dl, y: d.y / dl }; }
+    return { c, u };
+  }
+  return mids.length >= 2 ? lineFit(mids) : mapMidline();
+}
+/** Where the ring for this quick-fit step is (and what Enter accepts). */
+function qfitGuess() {
+  const q = S.qfit, st = qfitSteps()[q.step], i = st && FM.INDEX[qfitId(st)];
+  if (i == null) return null;
+  if (cfg.mapMirror && !isProfile()) {
+    const j = FM.MIRROR[i], pj = q.hist.find(c => c && c.i === j), ax = j !== i && pj && qfitAxis();
+    if (ax) return reflectPt(pj.b, ax);
+  }
+  return mapPt(i);
+}
+function qfitAccept() {
+  const q = S.qfit, st = qfitSteps()[q.step], g = qfitGuess();
+  if (!g) { qfitSkip(); return; }
+  q.hist.push({ i: FM.INDEX[qfitId(st)], b: { x: g.x, y: g.y } });
+  qfitNext();
+}
+function qfitRefit() { fitMap(S.map.view, S.qfit.hist.filter(Boolean)); placeDetail(null); }
 function quickFitClick(sx, sy) {
   const q = S.qfit, st = qfitSteps()[q.step];
   let b = fwdMap(toI(sx, sy));   // position on the original photo
@@ -3707,7 +3814,7 @@ ov.addEventListener('dblclick', e => {
     if (hit == null) return;
     let best = null;
     for (const c of S.map.contours) if (c.draw !== false && c.idx.includes(hit) && (!best || c.idx.length < best.idx.length)) best = c;
-    if (best) { S.mapSel = new Set(best.idx.filter(dotShown)); syncUI(); wake(); }
+    if (best) { S.mapSel = new Set(best.idx.filter(i => dotShown(i) && !autoDot(i))); syncUI(); wake(); }
     return;
   }
   if (!selectMode()) return;
@@ -3787,6 +3894,7 @@ addEventListener('keydown', e => {
     return;
   }
   if (k === 'b') { if (!e.repeat) setCompare(true); return; }
+  if (k === 'x' && mapping() && !e.repeat) { toggleMirror(); return; }
   if (mapping() && S.map && S.mapSel.size && e.key.startsWith('Arrow')) {
     // nudge the selected scan dots (1 px on screen, Shift = 10)
     e.preventDefault();
@@ -3812,7 +3920,7 @@ addEventListener('keydown', e => {
       else if (S.sel.length || S.showAll) deselectAll();
       break;
     case 'Enter':
-      if (S.qfit) { qfitSkip(); break; }
+      if (S.qfit) { if (e.shiftKey) qfitSkip(); else qfitAccept(); break; }
       if (S.draft && S.draft.kind === 'segments' && !S.draft.need && S.draft.pts.length >= 3) commitDraft();
       break;
     case 'Backspace':
@@ -4605,6 +4713,11 @@ function buildFaceMapPanel() {
       <button type="button" class="btn ghost sm" id="mSnap" title="Pull the edge dots (face edge, hairline, hair, neck) and the eye and lip outlines onto the edges in the photo">Snap to edges</button>
       <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the map from your measured landmarks">Fit to landmarks</button>
     </div>
+    <div class="sym-box">
+      <label class="tg sm"><span>Symmetry <kbd>X</kbd><small>Both sides move together, mirrored. In Quick fit the right-side ring starts as the mirror of your left click — Enter accepts it. Turn it off for touch-ups.</small></span><input type="checkbox" class="sw-toggle" id="mMirror"></label>
+      <div class="to-actions" style="margin:0 0 4px"><button type="button" class="btn ghost sm" id="mCopyL" title="Make the right side a mirror image of the left">Copy left → right</button><button type="button" class="btn ghost sm" id="mCopyR" title="Make the left side a mirror image of the right">Copy right → left</button></div>
+    </div>
+    <label class="tg sm"><span>Auto detail dots<small>The small dots between the named ones follow them by themselves — about half as many dots to place. Off: place them by hand.</small></span><input type="checkbox" class="sw-toggle" id="mAutoDet"></label>
     <div class="to-label">Dots <small>click to hide a group</small></div>
     <div class="chips" id="mGroups">${MAP_GROUPS.map(([g, label, c]) => `<button type="button" class="chip-dot" data-g="${g}" style="--c:${c}"><i></i>${label}</button>`).join('')}</div>
     <div class="to-label">Select a feature <small>then drag it, or scale and rotate it with the box</small></div>
@@ -4612,7 +4725,6 @@ function buildFaceMapPanel() {
     <div class="to-label">Editing</div>
     <label class="tg sm"><span>Soft move<small>Dragging a dot pulls the dots around it along, fading with distance</small></span><input type="checkbox" class="sw-toggle" id="mSoft"></label>
     <div id="mSoftRow">${sliderRow('mSoftR', 'Reach', 5, 100, 1, 'How far the pull reaches')}</div>
-    <label class="tg sm"><span>Mirror edits<small>Front view: a dot’s partner on the other side moves with it, mirrored</small></span><input type="checkbox" class="sw-toggle" id="mMirror"></label>
     <p class="to-note">Double-click a dot to select its whole line. With several selected, drag a corner of the box to scale them or the knob to rotate them.</p>
     <label class="tg sm"><span>Show layers<small>Teal = the face layer, blue = hair, ears, neck and background behind it</small></span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
     <p class="to-note">Drag dots onto the face — the photo is shown unchanged here. Box-select or <kbd>Shift</kbd>-click to move several, arrow keys nudge, <kbd>Ctrl</kbd> <kbd>A</kbd> selects all. Hover a dot to see its name and tissue depth. Then go to <b>Light</b>.</p>
@@ -4707,7 +4819,15 @@ function buildFaceMapPanel() {
   $('#mShowLayers').addEventListener('change', e => { cfg.mShowLayers = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
   $('#mSoft').addEventListener('change', e => { cfg.mapSoft = e.target.checked; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#mSoftR').addEventListener('input', e => { cfg.mapSoftR = +e.target.value / 100; saveCfg(); syncFaceMapPanel(); wake(); });
-  $('#mMirror').addEventListener('change', e => { cfg.mapMirror = e.target.checked; saveCfg(); });
+  $('#mMirror').addEventListener('change', e => { if (!!cfg.mapMirror !== e.target.checked) toggleMirror(); });
+  $('#mCopyL').addEventListener('click', () => copySide('L'));
+  $('#mCopyR').addEventListener('click', () => copySide('R'));
+  $('#mAutoDet').addEventListener('change', e => {
+    cfg.mapAutoDetail = e.target.checked; saveCfg();
+    if (cfg.mapAutoDetail && S.map) { pushUndo(); placeDetail(null); mapTouched(true); buildMask(); syncPts(); }
+    S.mapSel = new Set([...S.mapSel].filter(i => !autoDot(i)));
+    syncUI(); wake();
+  });
   $('#mQuick').addEventListener('click', () => { if (S.qfit) qfitCancel(); else startQuickFit(); });
   $('#mSnap').addEventListener('click', () => {
     if (!S.map) return;
@@ -4754,6 +4874,8 @@ function syncFaceMapPanel() {
   $('#mSoft').checked = !!cfg.mapSoft; $('#mSoftRow').hidden = !cfg.mapSoft;
   setRange('mSoftR', Math.round(cfg.mapSoftR * 100), Math.round(cfg.mapSoftR * 100) + '%');
   $('#mMirror').checked = !!cfg.mapMirror;
+  $('#mCopyL').disabled = $('#mCopyR').disabled = !m || isProfile(m);
+  $('#mAutoDet').checked = !!cfg.mapAutoDetail;
   const qb = $('#mQuick');
   setText(qb, S.qfit ? `Stop quick fit (${S.qfit.step + 1}/${qfitSteps().length})` : 'Quick fit · guided');
   qb.classList.toggle('on', !!S.qfit);
@@ -4950,13 +5072,13 @@ function renderHint() {
     const d = S.draft;
     const tgt = d ? { preset: d.preset, kind: d.kind } : placeTarget();
     if (mapping() && S.qfit) {
-      html = `<b>Quick fit · ${S.qfit.step + 1}/${qfitSteps().length}</b><span class="h-desc">${qfitSteps()[S.qfit.step].label} · <kbd>Enter</kbd> skip · <kbd>Backspace</kbd> back · <kbd>Esc</kbd> stop</span>`;
+      html = `<b>Quick fit · ${S.qfit.step + 1}/${qfitSteps().length}</b><span class="h-desc">${qfitSteps()[S.qfit.step].label} · <kbd>Enter</kbd> use the ring · <kbd>Shift</kbd> <kbd>Enter</kbd> skip · <kbd>Backspace</kbd> back · <kbd>Esc</kbd> stop</span>`;
     } else if (lightStep()) {
       html = `<b>Face light</b><span class="h-desc">${isHintBrush() ? 'Hold on the photo to ' + SURF_BRUSH_TEXT[cfg.surfBrush] : 'Drag the ball to move the light · pick a brush to correct the marks · drag to pan'} · <kbd>Esc</kbd> closes</span>`;
     } else if (surfStep()) {
       html = `<b>Face surface</b><span class="h-desc">${S.surf ? (fixBrush() ? 'Hold on the photo to ' + SURF_BRUSH_TEXT[cfg.surfBrush] : 'Pick a view, or a brush to fix the surface · drag to pan') : 'Build the surface from your dots and the photo’s light'} · <kbd>Esc</kbd> closes</span>`;
     } else if (mapping()) {
-      html = `<b>Face map</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · arrows nudge · <kbd>Esc</kbd> closes</span>`;
+      html = `<b>Face map${cfg.mapMirror ? ' · symmetry on' : ''}</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · <kbd>X</kbd> symmetry · <kbd>Esc</kbd> closes</span>`;
     } else if (S.tool === 'morph') {
       const names = { push: 'push', bloat: 'bloat', pinch: 'pinch', restore: 'restore', tDodge: 'add light (dodge)', tBurn: 'add shade (burn)', tErase: 'erase light and shade' };
       const act = cfg.mMode === 'push' ? 'drag' : 'hold';
