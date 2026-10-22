@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
 <!-- dark until the stylesheet arrives (and if it never does, at least not a blank white page) -->
 <style>:where(html:not([data-theme="light"])) body { background: #080a0f; color: #e8eaf0; }</style>
-<link rel="stylesheet" href="style.css?v=24">
+<link rel="stylesheet" href="style.css?v=25">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -200,6 +200,7 @@
 </div>
 <input type="file" id="file" accept="image/*" hidden>
 <input type="file" id="mapFile" accept=".json,.txt,application/json,text/plain" hidden>
+<input type="file" id="sideFile" accept=".json,.txt,application/json,text/plain" hidden>
 
 <!-- Calibration popover -->
 <div id="calib" class="popover glass" role="dialog" aria-label="Set scale">
@@ -267,10 +268,10 @@
 
 <!-- Bump the ?v= tags (and BUILD in app.js, presets.js, warp.js and facemap.js) on every release.
      If a browser still has an old copy of a file, app.js fetches it again by itself. -->
-<script src="presets.js?v=24"></script>
-<script src="warp.js?v=24"></script>
-<script src="facemap.js?v=24"></script>
-<script src="surface.js?v=24"></script>
-<script src="app.js?v=24"></script>
+<script src="presets.js?v=25"></script>
+<script src="warp.js?v=25"></script>
+<script src="facemap.js?v=25"></script>
+<script src="surface.js?v=25"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>
