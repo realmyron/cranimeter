@@ -54,8 +54,11 @@ pair('hsl', 'Hair · lower', 8.4, -2.4, -5.0, 'hair', 'back', 0, null, { views: 
 
 // ---- face outline (front silhouette; drives both layers) ----
 mid('tri', 'Hairline · centre (trichion)', 0, -12.0, 7.7, 'outline', 'both', 5, 'Trichion');
+pair('hl0', 'Hairline', 1.5, -11.95, 7.6, 'outline', 'both', 5);
 pair('hl1', 'Hairline', 3.0, -11.7, 7.4, 'outline', 'both', 5);
+pair('hl3', 'Hairline', 4.35, -11.2, 6.75, 'outline', 'both', 5);
 pair('hl2', 'Hairline', 5.5, -10.5, 5.8, 'outline', 'both', 5);
+pair('hlc', 'Hairline · temple corner', 6.2, -9.4, 5.0, 'outline', 'both', 6);
 pair('tem', 'Temple', 6.6, -8.1, 4.6, 'outline', 'both', 8, 'Frontotemporale');
 pair('zy', 'Cheekbone edge (zygion)', 6.75, -3.9, 3.2, 'outline', 'both', 6, 'Zygion');
 pair('chk', 'Cheek edge', 6.55, -1.2, 2.8, 'outline', 'both', 14);
@@ -67,13 +70,14 @@ mid('me', 'Chin bottom (menton)', 0, 6.3, 7.8, 'outline', 'both', 7.5, 'Menton',
 
 // ---- forehead, brows ----
 mid('fhC', 'Forehead · centre', 0, -9.4, 9.2, 'skin', 'face', 5);
+mid('fhT', 'Upper forehead · centre', 0, -10.85, 8.75, 'skin', 'face', 5);
 pair('fh', 'Forehead', 3.7, -9.6, 8.2, 'skin', 'face', 5);
 pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -8.1, 8.75, 'skin', 'face', 6);
 pair('temH', 'Temple hollow', 5.4, -6.4, 5.4, 'skin', 'face', 9);
 mid('gl', 'Glabella', 0, -6.9, 9.8, 'brows', 'face', 5.5, 'Glabella');
 pair('bi', 'Brow · inner', 1.2, -6.7, 9.0, 'brows', 'face', 6);
-pair('bm', 'Brow', 2.1, -7.15, 8.8, 'brows', 'face', 6);
-pair('ba', 'Brow · arch', 3.0, -7.4, 8.4, 'brows', 'face', 6);
+pair('bm', 'Brow · centre', 2.1, -7.15, 8.8, 'brows', 'face', 6, null, { detail: true });
+pair('ba', 'Brow · arch (centre)', 3.0, -7.4, 8.4, 'brows', 'face', 6, null, { detail: true });
 pair('bt', 'Brow · tail', 5.1, -6.7, 6.6, 'brows', 'face', 6);
 
 // ---- eyes ----
@@ -106,7 +110,7 @@ pair('buc', 'Cheek hollow (buccal)', 4.7, 0.5, 6.1, 'skin', 'face', 22);
 pair('nl1', 'Nasolabial fold', 2.0, -0.4, 9.3, 'skin', 'face', 13);
 pair('nl2', 'Nasolabial fold · lower', 2.9, 1.3, 8.8, 'skin', 'face', 13);
 pair('jowl', 'Jowl', 3.9, 3.2, 6.9, 'skin', 'face', 12);
-pair('masse', 'Masseter', 5.6, 1.4, 2.6, 'skin', 'face', 18);
+pair('masse', 'Masseter', 5.6, 1.4, 3.7, 'skin', 'face', 18);
 pair('ramus', 'Jaw ramus', 6.2, -0.3, 0.6, 'skin', 'face', 16, 'Ramus', { views: 'profile' });
 pair('mental', 'Chin · side', 1.5, 4.5, 9.3, 'skin', 'face', 11);
 mid('bpt', 'Chin crease (B point)', 0, 3.7, 9.4, 'skin', 'face', 10.5, 'Soft-tissue B point');
@@ -256,9 +260,9 @@ function project(p, yaw) {
 }
 
 const FRONT_CONTOURS = [
-  { id: 'outline', closed: true, boundary: true, snap: true, ids: ['tri', 'hl1R', 'hl2R', 'temR', 'zyR', 'chkR', 'jaw1R', 'goR', 'jaw2R', 'chinR', 'me', 'chinL', 'jaw2L', 'goL', 'jaw1L', 'chkL', 'zyL', 'temL', 'hl2L', 'hl1L'] },
-  { id: 'browL', ids: ['biL', 'bmL', 'baL', 'btL'] },
-  { id: 'browR', ids: ['biR', 'bmR', 'baR', 'btR'] },
+  { id: 'outline', closed: true, boundary: true, snap: true, ids: ['tri', 'hl0R', 'hl1R', 'hl3R', 'hl2R', 'hlcR', 'temR', 'zyR', 'chkR', 'jaw1R', 'goR', 'jaw2R', 'chinR', 'me', 'chinL', 'jaw2L', 'goL', 'jaw1L', 'chkL', 'zyL', 'temL', 'hlcL', 'hl2L', 'hl3L', 'hl1L', 'hl0L'] },
+  { id: 'browL', line: true, draw: false, ids: ['biL', 'bmL', 'baL', 'btL'] },
+  { id: 'browR', line: true, draw: false, ids: ['biR', 'bmR', 'baR', 'btR'] },
   { id: 'eyeL', closed: true, snapFine: true, ids: ['enL', 'eu1L', 'eu2L', 'eu3L', 'exL', 'el4L', 'el3L', 'el2L', 'el1L', 'el0L'] },
   { id: 'eyeR', closed: true, snapFine: true, ids: ['enR', 'eu1R', 'eu2R', 'eu3R', 'exR', 'el4R', 'el3R', 'el2R', 'el1R', 'el0R'] },
   { id: 'ridge', ids: ['n', 'rhi', 'dor', 'prn', 'col', 'sn'] },
@@ -298,9 +302,9 @@ const FRONT_CONTOURS = [
 ];
 const PROFILE_CONTOURS = [
   // the face region: the profile line from hairline to under the chin, back along the jaw, up in front of the ear
-  { id: 'face', closed: true, boundary: true, ids: ['tri', 'fhC', 'sg', 'gl', 'rx', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'phL', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'jaw2#', 'go#', 'ramus#', 'obs#', 'tem#', 'hl2#', 'hl1#'] },
+  { id: 'face', closed: true, boundary: true, ids: ['tri', 'fhC', 'sg', 'gl', 'rx', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'phL', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'jaw2#', 'go#', 'ramus#', 'obs#', 'tem#', 'hlc#', 'hl2#', 'hl3#', 'hl1#', 'hl0#'] },
   { id: 'profile', snap: true, draw: false, ids: ['tri', 'fhC', 'sg', 'gl', 'rx', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'phL', 'ls', 'sto', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'thy', 'neckF'] },
-  { id: 'brow', ids: ['bi#', 'bm#', 'ba#', 'bt#'] },
+  { id: 'brow', line: true, draw: false, ids: ['bi#', 'bm#', 'ba#', 'bt#'] },
   { id: 'eye', closed: true, snapFine: true, ids: ['en#', 'eu1#', 'eu2#', 'eu3#', 'ex#', 'el4#', 'el3#', 'el2#', 'el1#', 'el0#'] },
   { id: 'nostril', ids: ['nos#', 'al#', 'ac#'] },
   { id: 'lip', ids: ['ls', 'cph#', 'ul#', 'ch#', 'll#', 'li'] },
@@ -367,6 +371,12 @@ densify(FRONT_CONTOURS, false);
 densify(PROFILE_CONTOURS, true);
 
 const INDEX = Object.fromEntries(POINTS.map((p, i) => [p.id, i]));
+/** Each point's mirror image across the face's midline (itself for midline points). */
+const MIRROR = POINTS.map((p, i) => {
+  if (Math.abs(p.x) < 1e-6) return i;
+  const j = POINTS.findIndex(q => Math.abs(q.x + p.x) < 1e-4 && Math.abs(q.y - p.y) < 1e-4 && Math.abs(q.z - p.z) < 1e-4);
+  return j < 0 ? i : j;
+});
 /** Outward surface normal: a head-shaped ellipsoid, unless a point says otherwise. */
 for (const p of POINTS) {
   if (p.n) { const L = Math.hypot(...p.n); p.n = p.n.map(v => v / L); continue; }
@@ -643,8 +653,8 @@ function spline(pts, closed, steps = 8) {
 }
 
 window.CraniMap = {
-  POINTS, INDEX, VIEWS, OPS, OP_INDEX,
+  POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '17',
+  mls, tpsFit, tpsEval, spline, build: '18',
 };
 })();
