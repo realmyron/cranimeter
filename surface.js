@@ -10,6 +10,8 @@
      4. Shape from shading: the depth that makes the predicted shading match the photo, held
         close to the prior by a smoothness term and pinned at the face edge. Gauss–Newton
         (normals linearised around the current depth) with preconditioned conjugate gradients.
+   The correction runs coarse to fine (a ≈ 5 mm grid first, then as much fine detail as allowed),
+   so skin texture can't raise bumps. The Light step (analyze) shows what the photo says first.
    Plus the views: Haralick's topographic labels (peak, pit, ridge, ravine, saddle, hills — "the
    topographic primal sketch", 1983) of the surface or of the photo, contour lines, relief, and
    photo-analysis views (luminance gradient, level sweep, colour principal components).
@@ -127,30 +129,42 @@ function corr(a, b, w) {
 
 /* ------------------------------------------------------------------- build -- */
 
-/** Median of the values where the weight is above .5 (a sample of up to 4000). */
-function wmedian(a, w) {
+/** Weighted percentile (q in 0…1) of the values where the weight is above .5 (sampled). */
+function wquant(a, w, q) {
   const v = [];
-  const step = Math.max(1, Math.floor(a.length / 4000));
+  const step = Math.max(1, Math.floor(a.length / 6000));
   for (let k = 0; k < a.length; k += step) if (w[k] > .5) v.push(a[k]);
   if (!v.length) return 0;
   v.sort((x, y) => x - y);
-  return v[v.length >> 1];
+  return v[Math.min(v.length - 1, Math.max(0, Math.round(q * (v.length - 1))))];
 }
+const wmedian = (a, w) => wquant(a, w, .5);
+/** Light with a given direction d: only the ambient and the strength are fitted (I ≈ a0 + k·(n·d)). */
+function fitLightDir(I, gx, gy, w, d) {
+  let s11 = 0, s12 = 0, s22 = 0, b1 = 0, b2 = 0;
+  for (let k = 0; k < I.length; k++) {
+    if (w[k] <= 1e-3) continue;
+    const N = Math.sqrt(1 + gx[k] * gx[k] + gy[k] * gy[k]), nd = (-gx[k] * d[0] - gy[k] * d[1] + d[2]) / N;
+    s11 += w[k]; s12 += w[k] * nd; s22 += w[k] * nd * nd; b1 += w[k] * I[k]; b2 += w[k] * I[k] * nd;
+  }
+  const det = s11 * s22 - s12 * s12 || 1e-9, a0 = (b1 * s22 - b2 * s12) / det, kk = Math.max(.05, (s11 * b2 - s12 * b1) / det);
+  return [a0, kk * d[0], kk * d[1], kk * d[2]];
+}
+
 /**
- * inp: { gw, gh, h (cm per node), act (Uint8, the face), skin (0…1 data weight: face minus eyes,
- *        brows, lips, nostrils, faded at the edge), z0 (prior depth, cm), lum (linear luminance),
- *        rgb (optional, linear colour per node), prior (optional 0…1: where the dots pin the shape
- *        down well — nose, eyes, mouth), hint (optional −1…1: painted shadow … highlight),
- *        ignore (optional 0…1: painted "not shape"), trust (0 = keep the map's shape … 1 = follow the photo) }
- * Returns { z, z0, light [a0, ax, ay, az], rho, I, fit0, fit1, … } — async, yields between passes.
+ * What the photo says about light and shade, before any shape is changed:
+ *   skin   data weights (the face minus eyes, brows, lips and nostrils, minus colours unlike the
+ *          skin — stubble, lashes, dark circles, make-up — and minus painted "not shape")
+ *   Is     brightness, normalised to the skin and lightly smoothed
+ *   L      light: ambient + direction (order-1 spherical harmonics) — fitted, or with a given direction
+ *   rho    skin colour (albedo), kept smooth
+ *   cw     how skin-coloured each node is (0…1)
  */
-async function build(inp, onProgress) {
-  const { gw, gh, h, act, z0, lum } = inp, trust = inp.trust == null ? .5 : inp.trust;
-  const n = gw * gh, hint = inp.hint, ign = inp.ignore, prior = inp.prior;
-  const skin = Float32Array.from(inp.skin);
-  // Light and shade change brightness, not colour. Where the colour differs from the face's skin
-  // (stubble, lashes, dark circles, moles, make-up) the brightness isn't shape: trust it less.
+function prepare(inp) {
+  const { gw, gh, h, act, z0, lum } = inp, n = gw * gh, ign = inp.ignore;
+  const skin = Float32Array.from(inp.skin), cw = new Float32Array(n).fill(1);
   if (ign) for (let k = 0; k < n; k++) skin[k] *= 1 - ign[k];
+  // Light and shade change brightness, not colour (chromaticity): a different colour isn't shape.
   if (inp.rgb) {
     const rgb = inp.rgb, cr = new Float32Array(n), cg = new Float32Array(n);
     for (let k = 0; k < n; k++) { const t = rgb[3 * k] + rgb[3 * k + 1] + rgb[3 * k + 2] || 1e-6; cr[k] = rgb[3 * k] / t; cg[k] = rgb[3 * k + 1] / t; }
@@ -158,22 +172,16 @@ async function build(inp, onProgress) {
     const mr = wmedian(sr, skin), mg = wmedian(sg, skin), d = new Float32Array(n);
     for (let k = 0; k < n; k++) d[k] = Math.hypot(sr[k] - mr, sg[k] - mg);
     const sig = Math.max(.004, 1.4826 * wmedian(d, skin));
-    for (let k = 0; k < n; k++) skin[k] *= Math.exp(-((d[k] / (2.5 * sig)) ** 2));
+    for (let k = 0; k < n; k++) { cw[k] = Math.exp(-((d[k] / (2.5 * sig)) ** 2)); skin[k] *= cw[k]; }
   }
-  // brightness, normalised to the skin's mean; pores and stubble smoothed away
   let ms = 0, mc = 0;
   for (let k = 0; k < n; k++) if (skin[k] > .3) { ms += lum[k] * skin[k]; mc += skin[k]; }
   const mean = ms / Math.max(1e-6, mc) || 1, I = new Float32Array(n);
   for (let k = 0; k < n; k++) I[k] = lum[k] / mean;
   const Is = blur(I, gw, gh, 1, act, 1);
-  // light from the prior's normals
   const g0 = gradient(z0, gw, gh, h, act);
-  const L = fitLight(Is, g0.gx, g0.gy, skin);
-  // albedo: what the light doesn't explain, kept smooth (skin colour changes slowly). Painted
-  // highlights and shadows are shape, so they stay out of it.
-  const rho = new Float32Array(n), wr = new Float32Array(n);
-  let Imax = 0;
-  for (let k = 0; k < n; k++) if (skin[k] > .5) Imax = Math.max(Imax, Is[k]);
+  const L = inp.lightDir ? fitLightDir(Is, g0.gx, g0.gy, skin, inp.lightDir) : fitLight(Is, g0.gx, g0.gy, skin);
+  const rho = new Float32Array(n), wr = new Float32Array(n), hint = inp.hint;
   for (let k = 0; k < n; k++) {
     if (!act[k]) continue;
     const s0 = shade(L, g0.gx[k], g0.gy[k]);
@@ -182,19 +190,43 @@ async function build(inp, onProgress) {
   }
   const rhoLP = blur(rho, gw, gh, Math.max(2, Math.round(.9 / h)), wr, 2);
   for (let k = 0; k < n; k++) rhoLP[k] = Math.min(2.5, Math.max(.4, rhoLP[k] || 1));
-  // the brightness to match: the photo's, pushed up / down where highlights / shadows were painted
-  const T = new Float32Array(n);
-  for (let k = 0; k < n; k++) T[k] = hint && hint[k] ? Is[k] * (1 + .45 * hint[k]) : Is[k];
-  // data weights: skin, minus blown highlights and deep attached shadow; painted hints count more
-  const wd0 = new Float32Array(n);
+  const dir = [L[1], L[2], L[3]], ll = Math.hypot(...dir) || 1;
+  return { n, skin, cw, Is, g0, L, rho: rhoLP, dir: dir.map(v => v / ll), strength: ll / Math.max(.05, Math.abs(L[0]) + ll) };
+}
+
+/**
+ * The Light step: the photo's light and shade read against the face map's shape.
+ * Returns the light, the shading map (brightness ÷ skin colour), the shading the dots' shape would
+ * have in that light, and automatic marks: local highlights (+) and shadows (−), and "not shape"
+ * where the colour isn't skin.
+ */
+function analyze(inp) {
+  const { gw, gh, h, act } = inp, P = prepare(inp), n = P.n;
+  const shading = new Float32Array(n), expected = new Float32Array(n);
+  for (let k = 0; k < n; k++) if (act[k]) { shading[k] = P.Is[k] / P.rho[k]; expected[k] = shade(P.L, P.g0.gx[k], P.g0.gy[k]); }
+  // local highlights and shadows: shading against its own surroundings (≈ 1.5 cm)
+  const base = blur(shading, gw, gh, Math.max(2, Math.round(1.5 / h)), act, 2), loc = new Float32Array(n);
+  for (let k = 0; k < n; k++) loc[k] = act[k] ? shading[k] / Math.max(.05, base[k]) : 1;
+  const w = P.skin, hi1 = wquant(loc, w, .9), hi2 = wquant(loc, w, .985), lo1 = wquant(loc, w, .1), lo2 = wquant(loc, w, .015);
+  const hl = new Float32Array(n), ig = new Float32Array(n);
   for (let k = 0; k < n; k++) {
-    if (!skin[k]) continue;
-    const s0 = shade(L, g0.gx[k], g0.gy[k]), hk = hint ? Math.abs(hint[k]) : 0;
-    wd0[k] = skin[k] * (Is[k] > .97 * Imax && !hk ? 0 : 1) * (s0 < .12 ? .25 : 1) * (1 + 1.5 * hk);
-    if (hk && !wd0[k]) wd0[k] = hk;
+    if (!act[k] || P.skin[k] < .2) continue;
+    const v = loc[k];
+    hl[k] = v > hi1 ? Math.min(1, (v - hi1) / Math.max(1e-3, hi2 - hi1)) : v < lo1 ? -Math.min(1, (lo1 - v) / Math.max(1e-3, lo1 - lo2)) : 0;
   }
-  const wd = Float32Array.from(wd0);
-  // node sets: U = unknowns (face nodes away from its edge), D = data rows, R = smoothness rows
+  for (let k = 0; k < n; k++) if (act[k] && inp.skin[k] > .5) ig[k] = Math.min(1, Math.max(0, (.55 - P.cw[k]) / .45));
+  const hls = blur(hl, gw, gh, 1, act, 1);
+  return { light: P.L, dir: P.dir, strength: P.strength, shading, expected, rho: P.rho, autoHL: hls, autoIG: ig, skin: P.skin };
+}
+
+/* ------------------------------------------------------------ the solver --
+   Shape from shading on a grid G = { gw, gh, h, act, z0, rho, T (brightness to match), wd (data
+   weights), bk (pull toward the prior per node), L }: the depth change dz minimising
+     Σ wd (ρ·shade(z0 + dz) − T)² + α |∇²dz|² + Σ bk dz²
+   by Gauss–Newton (normals linearised around the current surface) and preconditioned conjugate
+   gradients, with robust re-weighting after the first pass. */
+async function solve(G, alpha, outerN, iters, dz, onPass) {
+  const { gw, gh, h, act, z0, rho, T, bk, L } = G, n = gw * gh, wd0 = G.wd, wd = Float32Array.from(wd0);
   const inner = k => { const i = k % gw, j = (k / gw) | 0; return i > 0 && j > 0 && i < gw - 1 && j < gh - 1 && act[k] && act[k - 1] && act[k + 1] && act[k - gw] && act[k + gw]; };
   const Ul = [], Dl = [], Rl = [];
   for (let k = 0; k < n; k++) {
@@ -204,18 +236,11 @@ async function build(inp, onProgress) {
     if (inner(k)) { Dl.push(k); if (inner(k - 1) && inner(k + 1) && inner(k - gw) && inner(k + gw)) Ul.push(k); }
   }
   const U = Int32Array.from(Ul), D = Int32Array.from(Dl), R = Int32Array.from(Rl);
-  // smoothness (alpha) and pull toward the prior (beta, stronger where the dots define the shape)
-  const alpha = .08 * Math.pow(10, (.5 - trust) * 2.4), beta = .02;
-  const bk = new Float32Array(n);
-  for (let k = 0; k < n; k++) bk[k] = beta * (1 + 30 * (prior ? prior[k] : 0));
-  const inv2h = 1 / (2 * h), invh2 = 1 / (h * h);
-  const [a0, a1, a2, a3] = L;
-  const dz = new Float32Array(n), c = new Float32Array(n), u = new Float32Array(n), Lv = new Float32Array(n);
+  const inv2h = 1 / (2 * h), invh2 = 1 / (h * h), [a0, a1, a2, a3] = L;
+  const g0 = gradient(z0, gw, gh, h, act);
+  const c = new Float32Array(n), u = new Float32Array(n), Lv = new Float32Array(n);
   const apply = (v, out) => {
-    for (let q = 0; q < D.length; q++) {
-      const k = D[q], gv = c[k] * (-a1 * (v[k + 1] - v[k - 1]) - a2 * (v[k + gw] - v[k - gw])) * inv2h;
-      u[k] = c[k] * wd[k] * gv;
-    }
+    for (let q = 0; q < D.length; q++) { const k = D[q]; u[k] = c[k] * wd[k] * c[k] * (-a1 * (v[k + 1] - v[k - 1]) - a2 * (v[k + gw] - v[k - gw])) * inv2h; }
     for (let q = 0; q < R.length; q++) { const k = R[q]; Lv[k] = (v[k + 1] + v[k - 1] + v[k + gw] + v[k - gw] - 4 * v[k]) * invh2; }
     for (let q = 0; q < U.length; q++) {
       const i = U[q];
@@ -223,31 +248,25 @@ async function build(inp, onProgress) {
         + alpha * (Lv[i + 1] + Lv[i - 1] + Lv[i + gw] + Lv[i - gw] - 4 * Lv[i]) * invh2 + bk[i] * v[i];
     }
   };
-  const OUTER = 5, ITERS = 140;
   const b = new Float32Array(n), rhs = new Float32Array(n), Minv = new Float32Array(n);
   const r = new Float32Array(n), zz = new Float32Array(n), p = new Float32Array(n), Ap = new Float32Array(n);
-  for (let outer = 0; outer < OUTER; outer++) {
-    // linearise the normals around the current surface
+  for (let outer = 0; outer < outerN; outer++) {
     const z = new Float32Array(n);
     for (let k = 0; k < n; k++) z[k] = z0[k] + dz[k];
     const g = gradient(z, gw, gh, h, act);
     for (let k = 0; k < n; k++) {
       if (!act[k]) { c[k] = 0; continue; }
       const N = Math.sqrt(1 + g.gx[k] * g.gx[k] + g.gy[k] * g.gy[k]);
-      c[k] = rhoLP[k] / N;
-      // the part of the predicted shading that doesn't depend on dz
-      const lin0 = c[k] * (-a1 * g0.gx[k] - a2 * g0.gy[k]);
-      b[k] = T[k] - rhoLP[k] * (a0 + a3 / N) - lin0;
+      c[k] = rho[k] / N;
+      b[k] = T[k] - rho[k] * (a0 + a3 / N) - c[k] * (-a1 * g0.gx[k] - a2 * g0.gy[k]);
     }
-    // robust weights (after the first pass): spots the shading can't explain are likely colour, not shape
     if (outer > 0) {
       let se = 0, sw = 0;
       const e = new Float32Array(n);
-      for (let q = 0; q < D.length; q++) { const k = D[q]; e[k] = T[k] - rhoLP[k] * shade(L, g.gx[k], g.gy[k]); se += wd0[k] * e[k] * e[k]; sw += wd0[k]; }
+      for (let q = 0; q < D.length; q++) { const k = D[q]; e[k] = T[k] - rho[k] * shade(L, g.gx[k], g.gy[k]); se += wd0[k] * e[k] * e[k]; sw += wd0[k]; }
       const sig = Math.sqrt(se / Math.max(1e-6, sw)) || 1;
       for (let q = 0; q < D.length; q++) { const k = D[q], t = Math.abs(e[k]) / (1.5 * sig); wd[k] = wd0[k] * (t <= 1 ? 1 : 1 / (t * t)); }
     }
-    // right-hand side Gᵀ W b, and a Jacobi preconditioner
     u.fill(0);
     for (let q = 0; q < D.length; q++) { const k = D[q]; u[k] = c[k] * wd[k] * b[k]; }
     rhs.fill(0);
@@ -259,13 +278,14 @@ async function build(inp, onProgress) {
       for (const k of [i - gw, i + gw]) d += wd[k] * (c[k] * a2 * inv2h) ** 2;
       Minv[i] = 1 / d;
     }
-    // preconditioned conjugate gradients, warm-started from the last pass
     u.fill(0); Lv.fill(0);
     apply(dz, Ap);
     let rz = 0;
     for (let q = 0; q < U.length; q++) { const i = U[q]; r[i] = rhs[i] - Ap[i]; zz[i] = Minv[i] * r[i]; p[i] = zz[i]; rz += r[i] * zz[i]; }
-    const r0 = Math.sqrt(U.reduce((s, i) => s + r[i] * r[i], 0)) || 1;
-    for (let it = 0; it < ITERS; it++) {
+    let r0 = 0;
+    for (let q = 0; q < U.length; q++) r0 += r[U[q]] ** 2;
+    r0 = Math.sqrt(r0) || 1;
+    for (let it = 0; it < iters; it++) {
       apply(p, Ap);
       let pAp = 0;
       for (let q = 0; q < U.length; q++) { const i = U[q]; pAp += p[i] * Ap[i]; }
@@ -279,22 +299,88 @@ async function build(inp, onProgress) {
       rz = rzn;
       for (let q = 0; q < U.length; q++) { const i = U[q]; p[i] = zz[i] + be * p[i]; }
     }
-    if (onProgress) onProgress((outer + 1) / OUTER);
+    if (onPass) onPass(outer + 1);
     await new Promise(res => setTimeout(res, 0));
   }
-  // the correction is smoothed a little (fine detail in brightness is mostly skin texture) and
-  // kept bounded (a single photo can't move bone by centimetres)
-  const dzs = blur(dz, gw, gh, Math.max(1, Math.round(.22 / h)), act, 1);
+  return dz;
+}
+/** A grid at 1/f resolution (block averages; a node is face if most of its block is). */
+function coarsen(F, f) {
+  const { gw, gh } = F, cw = Math.ceil(gw / f), ch = Math.ceil(gh / f), n2 = cw * ch, out = { gw: cw, gh: ch, h: F.h * f, L: F.L };
+  for (const key of ['z0', 'rho', 'T', 'wd', 'bk', 'act']) {
+    const a = F[key], o = new Float32Array(n2), cnt = new Float32Array(n2), on = new Float32Array(n2);
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+      const k = j * gw + i, q = ((j / f) | 0) * cw + ((i / f) | 0);
+      cnt[q]++;
+      if (F.act[k]) { o[q] += a[k]; on[q]++; }
+    }
+    for (let q = 0; q < n2; q++) o[q] = key === 'act' ? (on[q] > cnt[q] * .5 ? 1 : 0) : on[q] ? o[q] / on[q] : 0;
+    out[key] = key === 'act' ? Uint8Array.from(o) : o;
+  }
+  return out;
+}
+/** Back to full resolution (bilinear from the coarse node centres). */
+function refine(dzC, C, F, f) {
+  const out = new Float32Array(F.gw * F.gh);
+  for (let j = 0; j < F.gh; j++) for (let i = 0; i < F.gw; i++) {
+    if (!F.act[j * F.gw + i]) continue;
+    const fx = Math.min(C.gw - 1.001, Math.max(0, (i + .5) / f - .5)), fy = Math.min(C.gh - 1.001, Math.max(0, (j + .5) / f - .5));
+    const i0 = fx | 0, j0 = fy | 0, tx = fx - i0, ty = fy - j0, q = j0 * C.gw + i0;
+    out[j * F.gw + i] = (dzC[q] * (1 - tx) + dzC[q + 1] * tx) * (1 - ty) + (dzC[q + C.gw] * (1 - tx) + dzC[q + C.gw + 1] * tx) * ty;
+  }
+  return out;
+}
+
+/**
+ * inp: { gw, gh, h (cm per node), act (Uint8, the face), skin (0…1 data weight: face minus eyes,
+ *        brows, lips, nostrils, faded at the edge), z0 (prior depth, cm), lum (linear luminance),
+ *        rgb (linear colour per node), prior (0…1: where the dots pin the shape down — nose, eyes,
+ *        mouth), hint (−1…1: shadow … highlight), ignore (0…1: "not shape"), lightDir (optional:
+ *        the light set in the Light step), trust (0 = keep the map's shape … 1 = follow the photo),
+ *        detail (0…1: how much fine detail the photo may add) }
+ *
+ * Coarse to fine (as current face-reconstruction pipelines do): the shading first corrects the
+ * shape on a coarse grid (≈ 5 mm), where it can only make broad, smooth changes — skin texture,
+ * stubble and lashes can't raise bumps there. Fine detail from the photo is then added on the
+ * full grid only as far as `detail` allows.
+ */
+async function build(inp, onProgress) {
+  const { gw, gh, h, act, z0 } = inp, trust = inp.trust == null ? .5 : inp.trust, detail = inp.detail == null ? .15 : inp.detail;
+  const P = prepare(inp), n = P.n, hint = inp.hint, prior = inp.prior;
+  // the brightness to match: the photo's, pushed up / down where highlights / shadows are marked
+  const T = new Float32Array(n), wd = new Float32Array(n);
+  let Imax = 0;
+  for (let k = 0; k < n; k++) if (P.skin[k] > .5) Imax = Math.max(Imax, P.Is[k]);
+  for (let k = 0; k < n; k++) {
+    T[k] = hint && hint[k] ? P.Is[k] * (1 + .45 * hint[k]) : P.Is[k];
+    if (!P.skin[k]) continue;
+    const s0 = shade(P.L, P.g0.gx[k], P.g0.gy[k]), hk = hint ? Math.abs(hint[k]) : 0;
+    wd[k] = P.skin[k] * (P.Is[k] > .97 * Imax && !hk ? 0 : 1) * (s0 < .12 ? .25 : 1) * (1 + 1.5 * hk);
+    if (hk && !wd[k]) wd[k] = hk;
+  }
+  const beta = .02, bk = new Float32Array(n);
+  for (let k = 0; k < n; k++) bk[k] = beta * (1 + 30 * (prior ? prior[k] : 0));
+  const F = { gw, gh, h, act, z0, rho: P.rho, T, wd, bk, L: P.L };
+  const alpha = .08 * Math.pow(10, (.5 - trust) * 2.4);
+  // coarse pass (≈ 5 mm grid)
+  const f = Math.max(2, Math.round(.5 / h)), C = coarsen(F, f);
+  const dzC = await solve(C, alpha, 5, 160, new Float32Array(C.gw * C.gh), k => onProgress && onProgress(k / 5 * (detail > 0 ? .7 : 1)));
+  let dz = blur(refine(dzC, C, F, f), gw, gh, Math.max(1, Math.round(f / 2)), act, 1);
+  // fine pass: only as much detail as allowed (a stiffer surface for less detail)
+  if (detail > 0) {
+    dz = await solve(F, alpha / Math.max(.05, detail * detail) * .5, 2, 100, dz, k => onProgress && onProgress(.7 + k / 2 * .3));
+    dz = blur(dz, gw, gh, 1, act, 1);
+  }
   const z = new Float32Array(n);
-  for (let k = 0; k < n; k++) z[k] = z0[k] + Math.max(-1, Math.min(1, act[k] ? dzs[k] : 0));
+  for (let k = 0; k < n; k++) z[k] = z0[k] + (act[k] ? Math.max(-1, Math.min(1, dz[k])) : 0);
   const g1 = gradient(z, gw, gh, h, act), S0 = new Float32Array(n), S1 = new Float32Array(n);
-  for (let k = 0; k < n; k++) if (act[k]) { S0[k] = rhoLP[k] * shade(L, g0.gx[k], g0.gy[k]); S1[k] = rhoLP[k] * shade(L, g1.gx[k], g1.gy[k]); }
-  const lightDir = [L[1], L[2], L[3]], ll = Math.hypot(...lightDir) || 1;
+  for (let k = 0; k < n; k++) if (act[k]) { S0[k] = P.rho[k] * shade(P.L, P.g0.gx[k], P.g0.gy[k]); S1[k] = P.rho[k] * shade(P.L, g1.gx[k], g1.gy[k]); }
   return {
-    gw, gh, h, act, skin, z0, z, light: L, dir: lightDir.map(v => v / ll), rho: rhoLP, I: Is,
-    fit0: corr(Is, S0, wd0), fit1: corr(Is, S1, wd0), strength: ll / Math.max(.05, Math.abs(a0) + ll),
+    gw, gh, h, act, skin: P.skin, z0, z, light: P.L, dir: P.dir, rho: P.rho, I: P.Is,
+    fit0: corr(P.Is, S0, wd), fit1: corr(P.Is, S1, wd), strength: P.strength,
   };
 }
+
 /* ----------------------------------------------------------- topography -- */
 
 const LABELS = [
@@ -561,5 +647,5 @@ function createViewer(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '19' };
+window.CraniSurface = { buildSurface: build, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createViewer, LABELS, build: '20' };
 })();
