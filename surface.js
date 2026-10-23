@@ -413,6 +413,10 @@ function fitAnatomy(inp, P, T, wd) {
   // (Follow the photo widens or narrows how far the light may move the anatomy: × 4 either way)
   const sigV = .35 * Math.pow(10, ((inp.trust == null ? .5 : inp.trust) - .5) * 1.2), sigP = .15, F = Math.max(1, (1.4 / h) ** 2), vmax = 1;
   const pins = (inp.pins || []).filter(p => act[p.k]);
+  // values set by hand (in the Surface panel) are held: the rest of the anatomy fits around them
+  const keys = inp.basis.keys, fixed = keys.map(k => inp.fixed && Number.isFinite(inp.fixed[k]) ? inp.fixed[k] : null);
+  fixed.forEach((f, j) => { if (f != null) v[j] = f; });
+  if (fixed.some(f => f != null)) for (let k = 0; k < n; k++) { if (!act[k]) continue; let s = z0[k]; for (let j = 0; j < nb; j++) s += v[j] * B[j][k]; z[k] = s; }
   let L = P.L.slice(), c = new Array(NP).fill(0);
   c[0] = 1;
   const shadeAll = () => {
@@ -471,8 +475,9 @@ function fitAnatomy(inp, P, T, wd) {
       for (let j = 0; j < nb; j++) { b[j] += B[j][p.k] * e / (sigP * sigP); for (let l = 0; l <= j; l++) A[j][l] += B[j][p.k] * B[l][p.k] / (sigP * sigP); }
     }
     for (let j = 0; j < nb; j++) { for (let l = j + 1; l < nb; l++) A[j][l] = A[l][j]; b[j] -= v[j] / (sigV * sigV); A[j][j] = A[j][j] * 1.05 + 1 / (sigV * sigV); }
+    fixed.forEach((f, j) => { if (f == null) return; for (let l = 0; l < nb; l++) A[j][l] = A[l][j] = 0; A[j][j] = 1; b[j] = 0; });
     const dv = solveSmall(A, b);
-    for (let j = 0; j < nb; j++) v[j] = Math.max(-vmax, Math.min(vmax, v[j] + dv[j]));
+    for (let j = 0; j < nb; j++) if (fixed[j] == null) v[j] = Math.max(-vmax, Math.min(vmax, v[j] + dv[j]));
     for (let k = 0; k < n; k++) { if (!act[k]) continue; let s = z0[k]; for (let j = 0; j < nb; j++) s += v[j] * B[j][k]; z[k] = s; }
   }
   return { values: Object.fromEntries(inp.basis.keys.map((key, j) => [key, v[j]])), z };
@@ -557,15 +562,28 @@ async function build(inp, onProgress) {
     dz = blur(dz, gw, gh, 1, act, 1);
   }
   const z = new Float32Array(n);
-  for (let k = 0; k < n; k++) z[k] = z0[k] + (act[k] ? Math.max(-1.5, Math.min(1.5, dz[k])) : 0);
+  for (let k = 0; k < n; k++) { dz[k] = act[k] ? Math.max(-1.5, Math.min(1.5, dz[k])) : 0; z[k] = z0[k] + dz[k]; }
   const g0 = gradient(zPrior, gw, gh, h, act), g1 = gradient(z, gw, gh, h, act), S0 = new Float32Array(n), S1 = new Float32Array(n);
   for (let k = 0; k < n; k++) if (act[k]) { S0[k] = P.rho[k] * shade(P.L, g0.gx[k], g0.gy[k], P.ao[k]); S1[k] = P.rho[k] * shade(P.L, g1.gx[k], g1.gy[k], P.ao[k]); }
   return {
-    gw, gh, h, act, skin: P.skin, z0: zPrior, zfit: z0, z, light: P.L, dir: P.dir, rho: P.rho, I: P.Is,
+    gw, gh, h, act, skin: P.skin, z0: zPrior, zfit: z0, z, dz: detail > 0 ? dz : null, light: P.L, dir: P.dir, rho: P.rho, I: P.Is,
     fit: fit ? fit.values : null, fit0: corr(P.Is, S0, wd), fit1: corr(P.Is, S1, wd), strength: P.strength,
   };
 }
 const DETAIL_ALPHA = .15;
+/**
+ * The surface for given anatomy values, without fitting again (the Surface panel's sliders): the
+ * template depth + Σ v·B, bent through the pins, plus the free detail found by the last build.
+ */
+function compose(inp, values, dz) {
+  const { act, z0 } = inp, B = inp.basis.B, n = z0.length;
+  let zf = Float32Array.from(z0);
+  inp.basis.keys.forEach((key, j) => { const v = values[key] || 0; if (v) for (let k = 0; k < n; k++) if (act[k]) zf[k] += v * B[j][k]; });
+  if (inp.pins && inp.pins.length && inp.bendR) zf = bendThrough(zf, inp, inp.pins, inp.bendR);
+  const z = new Float32Array(n);
+  for (let k = 0; k < n; k++) z[k] = zf[k] + (dz && act[k] ? dz[k] : 0);
+  return { zfit: zf, z };
+}
 
 /* ----------------------------------------------------------- topography -- */
 
@@ -798,5 +816,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '26' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '27' };
 })();
