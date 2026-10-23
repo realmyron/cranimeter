@@ -72,9 +72,11 @@ mid('me', 'Chin bottom (menton)', 0, 6.3, 7.8, 'outline', 'both', 7.5, 'Menton',
 mid('fhC', 'Forehead · centre', 0, -9.4, 9.2, 'skin', 'face', 5);
 mid('fhT', 'Upper forehead · centre', 0, -10.85, 8.75, 'skin', 'face', 5);
 pair('fh', 'Forehead', 3.7, -9.6, 8.2, 'skin', 'face', 5);
-pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -8.1, 9.3, 'skin', 'face', 6);
+// (the brow ridge on its crest as measured on a scanned head — ICT-FaceKit's, by curvature: the most
+// convex line above the eyes, ≈ 3.5 mm lower than it was, about at the brows' upper edge)
+pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -7.75, 9.3, 'skin', 'face', 6);
 pair('temH', 'Temple hollow', 5.4, -6.4, 5.8, 'skin', 'face', 9);
-mid('gl', 'Glabella', 0, -6.9, 9.8, 'skin', 'face', 5.5, 'Glabella');   // bone (between the brow ridges), not a brow dot
+mid('gl', 'Glabella', 0, -7.15, 9.85, 'skin', 'face', 5.5, 'Glabella');   // bone (between the brow ridges), not a brow dot
 pair('bi', 'Brow · inner', 1.2, -6.7, 9.0, 'brows', 'face', 6);
 pair('bm', 'Brow · centre', 2.1, -7.15, 8.8, 'brows', 'face', 6, null, { detail: true });
 pair('ba', 'Brow · arch (centre)', 3.0, -7.4, 8.6, 'brows', 'face', 6, null, { detail: true });
@@ -193,8 +195,8 @@ pair('lc2', 'Lower lid crease', 3.0, -4.78, 8.15, 'skin', 'face', 4);
 pair('lc3', 'Lower lid crease', 3.8, -4.85, 7.7, 'skin', 'face', 4);
 pair('lc4', 'Lower lid crease', 4.45, -5.0, 7.35, 'skin', 'face', 4.5);
 // orbit: the bony rim around the eye — supraorbital (above), lateral, infraorbital (below), medial
-pair('so1', 'Supraorbital rim · inner', 1.4, -7.75, 9.5, 'skin', 'face', 6);
-pair('so3', 'Supraorbital rim · outer', 4.35, -7.8, 8.45, 'skin', 'face', 6);
+pair('so1', 'Supraorbital rim · inner', 1.45, -7.62, 9.48, 'skin', 'face', 6);
+pair('so3', 'Supraorbital rim · outer', 4.33, -7.72, 8.47, 'skin', 'face', 6);
 pair('lor', 'Lateral orbital rim', 5.25, -5.5, 6.6, 'skin', 'face', 6.5);
 pair('ior', 'Infraorbital rim · outer', 4.55, -4.55, 7.15, 'skin', 'face', 6.5);
 pair('mor', 'Medial orbital rim', 1.25, -5.05, 8.7, 'skin', 'face', 6);
@@ -226,9 +228,9 @@ pair('hx3', 'Helix · lower back', 7.75, -0.9, -1.9, 'ears', 'back');
 // sulcus), and the temporal line where the front of the forehead turns sharply into the temple
 mid('sg', 'Supraglabella (above the brow ridge)', 0, -7.95, 9.65, 'skin', 'face', 5.5);
 mid('rx', 'Radix (between glabella and nasion)', 0, -6.25, 9.45, 'nose', 'face', 6);
-pair('so4', 'Brow ridge · lateral end', 5.5, -7.25, 6.9, 'skin', 'face', 5.5);
+pair('so4', 'Brow ridge · lateral end', 5.47, -7.16, 6.93, 'skin', 'face', 5.5);
 pair('ss1', 'Above the brow ridge', 1.5, -8.65, 9.35, 'skin', 'face', 5);
-pair('ss2', 'Above the brow ridge', 3.0, -9.0, 8.8, 'skin', 'face', 5);
+pair('ss2', 'Above the brow ridge', 3.0, -8.6, 8.88, 'skin', 'face', 5);
 pair('ss3', 'Above the brow ridge', 4.45, -8.65, 7.8, 'skin', 'face', 5);
 pair('tc1', 'Temporal line (forehead edge)', 5.65, -8.1, 6.2, 'skin', 'face', 5);
 pair('tc2', 'Temporal line (forehead edge)', 5.6, -9.1, 6.0, 'skin', 'face', 5);
@@ -675,6 +677,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '30',
+  mls, tpsFit, tpsEval, spline, build: '31',
 };
 })();
