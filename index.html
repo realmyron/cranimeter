@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
 <!-- dark until the stylesheet arrives (and if it never does, at least not a blank white page) -->
 <style>:where(html:not([data-theme="light"])) body { background: #080a0f; color: #e8eaf0; }</style>
-<link rel="stylesheet" href="style.css?v=28">
+<link rel="stylesheet" href="style.css?v=29">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -159,6 +159,13 @@
 <div id="hint" class="hint"><div class="hint-in"></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+<!-- The photos: the front one, the side (profile) one, and the 3D head built from both -->
+<nav id="slots" class="slots glass" aria-label="Photos">
+  <button type="button" data-slot="front" class="on" title="The front photo — map it and measure it">Front<i></i></button>
+  <button type="button" data-slot="side" title="A side (profile) photo of the same person — map its profile and measure it">Side<i></i></button>
+  <button type="button" data-slot="3d" title="The 3D head, built from the front face map (and the side one, once it’s placed)">3D<i></i></button>
+</nav>
+
 <!-- Landing -->
 <section id="drop" class="drop">
   <div class="drop-card glass">
@@ -268,10 +275,10 @@
 
 <!-- Bump the ?v= tags (and BUILD in app.js, presets.js, warp.js and facemap.js) on every release.
      If a browser still has an old copy of a file, app.js fetches it again by itself. -->
-<script src="presets.js?v=28"></script>
-<script src="warp.js?v=28"></script>
-<script src="facemap.js?v=28"></script>
-<script src="surface.js?v=28"></script>
-<script src="app.js?v=28"></script>
+<script src="presets.js?v=29"></script>
+<script src="warp.js?v=29"></script>
+<script src="facemap.js?v=29"></script>
+<script src="surface.js?v=29"></script>
+<script src="app.js?v=29"></script>
 </body>
 </html>
