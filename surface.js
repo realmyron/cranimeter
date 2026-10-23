@@ -174,26 +174,37 @@ function prepare(inp) {
   const { gw, gh, h, act, z0, lum } = inp, n = gw * gh, ign = inp.ignore;
   const skin = Float32Array.from(inp.skin), cw = new Float32Array(n).fill(1);
   if (ign) for (let k = 0; k < n; k++) skin[k] *= 1 - ign[k];
+  // Where a beard grows, the photo is read through a ≈ 3 mm blur: stubble is speckle much finer than
+  // that and only darkens the skin there (its own skin colour takes that up), while the shading of the
+  // chin, the lip–chin crease and the jaw is broader and survives — so it still counts as evidence.
+  const beard = inp.regions && inp.regions[0], rB = Math.max(1, Math.round(.3 / h));
+  const mixB = (a, b) => { if (beard) for (let k = 0; k < n; k++) a[k] += (b[k] - a[k]) * beard[k]; return a; };
   // Light and shade change brightness, not colour (chromaticity): a different colour isn't shape.
   if (inp.rgb) {
     const rgb = inp.rgb, cr = new Float32Array(n), cg = new Float32Array(n);
     for (let k = 0; k < n; k++) { const t = rgb[3 * k] + rgb[3 * k + 1] + rgb[3 * k + 2] || 1e-6; cr[k] = rgb[3 * k] / t; cg[k] = rgb[3 * k + 1] / t; }
     const sr = blur(cr, gw, gh, 1, act, 1), sg = blur(cg, gw, gh, 1, act, 1);
-    const mr = wmedian(sr, skin), mg = wmedian(sg, skin), d = new Float32Array(n);
-    for (let k = 0; k < n; k++) d[k] = Math.hypot(sr[k] - mr, sg[k] - mg);
+    if (beard) { mixB(sr, blur(cr, gw, gh, rB, act, 2)); mixB(sg, blur(cg, gw, gh, rB, act, 2)); }
+    // (the beard area against its own colour: stubble tints all of it, and that isn't shape either)
+    const wF = beard ? skin.map((v, k) => v * (1 - beard[k])) : skin, wB = beard ? skin.map((v, k) => v * beard[k]) : null;
+    const mr = wmedian(sr, wF), mg = wmedian(sg, wF), d = new Float32Array(n);
+    const mrB = wB ? wmedian(sr, wB) : mr, mgB = wB ? wmedian(sg, wB) : mg;
+    for (let k = 0; k < n; k++) { const b = beard ? beard[k] : 0; d[k] = Math.hypot(sr[k] - (mr + (mrB - mr) * b), sg[k] - (mg + (mgB - mg) * b)); }
     const sig = Math.max(.004, 1.4826 * wmedian(d, skin));
     for (let k = 0; k < n; k++) { cw[k] = Math.exp(-((d[k] / (2.5 * sig)) ** 2)); skin[k] *= cw[k]; }
   }
-  // Speckle finer than a node (stubble) only darkens the skin: trusted much less as shape.
+  // Speckle finer than a node (stubble) only darkens the skin: trusted much less as shape (less so
+  // in the beard area, where the blur has taken the speckle out)
   if (inp.tex) {
     const t0 = Math.max(1e-3, wquant(inp.tex, skin, .3));
-    for (let k = 0; k < n; k++) { const e = Math.max(0, inp.tex[k] / t0 - 1.3) / .8; skin[k] /= 1 + e * e; }
+    for (let k = 0; k < n; k++) { const e = Math.max(0, inp.tex[k] / t0 - 1.3) / .8 * (beard ? 1 - .95 * beard[k] : 1); skin[k] /= 1 + e * e; }
   }
   let ms = 0, mc = 0;
   for (let k = 0; k < n; k++) if (skin[k] > .3) { ms += lum[k] * skin[k]; mc += skin[k]; }
   const mean = ms / Math.max(1e-6, mc) || 1, I = new Float32Array(n);
   for (let k = 0; k < n; k++) I[k] = lum[k] / mean;
   const Is = blur(I, gw, gh, 1, act, 1);
+  if (beard) mixB(Is, blur(I, gw, gh, rB, act, 2));
   const g0 = gradient(z0, gw, gh, h, act), ao = occlusion(z0, gw, gh, h, act);
   const L = inp.lightDir ? fitLightDir(Is, g0.gx, g0.gy, skin, inp.lightDir, ao) : fitLight(Is, g0.gx, g0.gy, skin, ao);
   const rho = new Float32Array(n), wr = new Float32Array(n), hint = inp.hint;
@@ -816,5 +827,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '27' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '28' };
 })();
