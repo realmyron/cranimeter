@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '26';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '27';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -647,7 +647,9 @@ function fitMap(view = (S.map && S.map.view) || 'front', extraPairs = []) {
   for (const c of pairs) pos[c.i] = { x: c.b.x, y: c.b.y };
   const p = new Float32Array(NMAP * 2);
   pos.forEach((v, i) => { p[2 * i] = v.x; p[2 * i + 1] = v.y; });
+  const af = S.map && S.map.view === view ? S.map.af : null;   // the face's anatomy set by hand stays with the photo
   S.map = makeMap(view, p, pairs.length);
+  if (af) S.map.af = af;
   buildMask();
   estimateLight();
   return pairs.length;
@@ -884,12 +886,14 @@ function photoToTemplate() {
   if (m.p2t && m.p2t.pver === m.pver) return m.p2t;
   const f = mapFrame(), ctl = [], z2 = f.zr * f.zr + f.zi * f.zi;
   FM.POINTS.forEach((pt, i) => {
-    if (!m.vis[i] || pt.field === 'back') return;
+    // the brows and hair are on the skin, not the skull: where they are doesn't move the bone under them
+    // (and the detail dots only follow the named ones)
+    if (!m.vis[i] || pt.field === 'back' || COLOUR_ONLY(pt) || pt.mid) return;
     const tp = FM.project(pt, m.yaw);
     ctl.push(m.p[2 * i], m.p[2 * i + 1], f.zr * tp.x - f.zi * tp.y + f.tx, f.zi * tp.x + f.zr * tp.y + f.ty);
   });
   // smoother than the warp's own fit: dots placed a little off each other bend the depth less
-  const T = FM.tpsFit(ctl, ctl.length / 4, Math.max(S.iw, S.ih), 2e-3);
+  const T = FM.tpsFit(ctl, ctl.length / 4, Math.max(S.iw, S.ih), 6e-3);
   m.p2t = { pver: m.pver, at(x, y) { const [ax, ay] = FM.tpsEval(T, x, y), ux = ax - f.tx, uy = ay - f.ty; return [(ux * f.zr + uy * f.zi) / z2, (uy * f.zr - ux * f.zi) / z2]; } };
   return m.p2t;
 }
@@ -913,7 +917,7 @@ function denseFace() {
   // splines from the photo onto the template (as seen from this view), its depth and the tissue depth
   const ctl = [], gx = [], gy = [], dD = [], dT = [];
   FM.POINTS.forEach((pt, i) => {
-    if (!m.vis[i] || pt.field === 'back') return;
+    if (!m.vis[i] || pt.field === 'back' || COLOUR_ONLY(pt) || pt.mid) return;   // (as in photoToTemplate)
     const tp = FM.project(pt, m.yaw);
     ctl.push(m.p[2 * i], m.p[2 * i + 1], f.zr * tp.x - f.zi * tp.y + f.tx, f.zi * tp.x + f.zr * tp.y + f.ty);
     gx.push(m.p[2 * i]); gy.push(m.p[2 * i + 1]);
@@ -1236,6 +1240,59 @@ function surfHints(I) {
   for (let k = 0; k < I.n; k++) if (I.act[k]) { const x = I.x0 + (k % I.gw) * I.cell, y = I.y0 + ((k / I.gw) | 0) * I.cell; hint[k] = hintAt(S.hints.hl, x, y); ignore[k] = hintAt(S.hints.ig, x, y); }
   return { hint, ignore };
 }
+/** Depths set by dragging dots in 3D (or from a side photo): the anatomy is fitted to them, then the surface bends through them. */
+function surfPins(I) {
+  const m = S.map, pins = [];
+  if (m.zo) FM.POINTS.forEach((pt, i) => {
+    if (!Number.isFinite(m.zo[i]) || !m.vis[i] || pt.field === 'back') return;
+    const x = m.p[2 * i], y = m.p[2 * i + 1], gi = Math.round((x - I.x0) / I.cell), gj = Math.round((y - I.y0) / I.cell), k = gj * I.gw + gi;
+    if (gi < 0 || gj < 0 || gi >= I.gw || gj >= I.gh || !I.act[k]) return;
+    pins.push({ k, z: m.zo[i], x, y });
+  });
+  return pins;
+}
+/* The face's own anatomy in the Surface panel: what the light suggested, corrected by hand while you
+   look at the turned face. A value set here is held (m.af) — the fit works around it on every rebuild.
+   (Full ↔ lean is one control over two: cheek hollows up and facial fat down, or the other way.) */
+const SURF_ANAT = [
+  ['chinProj', 'Chin projection'], ['jawProj', 'Lower jaw'], ['midfaceProj', 'Forward growth (maxilla)'], ['malarProj', 'Cheekbones'],
+  ['infraorbital', 'Under-eye support'], ['browRidge', 'Brow ridge'], ['noseBridge', 'Nose bridge'], ['noseTip', 'Nose tip'],
+  ['lips', 'Lips'], ['lean', 'Full ↔ lean'],
+];
+const leanOf = f => clamp(((f.buccal || 0) - (f.fat || 0) / .7) / 2, -2, 2);
+/** Set anatomy values by hand and show the result at once (no refit: the build's pieces are reused). */
+function setFaceAnat(upd) {
+  const m = S.map, s = S.surf;
+  if (!m || !s || s.pver !== m.pver || s.view !== m.view) return;
+  const u = { ...upd };
+  if ('lean' in u) { const L = u.lean; delete u.lean; u.buccal = clamp(L, -2, 2); u.fat = clamp(-.7 * L, -2, 2); }
+  m.af = { ...(m.af || {}), ...u };
+  const I = surfInputs(), values = { ...(s.fit || {}), ...m.af };
+  const r = SF.compose({ ...I, basis: surfBasis(I), pins: surfPins(I), bendR: 3 * mapFrame().scale }, values, s.dz);
+  // a new surface object (the undo snapshot keeps the old one)
+  S.surf = { ...s, z: r.z, zfit: r.zfit, fit: values, _zt: null, rev: ++surfRev };
+  S.glDirty = true; syncFaceMapPanel(); wake();
+}
+const ANAT_TIPS = {
+  chinProj: 'How far the chin (pogonion) comes forward — hard to see from the front: check it on the turned face',
+  jawProj: 'The lower jaw forward or back: chin, lower lip and the jaw body together',
+  midfaceProj: 'Maxillary projection — the nose base, upper lip and inner cheeks forward ("forward growth")',
+  infraorbital: 'The bone under the eyes: forward = support (no hollow), back = a shadowed under-eye',
+  lean: '+ lean: hollow cheeks, less facial fat · − full: fuller cheeks and face',
+};
+function buildAnatPanel(an) {
+  an.dataset.built = '1';
+  an.innerHTML = '<div class="to-label">Anatomy <small>read from the light — turn the face and drag to correct</small></div>'
+    + SURF_ANAT.map(([k, label]) => sliderRow('sfa_' + k, label, -150, 150, 1, ANAT_TIPS[k] || (FM.OP_INDEX[k] && FM.OP_INDEX[k].help) || '')).join('')
+    + '<div class="to-actions" style="margin:2px 0 4px"><button type="button" class="btn ghost sm" id="sfaReset" title="Forget your values and read them from the light again">Back to the light’s reading</button></div><p class="to-note" id="sfaNote"></p>';
+  an.querySelectorAll('input.rng').forEach(el => {
+    el.classList.add('bi');
+    const k = el.id.slice(4);
+    el.addEventListener('input', () => { if (!S.sfaSnap) S.sfaSnap = snapshot(); setFaceAnat({ [k]: +el.value / 100 }); });
+    el.addEventListener('change', () => { if (S.sfaSnap) { pushUndo(S.sfaSnap); S.sfaSnap = null; } });
+  });
+  $('#sfaReset').addEventListener('click', () => { if (!S.map) return; pushUndo(); S.map.af = {}; buildSurface({ auto: true }); });
+}
 /** What the surface depends on besides the dots: the light and the marks (a rebuild is due when it changes). */
 const zoSig = zo => { if (!zo) return '0'; let n = 0, s = 0; zo.forEach((v, i) => { if (Number.isFinite(v)) { n++; s += v * (i % 97 + 1); } }); return `${n}:${s.toFixed(3)}`; };
 const surfDeps = () => `${S.lightDir ? S.lightDir.map(v => v.toFixed(3)).join(',') : 'auto'}|${S.hints ? S.hints.rev : 0}|${S.map ? zoSig(S.map.zo) : 0}`;
@@ -1245,20 +1302,13 @@ async function buildSurface(opt = {}) {
   // the light marks are part of the pipeline: detected automatically if step 2 was skipped
   if (!S.hints && lightInfo()) detectMarks(true);
   const m = S.map, seq = S.imgSeq, pver = m.pver, I = surfInputs(), { hint, ignore } = surfHints(I), deps = surfDeps();
-  // depths set by dragging dots in 3D: the anatomy is fitted to them too, then the surface bends through them
-  const pins = [];
-  if (m.zo) FM.POINTS.forEach((pt, i) => {
-    if (!Number.isFinite(m.zo[i]) || !m.vis[i] || pt.field === 'back') return;
-    const x = m.p[2 * i], y = m.p[2 * i + 1], gi = Math.round((x - I.x0) / I.cell), gj = Math.round((y - I.y0) / I.cell), k = gj * I.gw + gi;
-    if (gi < 0 || gj < 0 || gi >= I.gw || gj >= I.gh || !I.act[k]) return;
-    pins.push({ k, z: m.zo[i], x, y });
-  });
+  const pins = surfPins(I);
   const { gw, gh, x0, y0, cell, crop, feat } = I;
   S.surfBusy = { p: 0 };
   syncFaceMapPanel();
   let res;
   try {
-    res = await SF.buildSurface({ ...I, basis: surfBasis(I), hint, ignore, pins, bendR: 3 * mapFrame().scale, lightDir: S.lightDir, trust: cfg.surfTrust, detail: cfg.surfDetail }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
+    res = await SF.buildSurface({ ...I, basis: surfBasis(I), hint, ignore, pins, bendR: 3 * mapFrame().scale, fixed: m.af || {}, lightDir: S.lightDir, trust: cfg.surfTrust, detail: cfg.surfDetail }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
   } catch (err) { console.error(err); }
   S.surfBusy = null;
   const again = S.surfAgain;
@@ -1744,6 +1794,25 @@ function dotDepth(i) {
 const bilin = (a, gw, fx, fy) => { const i0 = fx | 0, j0 = fy | 0, tx = fx - i0, ty = fy - j0, k = j0 * gw + i0; return (a[k] * (1 - tx) + a[k + 1] * tx) * (1 - ty) + (a[k + gw] * (1 - tx) + a[k + gw + 1] * tx) * ty; };
 // (the head isn't rebuilt mid-drag: the dots keep moving over the relief as it was)
 const stageKeyOf = () => S.mapDrag && stageZ && stageZ.key.startsWith(surfKey() + '|') ? stageZ.key : `${surfKey()}|${S.map ? S.map.pver : 0}`;
+/**
+ * The head and neck as seen in a front photo, on a grid: the hair's outline over the top, down past the
+ * ears and along both sides of the neck, plus the face and the ears. Null when those dots aren't there
+ * (a profile) — then the dots' convex hull stands in.
+ */
+function headMask(m, gw, gh, x0, y0, cell) {
+  if (isProfile(m)) return null;
+  const ring = ['hslL', 'hseL', 'hsuL', 'htsL', 'vertex', 'htsR', 'hsuR', 'hseR', 'hslR', 'lobR', 'ntR', 'nmR', 'nbR', 'nbL', 'nmL', 'ntL', 'lobL'].map(id => FM.INDEX[id]);
+  if (ring.some(i => i == null || !m.vis[i])) return null;
+  const c = document.createElement('canvas'); c.width = gw; c.height = gh;
+  const g = c.getContext('2d', { willReadFrequently: true }), P = i => ({ x: m.p[2 * i], y: m.p[2 * i + 1] });
+  g.setTransform(1 / cell, 0, 0, 1 / cell, -x0 / cell + .5, -y0 / cell + .5); g.fillStyle = '#fff';
+  const poly = (pts, smooth) => { const q = smooth ? FM.spline(pts, true, 6) : pts; g.beginPath(); q.forEach((p, k) => k ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.closePath(); g.fill(); };
+  poly(ring.map(P), false);
+  for (const ct of m.contours) if (ct.closed && (ct.boundary || /^ear/.test(ct.id)) && !ct.idx.some(i => !m.vis[i])) poly(ct.idx.map(P), true);
+  const d = g.getImageData(0, 0, gw, gh).data, out = new Float32Array(gw * gh);
+  for (let k = 0; k < out.length; k++) out[k] = d[4 * k + 3] / 255;
+  return out;
+}
 /** Convex hull (Andrew's monotone chain) of [x, y] points, counter-clockwise. */
 function convexHull(P) {
   const p = P.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]), cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
@@ -1784,10 +1853,14 @@ function stageDepth() {
   for (const v of sv) zb = Math.min(zb, v);
   zb -= .5;
   for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) Hc[j * cw + i] = T ? scalarAt(T, bx0 + i * st4 * cell, by0 + j * st4 * cell) : zb;
-  // inside the head (the hull), feathered
-  const inHull = (x, y) => { for (let q = 0; q < hull.length; q++) { const a = hull[q], b = hull[(q + 1) % hull.length]; if ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]) < 0) return 0; } return 1; };
-  const head = new Float32Array(n);
-  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) head[j * gw + i] = hull.length > 2 ? inHull(bx0 + i * cell, by0 + j * cell) : 0;
+  // inside the head: over the hair, down past the ears and along the sides of the neck (a convex hull
+  // also took in the background beside the neck, which hung below the jaw like extra necks), feathered
+  const head = headMask(m, gw, gh, bx0, by0, cell) || (() => {
+    const inHull = (x, y) => { for (let q = 0; q < hull.length; q++) { const a = hull[q], b = hull[(q + 1) % hull.length]; if ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]) < 0) return 0; } return 1; };
+    const a = new Float32Array(n);
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) a[j * gw + i] = hull.length > 2 ? inHull(bx0 + i * cell, by0 + j * cell) : 0;
+    return a;
+  })();
   const hm = SF.blur(head, gw, gh, Math.max(1, Math.round(.3 / h)), null, 2);
   // the face, its depth carried a little past its edge (nearest edge value) so the join has no gap
   const { gw: fw, gh: fh, act } = s, fn = fw * fh, dd = new Float32Array(fn).fill(1e9), fz = new Float32Array(fn);
@@ -1797,6 +1870,9 @@ function stageDepth() {
   for (let j = fh - 1; j >= 0; j--) for (let i = fw - 1; i >= 0; i--) { const k = j * fw + i; if (i < fw - 1) relax(k, k + 1, 1); if (j < fh - 1) { relax(k, k + fw, 1); if (i < fw - 1) relax(k, k + fw + 1, 1.414); if (i > 0) relax(k, k + fw - 1, 1.414); } }
   const fzS = SF.blur(fz, fw, fh, Math.max(1, Math.round(.3 / s.h)), null, 2);
   for (let k = 0; k < fn; k++) if (!act[k]) fz[k] = fzS[k];
+  // near its edge the face is read smoothed: the grid's staircase there (a cell in or out where the
+  // cheek's side falls steeply) otherwise runs out across the steep side as stripes
+  const fzB = SF.blur(fz, fw, fh, Math.max(1, Math.round(.25 / s.h)), null, 2);
   // where the face is: its outline drawn smooth (anti-aliased, softened a little), not the grid's staircase
   const fc = document.createElement('canvas'); fc.width = gw; fc.height = gh;
   const fg = fc.getContext('2d', { willReadFrequently: true }), bd = mapBoundary();
@@ -1812,20 +1888,37 @@ function stageDepth() {
     shellZ[k] = zb + (bilin(Hc, cw, Math.min(cw - 1.001, i / st4), Math.min(ch - 1.001, j / st4)) - zb) * hm[k];
   }
   const shellS = SF.blur(shellZ, gw, gh, Math.max(2, Math.round(.45 / h)), null, 2);
+  // How far outside the face each node is, and how low on the face its nearest edge is: below the jaw
+  // the face's edge slopes back to the neck over ~1 cm — the underside of the chin and jaw — instead of
+  // dropping as a curtain; at the cheeks and temples it turns back steeply, as a head's side does.
+  // (and, inside, how far in from the edge)
+  const od = new Float32Array(n).fill(1e9), oy = new Float32Array(n), di = new Float32Array(n).fill(1e9);
+  for (let k = 0; k < n; k++) if (fa[k] >= .5) { od[k] = 0; oy[k] = by0 + ((k / gw) | 0) * cell; } else di[k] = 0;
+  const rel2 = (k, q, w) => { if (od[q] + w < od[k]) { od[k] = od[q] + w; oy[k] = oy[q]; } if (di[q] + w < di[k]) di[k] = di[q] + w; };
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) { const k = j * gw + i; if (i > 0) rel2(k, k - 1, 1); if (j > 0) { rel2(k, k - gw, 1); if (i > 0) rel2(k, k - gw - 1, 1.414); if (i < gw - 1) rel2(k, k - gw + 1, 1.414); } }
+  for (let j = gh - 1; j >= 0; j--) for (let i = gw - 1; i >= 0; i--) { const k = j * gw + i; if (i < gw - 1) rel2(k, k + 1, 1); if (j < gh - 1) { rel2(k, k + gw, 1); if (i < gw - 1) rel2(k, k + gw + 1, 1.414); if (i > 0) rel2(k, k + gw - 1, 1.414); } }
+  const pY = id => { const i = FM.INDEX[id]; return i != null && m.vis[i] ? m.p[2 * i + 1] : null; };
+  const yMouth = pY('sto'), yChin = pY('me');
   for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
     const k = j * gw + i, x = bx0 + i * cell, y = by0 + j * cell, shell = shellS[k];
     const fx = (x - s.x0) / s.cell, fy = (y - s.y0) / s.cell;
     if (fx >= 0 && fy >= 0 && fx < fw - 1 && fy < fh - 1) {
-      const a = faS[k], zf = bilin(fz, fw, fx, fy), w = smooth01(.2, .8, a);
+      const a = faS[k], zr = bilin(fz, fw, fx, fy), zB = bilin(fzB, fw, fx, fy), zf = zB + (zr - zB) * smooth01(.15, .6, di[k] * h);
+      const low = yMouth != null && yChin != null && yChin > yMouth ? smooth01(yMouth, yMouth + .6 * (yChin - yMouth), oy[k]) : 0;
+      const wOut = 1 - smooth01(0, .25 + .65 * low, od[k] * h), w = Math.max(smooth01(.2, .8, a), a < .5 ? wOut : 0);
       face[k] = a;
       // outside the face the head never stands in front of the face's edge
       const zo = Math.min(shell, zf);
       Z[k] = zo + (zf - zo) * w;
     } else Z[k] = shell;
   }
-  // soften the head (not the face): the shell's join and the face's stair-stepped edge
-  const sm = SF.blur(Z, gw, gh, Math.max(1, Math.round(.15 / h)), null, 2);
-  for (let k = 0; k < n; k++) if (face[k] > 0 && face[k] < 1) Z[k] += (sm[k] - Z[k]) * (1 - Math.abs(2 * face[k] - 1));
+  // soften the head (not the face): the shell's join, the face's stair-stepped edge and the slope under
+  // the jaw (its distance is measured from the grid's staircase, which left a comb along the jawline)
+  const sm = SF.blur(Z, gw, gh, Math.max(1, Math.round(.15 / h)), null, 2), smB = SF.blur(Z, gw, gh, Math.max(1, Math.round(.3 / h)), null, 2);
+  for (let k = 0; k < n; k++) {
+    if (face[k] > 0 && face[k] < 1) Z[k] += (sm[k] - Z[k]) * (1 - Math.abs(2 * face[k] - 1));
+    if (fa[k] < .5 && od[k] * h < 1.2) Z[k] += (smB[k] - Z[k]) * (1 - smooth01(.8, 1.2, od[k] * h));
+  }
   stageZ = { key, z: Z, gw, gh, x0: bx0, y0: by0, cell, h, face, zb };
   return stageZ;
 }
@@ -2275,7 +2368,7 @@ function snapshot() {
     img: S.imgRec,
     adj: { ...S.adj, ell: S.adj.ell ? { ...S.adj.ell } : null },
     warp: S.warp,   // field arrays are copy-on-write, so sharing the reference is safe
-    map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light, zo: S.map.zo ? S.map.zo.slice() : null } : null,
+    map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light, zo: S.map.zo ? S.map.zo.slice() : null, af: S.map.af ? { ...S.map.af } : null } : null,
     anat: { ...S.anat }, anatBase: { ...S.anatBase },
     tone: S.tone,   // paint arrays are copy-on-write too
     surf: S.surf,   // so is the face surface (and its fixes)
@@ -2301,6 +2394,7 @@ function restore(s) {
     const old = S.map, sm = s.map;
     const zoSame = (a, b) => (!a && !b) || (a && b && a.every((v, i) => v === b[i] || (Number.isNaN(v) && Number.isNaN(b[i]))));
     const pSame = old && sm && old.view === sm.view && old.p.every((v, i) => v === sm.p[i]), same = pSame && zoSame(old.zo, sm.zo);
+    if (old && sm && pSame) old.af = sm.af ? { ...sm.af } : null;   // the face's own anatomy set by hand
     if (same) {
       // only the anatomy changed — keep the scan (and its mask) as it is
       mapTouched(false);
@@ -2315,6 +2409,7 @@ function restore(s) {
         // keep version numbers rising so cached GPU grids are never mistaken for current
         if (old) { S.map.ver = old.ver + 1; S.map.pver = old.pver + 1; S.map.maskVer = old.maskVer; S.map.zoRev = (old.zoRev || 0) + 1; }
         if (sm.zo) S.map.zo = Float32Array.from(sm.zo);
+        if (sm.af) S.map.af = { ...sm.af };
         buildMask();
       } else S.mapSel.clear();
     }
@@ -2871,7 +2966,7 @@ const QFIT = {
     { id: 'lob#', label: 'Bottom of the earlobe' },
   ],
 };
-const qfitSteps = () => QFIT[isProfile() ? 'profile' : 'front'];
+const qfitSteps = () => (S.qfit && S.qfit.steps) || QFIT[isProfile() ? 'profile' : 'front'];
 const qfitId = st => st.id.replace('#', FM.nearSide(S.map ? S.map.yaw : 0));
 /** Is this dot shown (and grabbable) in Map? */
 const dotShown = i => S.map.vis[i] && !S.hideGroups.has(FM.POINTS[i].group);
@@ -3683,18 +3778,22 @@ function syncSurfacePane() {
   setText(bb, busy ? 'Building…' : s ? 'Rebuild' : 'Build surface');
   bb.disabled = !m || !!busy;
   $('#sfFront').disabled = !s || !rotated();
-  // the anatomy read from the light: how this face differs from the template
+  // the face's anatomy: read from the light, corrected by hand (held values marked •)
   const an = $('#sfAnat'), fit = s && m && s.view === m.view ? s.fit : null;
   an.hidden = !fit;
   if (fit) {
-    const rows = Object.entries(fit).filter(([k, v]) => Math.abs(v) >= .1 && FM.OP_INDEX[k]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 6);
-    const pins = m.zo ? m.zo.reduce((c, v) => c + (Number.isFinite(v) ? 1 : 0), 0) : 0, key = rows.map(([k, v]) => k + v.toFixed(2)).join() + '|' + pins;
-    if (an.dataset.key !== key) {
-      an.dataset.key = key;
-      an.innerHTML = '<div class="to-label">Read from the light <small>compared with the average face</small></div><div class="sf-an-list">'
-        + (rows.length ? rows.map(([k, v]) => `<span><b>${esc(FM.OP_INDEX[k].label)}</b> ${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}%</span>`).join('') : '<span>Close to the average face</span>')
-        + '</div>' + (pins ? `<p class="to-note">${pins} dot depth${pins === 1 ? '' : 's'} set by hand or from a side photo.</p>` : '');
-    }
+    if (!an.dataset.built) buildAnatPanel(an);
+    const stale = s.pver !== m.pver, af = m.af || {};
+    SURF_ANAT.forEach(([k]) => {
+      const v = k === 'lean' ? leanOf(fit) : (fit[k] || 0), held = k === 'lean' ? 'buccal' in af || 'fat' in af : k in af, pc = Math.round(v * 100);
+      setRange('sfa_' + k, pc, `${pc > 0 ? '+' : pc < 0 ? '−' : ''}${Math.abs(pc)}%${held ? ' •' : ''}`);
+      $('#sfa_' + k).disabled = stale || !!busy;
+    });
+    const pins = m.zo ? m.zo.reduce((c, v) => c + (Number.isFinite(v) ? 1 : 0), 0) : 0, nh = Object.keys(af).length;
+    $('#sfaReset').disabled = !nh || !!busy;
+    setText($('#sfaNote'), (stale ? 'The dots moved — rebuild before changing these. ' : '')
+      + (nh ? 'Values marked • are yours and are kept on rebuilds. ' : 'Compared with the average face. ')
+      + (pins ? `${pins} dot depth${pins === 1 ? '' : 's'} set by hand or from a side photo.` : ''));
   }
   $$('#sfMode [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (cfg.surfMode || 'photo')));
   setRange('sfTrust', Math.round(cfg.surfTrust * 100), Math.round(cfg.surfTrust * 100) + '%');
@@ -3915,11 +4014,48 @@ function startQuickFit() {
 const MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const MP_TEMPLATE = '0,1.27;0,-1.2;0,-0.45;-0.53,-3.24;0,-1.89;0,-2.68;0,-4.71;-4.25,-5.32;0,-6.36;0,-7.24;0,-10.88;0,1.47;0,1.71;0,1.93;0,1.99;0,2.29;0,2.64;0,2.95;0,3.58;0,-0.8;-0.73,-0.8;-6.8,-7.06;-2.6,-4.65;-3.21,-4.59;-3.79,-4.62;-4.49,-5.09;-2.08,-4.8;-3.68,-6.59;-2.82,-6.54;-4.39,-6.41;-4.75,-6.15;-4.97,-4.62;-2.1,4.58;-4.47,-5.55;-6.7,-5.09;-5.66,-5.12;-3.13,-1.65;-0.79,1.15;-0.71,1.72;-1.48,1.36;-1.92,1.57;-1.27,1.78;-1.68,1.82;-2.8,2.5;-0.61,-1.18;-0.66,-1.85;-5.59,-6.41;-1.82,-3.44;-1.95,-1.3;-1.93,-1.65;-4.85,-1.51;-0.57,-2.61;-4.25,-7.05;-5.1,-6.8;-6.34,-7.81;-1.26,-6.57;-2.12,-6.21;-3.27,1.91;-6.2,2.28;-1.52,-0.95;-1.05,-0.75;-2.43,1.91;-2.31,1.87;-5.44,-7.09;-1.98,-1;-2.95,-7.08;-3.11,-7.58;-3.91,-9.63;-5.86,-7.51;-3.42,-8.66;-5.94,-6.61;-6.38,-6.82;-0.77,1.43;-1.37,1.57;-1.8,1.68;-1.39,-0.82;-2.36,1.88;-2.13,2.09;-2.24,1.92;-1.3,-1.19;-1.61,1.98;-1.18,1.94;-0.65,1.92;-0.81,3.54;-0.75,2.88;-0.74,2.58;-0.71,2.25;-0.73,1.99;-1.63,2.01;-1.73,2.16;-1.81,2.32;-1.9,2.44;-2.66,0.75;-6.89,-1.94;-0.15,-0.62;-1.91,1.97;-2.04,2.03;-0.91,-0.53;-1.81,-0.61;-1,-0.61;-2.46,-3.04;-3.48,-2.53;-2.06,-1.38;-5.46,-8.5;-4.93,-8.09;-4.52,-7.46;-2.26,2.95;-1.47,-7.42;-1.76,-8.97;-2.02,-10.6;-4.24,-4.78;-5.5,-4.18;-1.74,-4.94;-5.23,-5.81;-1.41,-3.85;-1.65,-1.56;-6.14,-3.8;-5.12,-3.58;-4.42,-3.22;-3.34,-3.38;-2.48,-3.69;-1.85,-3.98;-0.61,-4.58;-6.22,-1.8;-5.69,-5.84;-0.51,-0.85;-1.73,-2.74;-6.94,-5.16;-1.39,-4.29;-2.1,-1.34;-4.79,-5.5;-1.58,-1.99;-6.78,0.44;-1.73,-5.18;-1.12,-2.38;-4.65,3.61;-4.63,4.34;-6.71,-1.94;-5.46,2.86;-6.57,-6.02;-2.2,5.21;-0.42,-0.65;-2.33,-2.23;-6.11,-5.08;-3.72,-5.02;-3.23,-4.97;-2.19,2.18;-6.16,0.03;-1.15,5.78;-2.95,5.41;-3.75,5.06;0,-9.04;0,5.8;-2.72,-5.03;-2.23,-5.1;-1.89,-5.13;-6.09,-5.94;-2.32,-5.82;-2.86,-6.05;-3.45,-6.09;-3.95,-5.98;-4.23,-5.83;-6.94,-6.2;-4.04,-5.16;0,0.15;-2.08,0.36;-1.53,-1.06;-0.93,0.14;0,-5.57;-3.84,4.34;-3.1,4.86;-1.18,5.37;-5.41,3.47;-1.94,-5.44;-0.99,-3.56;0,5.4;-2.06,5.64;-6.58,0.24;-1.22,2.07;-1.33,2.22;-1.35,2.43;-1.39,2.69;-1.62,3.33;-2,1.85;-2.15,1.84;-2.22,1.8;-3.07,1.3;-5.34,0.27;-1.02,-4.27;-1.29,-5.63;-1.67,-5.63;-1.93,1.96;-5.25,1.9;-0.76,-5.52;-1.91,3.96;0,-3.33;-0.58,-3.86;0,-3.97;-1.36,-2.57;0,4.83;0,4.17;-0.96,4.15;-3.29,2.89;-2.7,-0.77;-2.65,3.55;-4.05,-0.66;-3.24,-0.03;-4.5,0.56;-1.11,4.8;-1.71,-2.2;-3.68,3.52;-2.94,4.17;-3.79,2.14;-5.9,1.22;-4.47,2.43;-6.22,1.78;-3.65,0.91;-1.33,-3.18;-1.48,-1.29;-1.79,-1.1;-1.21,-1.74;-1.73,-6.27;-2.86,-6.71;-3.9,-6.73;-4.68,-6.54;-5.11,-6.25;-5.18,-5.28;-6.69,-3.83;-4.63,-4.28;-4.06,-4.02;-3.28,-4.04;-2.52,-4.21;-1.94,-4.42;-1.53,-4.59;-6.86,-3.89;-1.77,-0.91;-0.98,-2.98;-1.08,-1.28;-0.79,-0.94;-1.07,-1.16;-1.63,-0.7;-0.7,-0.9;-0.62,-0.74;-1.52,-5.13;-1.21,-4.93;-1.04,-4.76;-4.36,-5.69;-4.89,-5.85;0.53,-3.24;4.25,-5.32;0.62,-0.74;6.8,-7.06;2.6,-4.65;3.21,-4.59;3.79,-4.62;4.49,-5.09;2.08,-4.8;3.68,-6.59;2.82,-6.54;4.39,-6.41;4.75,-6.15;4.97,-4.62;2.1,4.58;4.47,-5.55;6.7,-5.09;5.66,-5.12;3.13,-1.65;0.79,1.15;0.71,1.72;1.48,1.36;1.92,1.57;1.27,1.78;1.68,1.82;2.8,2.5;0.61,-1.18;0.66,-1.85;5.59,-6.41;1.82,-3.44;1.95,-1.3;1.93,-1.65;4.85,-1.51;0.57,-2.61;4.25,-7.05;5.1,-6.8;6.34,-7.81;1.26,-6.57;2.12,-6.21;3.27,1.91;6.2,2.28;1.52,-0.95;1.05,-0.75;2.36,1.88;2.22,1.8;5.44,-7.09;1.98,-1;2.95,-7.08;3.11,-7.58;3.91,-9.63;5.86,-7.51;3.42,-8.66;5.94,-6.61;6.38,-6.82;0.77,1.43;1.37,1.57;1.8,1.68;1.39,-0.82;2.31,1.87;2.04,2.03;2.15,1.84;1.3,-1.19;1.54,1.87;1.16,1.87;0.65,1.92;0.81,3.54;0.75,2.88;0.74,2.58;0.71,2.25;0.56,1.94;1.53,1.89;1.63,2.01;1.73,2.16;1.81,2.32;2.66,0.75;7.11,-1.53;1.86,1.88;1.93,1.96;0.81,-0.47;1.81,-0.61;0.91,-0.53;2.46,-3.04;3.48,-2.53;2.1,-1.34;5.46,-8.5;4.93,-8.09;4.52,-7.46;2.26,2.95;1.47,-7.42;1.76,-8.97;2.02,-10.6;4.24,-4.78;5.5,-4.18;1.74,-4.94;5.23,-5.81;1.41,-3.85;1.65,-1.56;6.14,-3.8;5.12,-3.58;4.42,-3.22;3.34,-3.38;2.48,-3.69;1.85,-3.98;0.61,-4.58;6.22,-1.8;5.69,-5.84;0.31,-0.83;1.73,-2.74;6.94,-5.16;1.39,-4.29;2.14,-1.31;4.79,-5.5;1.58,-1.99;6.98,0.68;1.73,-5.18;1.12,-2.38;4.65,3.61;4.63,4.34;6.94,-1.58;5.46,2.86;6.57,-6.02;2.2,5.21;0.15,-0.62;2.33,-2.23;6.11,-5.08;3.72,-5.02;3.23,-4.97;2.13,2.09;6.16,0.03;1.15,5.78;2.95,5.41;3.75,5.06;2.72,-5.03;2.23,-5.1;1.89,-5.13;6.09,-5.94;2.32,-5.82;2.86,-6.05;3.45,-6.09;3.95,-5.98;4.23,-5.83;6.94,-6.2;4.04,-5.16;2.08,0.36;1.53,-1.06;0.93,0.14;3.84,4.34;3.1,4.86;1.18,5.37;5.41,3.47;1.94,-5.44;0.99,-3.56;2.06,5.64;6.78,0.44;1.18,1.94;1.22,2.07;1.35,2.43;1.39,2.69;1.62,3.33;2,1.85;2.08,1.74;2.18,1.69;3.07,1.3;5.34,0.27;1.02,-4.27;1.29,-5.63;1.67,-5.63;1.85,1.86;5.25,1.9;0.76,-5.52;1.91,3.96;0.58,-3.86;1.36,-2.57;0.96,4.15;3.29,2.89;2.7,-0.77;2.65,3.55;4.05,-0.66;3.24,-0.03;4.5,0.56;1.11,4.8;1.71,-2.2;3.68,3.52;2.94,4.17;3.79,2.14;5.9,1.22;4.47,2.43;6.22,1.78;3.65,0.91;1.33,-3.18;1.48,-1.29;1.79,-1.1;1.21,-1.74;1.73,-6.27;2.86,-6.71;3.9,-6.73;4.68,-6.54;5.11,-6.25;5.18,-5.28;6.69,-3.83;4.63,-4.28;4.06,-4.02;3.28,-4.04;2.52,-4.21;1.94,-4.42;1.53,-4.59;6.86,-3.89;1.77,-0.91;0.98,-2.98;1.08,-1.28;0.7,-0.9;1.07,-1.16;1.63,-0.7;0.51,-0.85;0.42,-0.65;1.52,-5.13;1.21,-4.93;1.04,-4.76;4.36,-5.69;4.89,-5.85;-3.2,-5.53;-2.6,-5.5;-3.19,-6.03;-3.8,-5.52;-3.16,-4.94;3.2,-5.53;3.8,-5.52;3.19,-6.03;2.6,-5.5;3.16,-4.94';
-let mpTab = null, mpTask = null;
+let mpTab = null, mpTask = null, mpMod = null;
 const mpTable = () => mpTab || (mpTab = MP_TEMPLATE.split(';').map(s => s.split(',').map(Number)));
+/* MediaPipe points that mean exactly one of our dots (checked against the table: within ≈ 3 mm on the
+   template) — the warp goes through our template's own position for them */
+const MP_SAME = { 4: 'prn', 5: 'dor', 195: 'rhi', 168: 'n', 2: 'sn', 0: 'ls', 17: 'li', 18: 'bpt', 199: 'pog', 152: 'me', 10: 'fhT',
+  33: 'exL', 133: 'enL', 263: 'exR', 362: 'enR', 61: 'chL', 291: 'chR', 468: 'puL', 473: 'puR', 64: 'alL', 294: 'alR',
+  172: 'goL', 397: 'goR', 234: 'zyL', 454: 'zyR' };
+/** A set of MediaPipe connections as ordered chains (or loops) of point numbers. */
+function mpChains(edges) {
+  const adj = new Map(), add = (a, b) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push(b); };
+  for (const e of edges) { add(e.start, e.end); add(e.end, e.start); }
+  const seen = new Set(), out = [];
+  for (const s of adj.keys()) {
+    if (seen.has(s)) continue;
+    const comp = [], st = [s];
+    seen.add(s);
+    while (st.length) { const u = st.pop(); comp.push(u); for (const v of adj.get(u)) if (!seen.has(v)) { seen.add(v); st.push(v); } }
+    const ends = comp.filter(u => adj.get(u).length === 1), path = [ends.length ? ends[0] : comp[0]], used = new Set(path);
+    for (let cur = path[0]; ;) { const nx = adj.get(cur).find(v => !used.has(v)); if (nx == null) break; path.push(nx); used.add(nx); cur = nx; }
+    out.push({ path, closed: !ends.length });
+  }
+  return out;
+}
+/** Point at relative arc length t (0…1) along a polyline of {x, y}. */
+function alongAt(P, t) {
+  const L = [0];
+  for (let k = 1; k < P.length; k++) L.push(L[k - 1] + Math.hypot(P[k].x - P[k - 1].x, P[k].y - P[k - 1].y));
+  const s = Math.max(0, Math.min(1, t)) * L[L.length - 1];
+  for (let k = 1; k < P.length; k++) if (L[k] >= s) { const u = (s - L[k - 1]) / ((L[k] - L[k - 1]) || 1); return { x: P[k - 1].x + (P[k].x - P[k - 1].x) * u, y: P[k - 1].y + (P[k].y - P[k - 1].y) * u }; }
+  return { ...P[P.length - 1] };
+}
+/** Relative arc-length positions (0…1) of template dots along a run of them (template cm). */
+function tplParams(ids) {
+  const L = [0];
+  for (let k = 1; k < ids.length; k++) { const a = FM.POINTS[ids[k - 1]], b = FM.POINTS[ids[k]]; L.push(L[k - 1] + Math.hypot(b.x - a.x, b.y - a.y)); }
+  const T = L[L.length - 1] || 1;
+  return L.map(v => v / T);
+}
 function mpLoad() {
   if (!mpTask) mpTask = (async () => {
     const mp = await import(`${MP_BASE}/vision_bundle.mjs`);
+    mpMod = mp;
     const fs = await mp.FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
     const make = d => mp.FaceLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_MODEL, delegate: d }, runningMode: 'IMAGE', numFaces: 1, outputFacialTransformationMatrixes: true });
     try { return await make('GPU'); } catch (e) { return await make('CPU'); }
@@ -3946,24 +4082,94 @@ async function autoPlace() {
   } catch (e) { console.error(e); autoBusy = false; syncUI(); toast('Couldn’t load the face finder — check the internet connection (Quick fit works offline)', 7000); return; }
   autoBusy = false;
   if (!L) { syncUI(); toast('No face found in this photo — try Quick fit', 5000); return; }
-  const tab = mpTable(), ctl = [];
-  L.forEach((p, i) => { const t = tab[i]; if (t && Number.isFinite(t[0])) ctl.push(t[0], t[1], p.x * S.iw, p.y * S.ih); });
-  // template → photo, smooth through all of them; every dot of the map goes through it
-  const W2 = FM.tpsFit(ctl, ctl.length / 4, 20, 2e-3), pairs = [];
-  FM.POINTS.forEach((pt, i) => { const [x, y] = FM.tpsEval(W2, pt.x, pt.y); pairs.push({ i, b: { x, y } }); });
+  const FLM = mpMod.FaceLandmarker, P = i => ({ x: L[i].x * S.iw, y: L[i].y * S.ih });
+  // a mirrored selfie has the subject's right eye on the right: our L/R are by side of the photo
+  const flip = L[33].x > L[263].x, sid = id => flip ? id.replace(/[LR]$/, s => s === 'L' ? 'R' : 'L') : id, ix = id => FM.INDEX[sid(id)];
+  // 1 · a smooth template → photo warp through the finder's points (not the brows or the iris rims —
+  //     the brows are hair and vary), going exactly through our own dot where a point means one
+  const tab = mpTable(), skip = new Set();
+  for (const k of ['FACE_LANDMARKS_LEFT_EYEBROW', 'FACE_LANDMARKS_RIGHT_EYEBROW', 'FACE_LANDMARKS_LEFT_IRIS', 'FACE_LANDMARKS_RIGHT_IRIS']) for (const e of FLM[k]) { skip.add(e.start); skip.add(e.end); }
+  const ctl = [];
+  L.forEach((p, i) => {
+    if (i >= tab.length || (skip.has(i) && MP_SAME[i] == null)) return;
+    // (in a mirrored selfie the template is mirrored too: its left on the photo's right)
+    const same = MP_SAME[i] != null ? FM.POINTS[ix(MP_SAME[i])] : null, t = same ? [same.x, same.y] : tab[i] && [flip ? -tab[i][0] : tab[i][0], tab[i][1]];
+    if (t && Number.isFinite(t[0])) ctl.push(t[0], t[1], p.x * S.iw, p.y * S.ih);
+  });
+  const W2 = FM.tpsFit(ctl, ctl.length / 4, 20, 2e-3), pos = new Map();
+  FM.POINTS.forEach((pt, i) => { const [x, y] = FM.tpsEval(W2, pt.x, pt.y); pos.set(i, { x, y }); });
+  // 2 · the outlines straight from the finder's own: lids, lips, brows and jawline, each of our dots at
+  //     the same relative distance along it as on the template
+  const put = (ids, poly) => { const t = tplParams(ids); ids.forEach((i, k) => pos.set(i, alongAt(poly, t[k]))); };
+  const run = (c, a, b) => { const idx = c.idx, ia = idx.indexOf(a), ib = idx.indexOf(b), out = []; if (ia < 0 || ib < 0) return null; for (let k = ia; ; k = (k + 1) % idx.length) { out.push(idx[k]); if (k === ib) break; } return out; };
+  // the two arcs of a loop from a to b (both start at a); none if either isn't on it
+  const arcs = (loop, a, b) => { const n = loop.length, ia = loop.indexOf(a), ib = loop.indexOf(b), A = [], B = []; if (ia < 0 || ib < 0) return null; for (let k = ia; ; k = (k + 1) % n) { A.push(loop[k]); if (k === ib) break; } for (let k = ia; ; k = (k - 1 + n) % n) { B.push(loop[k]); if (k === ib) break; } return [A, B]; };
+  const meanY = ps => ps.reduce((s, i) => s + L[i].y, 0) / ps.length, meanX = ps => ps.reduce((s, i) => s + L[i].x, 0) / ps.length;
+  const tpl = FM.contours(0), cont = id => tpl.find(c => c.id === id);
   const before = snapshot();
   openFaceMap(true);
   S.mapStep = 'points'; S.qfit = null;
+  const loopOf = k => { const ch = mpChains(FLM[k]); return (ch.find(c => c.closed) || ch[0]).path; };
+  const midX = (P(133).x + P(362).x) / 2;
+  // the eyes: our upper lid (inner → outer corner) and lower lid along the finder's, by side of the photo
+  for (const [k, ca, cb] of [['FACE_LANDMARKS_RIGHT_EYE', 33, 133], ['FACE_LANDMARKS_LEFT_EYE', 263, 362]]) {
+    const loop = loopOf(k), s = meanX(loop) * S.iw < midX ? 'L' : 'R', c = cont('eye' + s);
+    const inner = Math.abs(P(ca).x - midX) < Math.abs(P(cb).x - midX) ? ca : cb, outer = inner === ca ? cb : ca, ab = arcs(loop, inner, outer);
+    if (!c || !ab) continue;
+    const up = meanY(ab[0]) < meanY(ab[1]) ? ab[0] : ab[1], lo = up === ab[0] ? ab[1] : ab[0];
+    const upper = run(c, FM.INDEX['en' + s], FM.INDEX['ex' + s]), lower = run(c, FM.INDEX['ex' + s], FM.INDEX['en' + s]);
+    if (upper) put(upper, up.map(P));
+    if (lower) put(lower, lo.slice().reverse().map(P));
+  }
+  {
+    // the lips: from the left corner of the photo to the right, upper lip through 0, lower through 17
+    const lipLoop = mpChains(FLM.FACE_LANDMARKS_LIPS).find(ch => ch.closed && ch.path.includes(0)), c = cont('lips');
+    const lc = L[61].x < L[291].x ? 61 : 291, rc = lc === 61 ? 291 : 61, ab = lipLoop && arcs(lipLoop.path, lc, rc);
+    if (c && ab) {
+      const up = ab[0].includes(0) ? ab[0] : ab[1], lo = up === ab[0] ? ab[1] : ab[0];
+      const upper = run(c, FM.INDEX.chL, FM.INDEX.chR), lower = run(c, FM.INDEX.chR, FM.INDEX.chL);
+      if (upper) put(upper, up.map(P));
+      if (lower) put(lower, lo.slice().reverse().map(P));
+    }
+    pos.set(FM.INDEX.sto, { x: (P(13).x + P(14).x) / 2, y: (P(13).y + P(14).y) / 2 });
+  }
+  for (const k of ['FACE_LANDMARKS_RIGHT_EYEBROW', 'FACE_LANDMARKS_LEFT_EYEBROW']) {
+    const chains = mpChains(FLM[k]).filter(ch => !ch.closed && ch.path.length >= 3);
+    if (chains.length < 2) continue;
+    const s = L[chains[0].path[0]].x * S.iw < midX ? 'L' : 'R', c = cont('browShape' + s);
+    if (!c) continue;
+    const orient = p => Math.abs(L[p[0]].x * S.iw - midX) < Math.abs(L[p[p.length - 1]].x * S.iw - midX) ? p : p.slice().reverse();   // inner → outer
+    const [ua, ub] = chains.slice(0, 2).map(ch => orient(ch.path)), up = meanY(ua) < meanY(ub) ? ua : ub, lo = up === ua ? ub : ua;
+    const inn = { x: (P(up[0]).x + P(lo[0]).x) / 2, y: (P(up[0]).y + P(lo[0]).y) / 2 }, out = { x: (P(up[up.length - 1]).x + P(lo[lo.length - 1]).x) / 2, y: (P(up[up.length - 1]).y + P(lo[lo.length - 1]).y) / 2 };
+    const upper = run(c, FM.INDEX['bi' + s], FM.INDEX['bt' + s]), lower = run(c, FM.INDEX['bt' + s], FM.INDEX['bi' + s]);
+    if (upper) put(upper, [inn, ...up.slice(1, -1).map(P), out]);
+    if (lower) put(lower, [out, ...lo.slice(1, -1).reverse().map(P), inn]);
+  }
+  {
+    // the jawline: zygion → jaw angle → menton on each side, along the face oval (sides by the photo)
+    const oval = loopOf('FACE_LANDMARKS_FACE_OVAL'), c = tpl.find(ct => ct.boundary);
+    const side = (a, b) => L[a].x > L[b].x ? [a, b] : [b, a], [zyR, zyL] = side(454, 234), [goR, goL] = side(397, 172);
+    const ab = arcs(oval, zyR, zyL), low = ab && (ab[0].includes(152) ? ab[0] : ab[1]);   // right zygion → … → 152 → … → left
+    const seg = (a, b) => { const i0 = low.indexOf(a), i1 = low.indexOf(b); return i0 >= 0 && i1 >= 0 ? low.slice(Math.min(i0, i1), Math.max(i0, i1) + 1).map(P) : null; };
+    if (c && low) for (const [a, b, ma, mb] of [['zyR', 'goR', zyR, goR], ['goR', 'me', goR, 152], ['me', 'goL', 152, goL], ['goL', 'zyL', goL, zyL]]) {
+      const r = run(c, FM.INDEX[a], FM.INDEX[b]), poly = seg(ma, mb);
+      if (!r || !poly) continue;
+      put(r, low.indexOf(ma) <= low.indexOf(mb) ? poly : poly.slice().reverse());
+    }
+  }
+  // the pupils at the iris centres
+  pos.set(ix('puL'), P(468)); pos.set(ix('puR'), P(473));
+  const pairs = [...pos].map(([i, b]) => ({ i, b }));
   fitMap('front', pairs);
-  // the hairline, hair and neck aren't among the finder's points: let them find the photo's edges
-  const keep = new Set();
-  FM.POINTS.forEach((pt, i) => { if (!/^(tri|hl|tem|vertex|hair|hts|hsu|hse|hsl|nt|nm|nb|neck)/.test(pt.id) && !(pt.mid && /outline|hair|neck/.test(pt.group) && pt.y < -8)) keep.add(i); });
-  snapEdges({ pinned: keep, gentle: true });
-  pushUndo(before);
   S.mapSel.clear();
-  syncPts(); syncUI(); wake();
+  // 3 · the hairline and the ears aren't among the finder's points: a short guided fit for them
+  //     (each ring starts at the guess — Enter accepts it), everything else stays where the finder put it
+  const loose = pt => /^(tri|hl|tem)/.test(pt.id) || ['ears', 'hair', 'neck'].includes(pt.group) || (pt.mid && pt.group === 'outline' && pt.y < -8);
+  const base = pairs.filter(c => !loose(FM.POINTS[c.i]));
+  S.qfit = { step: 0, hist: [], base, steps: QFIT.front.filter(st => /^(tri|hlc|sa|eo|lob)/.test(st.id)), snap: before, auto: true };
+  syncPts(); syncUI(); refreshCursor(); wake();
   const turned = pose && (Math.abs(pose.yaw) > 12 || Math.abs(pose.pitch) > 15);
-  toast(`Face map placed from the face finder${turned ? ` — the head is turned about ${Math.round(Math.abs(pose.yaw))}° ${pose.yaw > 0 ? 'one way' : 'the other'}, so the 3D will be less exact (a straight-on photo is best)` : ''}. Check the hairline, ears and neck — Quick fit or a drag fixes them. Ctrl+Z undoes it`, 7000);
+  toast(`Face found${turned ? ` (the head is turned about ${Math.round(Math.abs(pose.yaw))}° — a straight-on photo gives the best 3D)` : ''}. Now the hairline and ears: click each, or press Enter where the ring is already right (Esc stops)`, 8000);
 }
 /** The darkness-weighted centre of the pupil near a click (photo coords). */
 function refinePupil(b) {
@@ -4022,7 +4228,7 @@ function exportFaceMap() {
   const doc = {
     app: 'cranimeter', kind: 'face-map', version: 1, build: BUILD, saved: new Date().toISOString(),
     image: { width: S.iw, height: S.ih },
-    map: m ? { view: m.view, snapped: m.snapped, points, depth } : null,
+    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null } : null,
     measurements, reference: S.refId || null, calibration: S.calibId ? { id: S.calibId, mm: S.calibMM } : null,
     light: S.lightDir, marks: S.hints ? { gw: S.hints.gw, gh: S.hints.gh, highlight: enc8(S.hints.hl), notShape: enc8(S.hints.ig) } : null,
     surface: { trust: cfg.surfTrust, detail: cfg.surfDetail }, morph: { ...S.anat },
@@ -4053,6 +4259,7 @@ async function importFaceMap(file) {
     fitMap(FM.VIEWS[doc.map.view] != null ? doc.map.view : 'front', pairs);
     if (!same) placeDetail(null);
     S.map.snapped = doc.map.snapped || pairs.length;
+    S.map.af = doc.map.anatomy && typeof doc.map.anatomy === 'object' ? { ...doc.map.anatomy } : null;
     if (doc.map.depth && Object.keys(doc.map.depth).length) {
       S.map.zo = new Float32Array(NMAP).fill(NaN);
       for (const [id, z] of Object.entries(doc.map.depth)) { const i = take(id); if (i != null) S.map.zo[i] = z; }
@@ -4247,7 +4454,8 @@ function qfitAccept() {
   q.hist.push({ i: FM.INDEX[qfitId(st)], b: { x: g.x, y: g.y }, g: true });
   qfitNext();
 }
-function qfitRefit() { fitMap(S.map.view, S.qfit.hist.filter(Boolean)); placeDetail(null); }
+// (after Auto-place, base holds the finder's dots: the clicks only add the hairline and ears)
+function qfitRefit() { fitMap(S.map.view, [...(S.qfit.base || []), ...S.qfit.hist.filter(Boolean)]); placeDetail(null); }
 function quickFitClick(sx, sy) {
   const q = S.qfit, st = qfitSteps()[q.step];
   let b = fwdMap(toI(sx, sy));   // position on the original photo
@@ -4295,17 +4503,19 @@ function qfitFinish() {
   S.qfit = null;
   pushUndo(q.snap);
   // then pull the edge contours (and the eyes and lips) onto the photo's edges — its own undo step
-  const snap2 = snapshot(), clicked = new Set(q.hist.filter(Boolean).map(c => c.i));
-  // the outer edge gently, then the eyes, brows and lips — never the points you clicked
-  const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = snapEdges({ pinned: clicked, features: true });
+  const snap2 = snapshot(), clicked = new Set([...(q.base || []), ...q.hist.filter(Boolean)].map(c => c.i));
+  // the outer edge gently, then the eyes, brows and lips — never the points you clicked (after Auto-place
+  // the finder already traced the eyes, brows and lips: only the hairline is left to find its edge)
+  const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = q.auto ? 0 : snapEdges({ pinned: clicked, features: true });
   if (n1 + n2) { pushUndo(snap2); estimateLight(); }
   syncPts(); syncUI();
-  toast('Face map placed — the outer edge, eyes, brows and lips were fitted to the photo (Ctrl+Z undoes that). Pick a feature below to move it as a whole.', 6000);
+  toast(q.auto ? 'Face map placed — check it, and drag anything that’s off (Ctrl+Z undoes it).'
+    : 'Face map placed — the outer edge, eyes, brows and lips were fitted to the photo (Ctrl+Z undoes that). Pick a feature below to move it as a whole.', 6000);
 }
 function qfitCancel() {
   const q = S.qfit;
   S.qfit = null;
-  if (q && q.hist.some(Boolean)) pushUndo(q.snap);   // keep what was placed (Ctrl+Z takes it back)
+  if (q && (q.base || q.hist.some(Boolean))) pushUndo(q.snap);   // keep what was placed (Ctrl+Z takes it back)
   syncPts(); syncUI(); refreshCursor();
 }
 
