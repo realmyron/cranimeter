@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '29';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '30';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -23,6 +23,8 @@ const loadFresh = file => new Promise(res => {
   document.head.appendChild(s);
 });
 for (const [g, file] of MODULES) if (!moduleOk(g)) await loadFresh(file);
+// the measured head (head.js + ict-head.bin) is optional: without it the 3D falls back to the template
+if (!moduleOk('CraniHead')) await loadFresh('head.js');
 /** Files that are still missing or out of date on the server after a fresh fetch. */
 const OLD_FILES = MODULES.filter(([g]) => !moduleOk(g)).map(([, f]) => f);
 // The stylesheet heals the same way: style.css carries the build in --cm-build. If it's missing or
@@ -1088,6 +1090,42 @@ function syncTone() {
    as contour lines, relief, Haralick topography, a mesh or a turnable 3D view; the user can fix it
    with brushes; and Morph uses it (its depth for the anatomy, its light for the shading). */
 const SF = window.CraniSurface || null;
+
+/* ---- the measured head (ICT-FaceKit, head.js) ----
+   A real head from light-stage scans, fitted to the front photo's dots (and the side photo's, once its
+   map is placed): its depth is the face's starting shape — instead of the template's, which had to be
+   guessed — and the head around the face in 3D. Loaded the first time a surface is built (≈ 3 MB). */
+const HM = window.CraniHead && window.CraniHead.build === BUILD ? window.CraniHead : null;
+/** Which dots the head is fitted to, and how much each counts: the skin's landmarks and lines — not
+    the brows and hair (colour), the hairline or the neck (they vary or move); the ears and the detail
+    dots between named ones less. On a side photo: its midline and named landmarks. */
+const headWeight = side => i => {
+  const pt = FM.POINTS[i], g = pt.group;
+  // (the ears a little: they set where the model's ears sit, and the head's width and depth with them)
+  if (g === 'ears') return side ? (pt.lm ? .4 : .2) : pt.mid ? .2 : .4;
+  if (g === 'brows' || g === 'hair' || g === 'neck' || g === 'ears' || pt.field === 'back' || /^(tri|hl)/.test(pt.id)) return 0;
+  if (side) return pt.side === 0 ? (pt.mid ? .6 : 1) : pt.lm ? .5 : 0;
+  // (soft features — the temporal line, the cheekbone's ridge, the hollows — are placed less exactly)
+  return /^(tem|tc|zr|sm|hcm|ss)/.test(pt.id) ? .3 : pt.mid ? .5 : 1;
+};
+const sideMapOf = () => { const sm = curSlot === 'front' && slots.side && slots.side.map; return sm && isProfile(sm) && sm.snapped ? sm : null; };
+const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}` : ''; };
+/** The head fitted to this face (cached on the map), or null (no model, a profile, or it failed). */
+async function ensureHead() {
+  const m = S.map;
+  if (!HM || !m || isProfile(m) || curSlot !== 'front' || !m.snapped) return null;
+  const key = headKey();
+  if (m.head && m.head.key === key) return m.head;
+  try { await HM.load(`ict-head.bin?v=${BUILD}`); } catch (e) { console.warn(e); if (!ensureHead.warned) { ensureHead.warned = true; toast('The head model (ict-head.bin) didn’t load — the 3D uses the template instead', 6000); } return null; }
+  if (S.map !== m || headKey() !== key) return null;
+  const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false) }];
+  if (sm) views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: headWeight(true) });
+  const res = HM.fit(views);
+  m.head = { key, res, P: HM.project(res, 0), side: !!sm, n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
+  return m.head;
+}
+/** The fitted head's depth (cm, from the ear plane) on a grid over the photo — NaN where it isn't. */
+const headDepth = grid => { const h = S.map && S.map.head; return HM && h && h.key === headKey() ? HM.raster(h.P, grid) : null; };
 const SURF_DIV = 160;
 let surfIds = 0, surfRev = 0;
 const surfStep = () => mapping() && S.mapStep === 'surface';
@@ -1140,7 +1178,7 @@ function surfFeatureMask(x0, y0, cell, gw, gh, sc) {
 /** Build (or rebuild) the surface from the dots and the photo. Undoable; keeps fixes if the grid is unchanged. */
 /** Everything the Light and Surface steps read off the photo and the dots (cached per photo and alignment). */
 function surfInputs() {
-  const m = S.map, key = `${S.imgSeq}|${m.pver}|${m.view}`;
+  const m = S.map, hk = m.head && m.head.key === headKey() ? m.head.key : '', key = `${S.imgSeq}|${m.pver}|${m.view}|${hk}`;
   if (m.sin && m.sin.key === key) return m.sin;
   const f = mapFrame();
   // the face's box on the photo
@@ -1153,9 +1191,10 @@ function surfInputs() {
   const h = cell / f.scale;
   const act = new Uint8Array(n);
   for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) if (maskAt(x0 + i * cell, y0 + j * cell) > .5) act[j * gw + i] = 1;
-  // prior: the template's depth (as seen from this view), read through a smooth photo → template map
-  const z0 = new Float32Array(n);
-  for (let k = 0; k < n; k++) if (act[k]) z0[k] = priorDepth(x0 + (k % gw) * cell, y0 + ((k / gw) | 0) * cell);
+  // prior: the measured head fitted to the dots (head.js) — else the template's depth (as seen from this
+  // view), read through a smooth photo → template map
+  const z0 = new Float32Array(n), hd = hk ? headDepth({ x0, y0, cell, gw, gh }) : null;
+  for (let k = 0; k < n; k++) if (act[k]) z0[k] = hd && Number.isFinite(hd[k]) ? hd[k] : priorDepth(x0 + (k % gw) * cell, y0 + ((k / gw) | 0) * cell);
   // the photo: linear luminance and colour per node, and a crop for the 3D view and the analysis views
   const lc = document.createElement('canvas'); lc.width = gw; lc.height = gh;
   const lg = lc.getContext('2d', { willReadFrequently: true });
@@ -1387,6 +1426,14 @@ const surfDeps = () => { const sp = S.map ? sideProfile() : null; return `${S.li
 async function buildSurface(opt = {}) {
   if (!SF || !S.map) return;
   if (S.surfBusy) { S.surfAgain = opt; return; }   // build again once this one is done
+  // the measured head first (loaded the first time, then fitted to the dots): the surface starts from it
+  if (HM && !isProfile(S.map) && !(S.map.head && S.map.head.key === headKey())) {
+    S.surfBusy = { p: 0, head: true }; syncFaceMapPanel();
+    await ensureHead();
+    S.surfBusy = null;
+    if (!S.map) return;
+    if (S.surfAgain) { const again = S.surfAgain; S.surfAgain = null; opt = { ...opt, ...again }; }
+  }
   // the light marks are part of the pipeline: detected automatically if step 2 was skipped
   if (!S.hints && lightInfo()) detectMarks(true);
   const m = S.map, seq = S.imgSeq, pver = m.pver, I = surfInputs(), { hint, ignore } = surfHints(I), deps = surfDeps();
@@ -1966,10 +2013,16 @@ function stageDepth() {
   for (const v of sv) zb = Math.min(zb, v);
   zb -= .5;
   const H0 = new Float32Array(nc), C = new Float32Array(nc), fix = new Uint8Array(nc), od = new Float32Array(nc).fill(1e9), oy = new Float32Array(nc);
+  for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) H0[j * cw + i] = T ? scalarAt(T, bx0 + i * F * cell, by0 + j * F * cell) : zb;
+  // … where the measured head covers the photo (scalp, ears, the neck under the chin) and faces the
+  // camera, it's that head: held like the face's own nodes, so it too carries on smoothly into the hair's
+  // outline beyond it (not where it turns away at its own edge: held there, the edge made a crease)
+  const hd = headDepth({ x0: bx0, y0: by0, cell: F * cell, gw: cw, gh: ch });
+  const steep = k => { const i = k % cw, j = (k / cw) | 0; if (i < 1 || j < 1 || i >= cw - 1 || j >= ch - 1) return true; const a = hd[k - 1], b = hd[k + 1], c = hd[k - cw], d = hd[k + cw]; return ![a, b, c, d].every(Number.isFinite) || Math.hypot(b - a, d - c) / (2 * hc) > 1.2; };
   for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
     const k = j * cw + i, x = bx0 + i * F * cell, y = by0 + j * F * cell, zf = faceAt(x, y, zsB);
-    H0[k] = T ? scalarAt(T, x, y) : zb;
     if (zf != null) { fix[k] = 1; C[k] = zf - H0[k]; od[k] = 0; oy[k] = y; }
+    else if (hd && Number.isFinite(hd[k]) && head[Math.min(n - 1, j * F * gw + i * F)] > .5 && !steep(k)) { fix[k] = 1; C[k] = hd[k] - H0[k]; }
   }
   // … how far each node is from the face, and how low on the face its nearest edge is …
   const rel = (k, q, w) => { if (od[q] + w < od[k]) { od[k] = od[q] + w; oy[k] = oy[q]; } };
@@ -3866,11 +3919,12 @@ function syncSurfacePane() {
   const s = S.surf, m = S.map, busy = S.surfBusy;
   const stale = s && m && (s.view !== m.view || s.pver !== m.pver);
   setText($('#sfStatus'), !m ? 'Place the dots first (step 1).'
-    : busy ? `Building the surface… ${Math.round(busy.p * 100)}%`
+    : busy ? (busy.head ? (HM && HM.model ? 'Fitting the measured head to the dots…' : 'Loading the measured head (≈ 3 MB, once)…') : `Building the surface… ${Math.round(busy.p * 100)}%`)
     : !s ? 'Build a 3D surface of this face from your dots and the photo’s own light and shade.'
     : (s.view !== m.view ? 'Built for another view — build again. '
       : `Light ${dirText(s.dir)}${S.lightDir ? ' (set in step 2)' : ''}. The surface explains ${Math.round(Math.max(0, s.fit1) * 100)}% of the photo’s shading (the dots alone: ${Math.round(Math.max(0, s.fit0) * 100)}%).`
         + (s.strength < .25 ? ' The light is flat here, so the surface stays close to the dots.' : '')
+        + (m.head && m.head.key === headKey() ? ` Shape from a measured head (ICT-FaceKit) fitted to ${m.head.n} dots${m.head.side ? ' on both photos' : ''} — they sit within ${(m.head.res.rms * 10).toFixed(1)} mm of it.` : '')
         + (stale ? ' Dots moved since — build again to update.' : s.deps !== surfDeps() ? ' The light or the marks changed — build again to use them.' : '')));
   const bb = $('#sfBuild');
   setText(bb, busy ? 'Building…' : s ? 'Rebuild' : 'Build surface');
