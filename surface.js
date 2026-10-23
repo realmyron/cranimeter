@@ -482,8 +482,9 @@ function fitAnatomy(inp, P, T, wd) {
       for (let j = 0; j < nb; j++) { if (!J[j]) continue; b[j] += w * J[j] * r[q]; for (let l = 0; l <= j; l++) A[j][l] += w * J[j] * J[l]; }
     }
     for (const p of pins) {
-      const e = p.z - z[p.k];
-      for (let j = 0; j < nb; j++) { b[j] += B[j][p.k] * e / (sigP * sigP); for (let l = 0; l <= j; l++) A[j][l] += B[j][p.k] * B[l][p.k] / (sigP * sigP); }
+      // (soft pins — a side photo's points — a little looser than depths set by hand)
+      const e = p.z - z[p.k], s2 = (p.soft ? 1.15 * sigP : sigP) ** 2;
+      for (let j = 0; j < nb; j++) { b[j] += B[j][p.k] * e / s2; for (let l = 0; l <= j; l++) A[j][l] += B[j][p.k] * B[l][p.k] / s2; }
     }
     for (let j = 0; j < nb; j++) { for (let l = j + 1; l < nb; l++) A[j][l] = A[l][j]; b[j] -= v[j] / (sigV * sigV); A[j][j] = A[j][j] * 1.05 + 1 / (sigV * sigV); }
     fixed.forEach((f, j) => { if (f == null) return; for (let l = 0; l < nb; l++) A[j][l] = A[l][j] = 0; A[j][j] = 1; b[j] = 0; });
@@ -522,6 +523,50 @@ function bendThrough(z, inp, pins, R) {
   return out;
 }
 
+/**
+ * A side photo's profile line laid onto the face: along the midline the surface is moved to the line's
+ * depth, and the change fades out sideways (each point says how far: ≈ 1.8 cm, less on the nose) and
+ * past the line's ends. A smooth correction — bending exactly through many close points rippled.
+ * inp.profile: [{ x, y (photo px), z (cm), s (sideways reach, px) }] down the midline, top to bottom.
+ */
+function profileFix(z, inp) {
+  const { gw, gh, x0, y0, cell, act } = inp, P = inp.profile, np = P.length, out = Float32Array.from(z);
+  const at = (x, y) => {
+    const fx = (x - x0) / cell, fy = (y - y0) / cell, i = Math.floor(fx), j = Math.floor(fy);
+    if (i < 0 || j < 0 || i >= gw - 1 || j >= gh - 1) return null;
+    const k = j * gw + i;
+    if (!act[k] || !act[k + 1] || !act[k + gw] || !act[k + gw + 1]) return null;
+    const tx = fx - i, ty = fy - j;
+    return (z[k] * (1 - tx) + z[k + 1] * tx) * (1 - ty) + (z[k + gw] * (1 - tx) + z[k + gw + 1] * tx) * ty;
+  };
+  // what's missing on the midline (where the face is), filled in along the line and smoothed (≈ 2 mm)
+  const r = P.map(p => { const v = at(p.x, p.y); return v == null ? null : p.z - v; });
+  const first = r.findIndex(v => v != null);
+  if (first < 0) return out;
+  for (let q = 0; q < np; q++) if (r[q] == null) r[q] = q < first ? r[first] : r[q - 1];
+  const dy = np > 1 ? Math.abs(P[np - 1].y - P[0].y) / (np - 1) : 1, sg = Math.max(1, .2 / (inp.h || .1) * cell / Math.max(1e-3, dy)), rs = new Float32Array(np);
+  for (let q = 0; q < np; q++) {
+    let s = 0, w = 0;
+    for (let d = -Math.ceil(3 * sg); d <= Math.ceil(3 * sg); d++) { const u = q + d; if (u < 0 || u >= np) continue; const g = Math.exp(-d * d / (2 * sg * sg)); s += g * r[u]; w += g; }
+    rs[q] = s / w;
+  }
+  // spread sideways from the midline
+  for (let j = 0; j < gh; j++) {
+    const y = y0 + j * cell;
+    let q = 0;
+    while (q < np - 2 && P[q + 1].y < y) q++;
+    const a = P[q], b = P[q + 1], t = Math.max(0, Math.min(1, (y - a.y) / ((b.y - a.y) || 1)));
+    const xm = a.x + (b.x - a.x) * t, sv = a.s + (b.s - a.s) * t, rv = rs[q] + (rs[q + 1] - rs[q]) * t;
+    const past = y < P[0].y ? P[0].y - y : y > P[np - 1].y ? y - P[np - 1].y : 0, fade = Math.exp(-past * past / (2 * (.5 * sv) ** 2));
+    for (let i = 0; i < gw; i++) {
+      const k = j * gw + i;
+      if (!act[k]) continue;
+      const dx = x0 + i * cell - xm;
+      out[k] += rv * fade * Math.exp(-dx * dx / (2 * sv * sv));
+    }
+  }
+  return out;
+}
 async function build(inp, onProgress) {
   const { gw, gh, h, act } = inp, trust = inp.trust == null ? .5 : inp.trust, detail = inp.detail == null ? 0 : inp.detail;
   const prior = inp.prior, zPrior = inp.z0;
@@ -534,18 +579,20 @@ async function build(inp, onProgress) {
     if (onProgress) onProgress(.3);
     await new Promise(res => setTimeout(res, 0));
   }
-  // 2 · depths set by hand are met exactly
-  if (inp.pins && inp.pins.length && inp.bendR) z0 = bendThrough(z0, inp, inp.pins, inp.bendR);
+  // 2 · the side photo's profile line laid on, then depths set by hand met exactly
+  if (inp.profile && inp.profile.length) z0 = profileFix(z0, inp);
+  const hard = (inp.pins || []).filter(p => !p.soft);
+  if (hard.length && inp.bendR) z0 = bendThrough(z0, inp, hard, inp.bendR);
   // 3 · then a little free detail from the photo, on top of that shape
   const P = prepare({ ...inp, z0 }), n = P.n, { T, wd } = targets(P, inp);
   const beta = .02, bk = new Float32Array(n);
   for (let k = 0; k < n; k++) bk[k] = beta * (1 + 30 * (prior ? prior[k] : 0));
   // pins: { k (node), z (cm) } — spread over a small neighbourhood so one dot shapes its area
   let pw = null, pwt = null;
-  if (inp.pins && inp.pins.length) {
+  if (hard.length) {
     pw = new Float32Array(n); pwt = new Float32Array(n);
     const rr = Math.max(1, Math.round(.3 / h));
-    for (const { k, z } of inp.pins) {
+    for (const { k, z } of hard) {
       const pi = k % gw, pj = (k / gw) | 0;
       for (let dj = -rr; dj <= rr; dj++) for (let di = -rr; di <= rr; di++) {
         const i = pi + di, j = pj + dj, q = j * gw + i;
@@ -590,7 +637,9 @@ function compose(inp, values, dz) {
   const { act, z0 } = inp, B = inp.basis.B, n = z0.length;
   let zf = Float32Array.from(z0);
   inp.basis.keys.forEach((key, j) => { const v = values[key] || 0; if (v) for (let k = 0; k < n; k++) if (act[k]) zf[k] += v * B[j][k]; });
-  if (inp.pins && inp.pins.length && inp.bendR) zf = bendThrough(zf, inp, inp.pins, inp.bendR);
+  if (inp.profile && inp.profile.length) zf = profileFix(zf, inp);
+  const hard = (inp.pins || []).filter(p => !p.soft);
+  if (hard.length && inp.bendR) zf = bendThrough(zf, inp, hard, inp.bendR);
   const z = new Float32Array(n);
   for (let k = 0; k < n; k++) z[k] = zf[k] + (dz && act[k] ? dz[k] : 0);
   return { zfit: zf, z };
@@ -827,5 +876,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '28' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '29' };
 })();
