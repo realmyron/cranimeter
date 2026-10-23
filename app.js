@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '27';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '28';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -643,7 +643,10 @@ function fitMap(view = (S.map && S.map.view) || 'front', extraPairs = []) {
     const s = landmarkS(lab);
     if (s) pairs.push({ i, a: T[i], b: s });
   });
-  const pos = pairs.length ? T.map(t => simFit(pairs, t.x, t.y)) : T;
+  // the brows (and the hair) are placed by everything, the rest without them: a brow sits on the skin
+  // wherever it grows, and where it was clicked says nothing about the brow ridge or the eyelid under it
+  const bone = pairs.filter(c => !COLOUR_ONLY(FM.POINTS[c.i]));
+  const pos = pairs.length ? T.map((t, i) => simFit(bone.length && !COLOUR_ONLY(FM.POINTS[i]) ? bone : pairs, t.x, t.y)) : T;
   for (const c of pairs) pos[c.i] = { x: c.b.x, y: c.b.y };
   const p = new Float32Array(NMAP * 2);
   pos.forEach((v, i) => { p[2 * i] = v.x; p[2 * i + 1] = v.y; });
@@ -795,6 +798,44 @@ function smoothArcs(c, ca, cb, pinned, moved) {
       moved.add(i);
     });
   }
+}
+/**
+ * The nasolabial folds onto the crease the photo shows. The fold isn't an edge between two brightnesses
+ * but a narrow dark line between the cheek and the lip (whichever side the light comes from), so each
+ * of its dots — not the top one, which stays at the nostril wing — slides along the fold's normal to the
+ * darkest narrow line within ≈ 3 mm of where the template put it; the moves are then smoothed along the
+ * fold. Where no line stands out (a smooth young face, flat light) the dots stay. Returns how many moved.
+ */
+function snapFolds(opt = {}) {
+  const m = S.map, pinned = opt.pinned || new Set(), moved = new Set();
+  if (!m || isProfile(m)) return 0;
+  const lum = photoLum(), cm = mapFrame().scale, R = .3 * cm, e = .1 * cm, st = Math.max(.5, R / 12);
+  for (const c of m.contours) {
+    if (!c.fold || c.idx.some(i => !m.vis[i])) continue;
+    const N = contourNormals(c, m.p, true), n = c.idx.length;
+    let offs = N.map(([nx, ny], k) => {
+      const i = c.idx[k];
+      if (!k || pinned.has(i)) return 0;
+      const px = m.p[2 * i], py = m.p[2 * i + 1];
+      let best = 0, bestT = 0;
+      for (let t = -R; t <= R; t += st) {
+        const x = px + nx * t, y = py + ny * t, v = (lum(x - nx * e, y - ny * e) + lum(x + nx * e, y + ny * e)) / 2 - lum(x, y);
+        const score = v * (1 - .5 * (t / R) * (t / R));
+        if (score > best) { best = score; bestT = t; }
+      }
+      return best > 2.5 ? bestT : 0;
+    });
+    // a [1 2 1] pass along the fold (the top stays put), so the line can't zigzag
+    offs = offs.map((v, k) => !k || pinned.has(c.idx[k]) ? 0 : (offs[k - 1] + 2 * v + offs[Math.min(n - 1, k + 1)]) / 4);
+    N.forEach(([nx, ny], k) => {
+      const i = c.idx[k], t = offs[k];
+      if (Math.abs(t) < .5) return;
+      m.p[2 * i] += nx * t; m.p[2 * i + 1] += ny * t;
+      moved.add(i);
+    });
+  }
+  if (moved.size) { placeDetail(moved); mapTouched(true); }
+  return moved.size;
 }
 const mapPt = i => ({ x: S.map.p[2 * i], y: S.map.p[2 * i + 1] });
 /** Photo → screen (while mapping the photo is shown unchanged) and back. */
@@ -1244,7 +1285,7 @@ function surfHints(I) {
 function surfPins(I) {
   const m = S.map, pins = [];
   if (m.zo) FM.POINTS.forEach((pt, i) => {
-    if (!Number.isFinite(m.zo[i]) || !m.vis[i] || pt.field === 'back') return;
+    if (!Number.isFinite(m.zo[i]) || !m.vis[i] || pt.field === 'back' || COLOUR_ONLY(pt)) return;
     const x = m.p[2 * i], y = m.p[2 * i + 1], gi = Math.round((x - I.x0) / I.cell), gj = Math.round((y - I.y0) / I.cell), k = gj * I.gw + gi;
     if (gi < 0 || gj < 0 || gi >= I.gw || gj >= I.gh || !I.act[k]) return;
     pins.push({ k, z: m.zo[i], x, y });
@@ -1714,10 +1755,10 @@ function syncLightPane() {
 }
 /* Points step: pick a whole feature in one click (then drag it, or scale / rotate it with the box) */
 const FEATURES = {
-  front: [['Eye ◀', ['eyeL', 'irisL', 'creaseL']], ['Eye ▶', ['eyeR', 'irisR', 'creaseR']],
+  front: [['Eye ◀', ['eyeL', 'irisL', 'creaseL', 'lowerCreaseL']], ['Eye ▶', ['eyeR', 'irisR', 'creaseR', 'lowerCreaseR']],
     ['Brow ◀', ['browShapeL', 'browL']], ['Brow ▶', ['browShapeR', 'browR']], ['Nose', ['ridge', 'nostrils', 'noseEdgeL', 'noseEdgeR', 'dorsumL', 'dorsumR', 'lobule']],
-    ['Lips', ['lips', 'mouth', 'philtrumL', 'philtrumR', 'philMid']], ['Cheek ◀', ['cheekboneL', 'hollowL', 'nasolabialL']], ['Cheek ▶', ['cheekboneR', 'hollowR', 'nasolabialR']], ['Face edge', ['outline']], ['Ear ◀', ['earL', 'antihelixL', 'lowerCrusL', 'conchaL']], ['Ear ▶', ['earR', 'antihelixR', 'lowerCrusR', 'conchaR']]],
-  profile: [['Eye', ['eye', 'crease']], ['Brow', ['browShape', 'brow']], ['Nose', ['nostril', 'noseEdge']], ['Lips', ['lip']], ['Cheek', ['cheekbone', 'hollow', 'nasolabial']],
+    ['Lips', ['lips', 'mouth', 'philtrumL', 'philtrumR', 'philMid', 'lipMid']], ['Cheek ◀', ['cheekboneL', 'hollowL', 'nasolabialL']], ['Cheek ▶', ['cheekboneR', 'hollowR', 'nasolabialR']], ['Face edge', ['outline']], ['Ear ◀', ['earL', 'antihelixL', 'lowerCrusL', 'conchaL']], ['Ear ▶', ['earR', 'antihelixR', 'lowerCrusR', 'conchaR']]],
+  profile: [['Eye', ['eye', 'crease', 'lowerCrease']], ['Brow', ['browShape', 'brow']], ['Nose', ['nostril', 'noseEdge']], ['Lips', ['lip']], ['Cheek', ['cheekbone', 'hollow', 'nasolabial']],
     ['Profile', ['face']], ['Ear', ['ear', 'antihelix', 'lowerCrus', 'concha']]],
 };
 function selectFeature(ids) {
@@ -1823,16 +1864,19 @@ function convexHull(P) {
 }
 /**
  * The 3D view's relief over the whole head: the face's surface in front; around it the head — hair,
- * ears and neck at their template depth, read through the face map's own dots — with a steep side
- * where the face's edge stands in front of what's behind it (cheeks, jaw, under the chin) and a smooth
- * join where it doesn't (the hairline, the temples); the background behind it all. Turned, the face
- * then sits on a head rather than on a wall.
+ * ears and neck at their template depth, read through the face map's own dots — and the background
+ * behind it all. Where the face's edge and the head disagree in depth, the difference is carried out
+ * from the face's edge and fades with distance (a screened membrane: smooth, with no ripple and no
+ * overshoot), so the forehead runs on into the scalp and the cheeks turn back toward the ears with no
+ * step or ledge — the face doesn't sit on the head like a mask. It fades over ≈ 1.4 cm, but under the
+ * chin and jaw over ≈ 4.5 mm: the jaw's underside, hidden in a front photo, turns back to the neck
+ * quickly, so the neck hangs below the jaw instead of sloping out of the chin.
  */
 function stageDepth() {
   const s = S.surf, m = S.map, key = stageKeyOf();
   if (stageZ && stageZ.key === key) return stageZ;
   const zs = surfZ(s), yaw = m.yaw * Math.PI / 180, ct = Math.cos(yaw), st = Math.sin(yaw), sc = s.pxcm;
-  // the head's outline (all the dots) and the shell's depth from the dots around the face
+  // the head's outline (all the dots) and the head's depth from the dots around the face
   const all = [], sx = [], sy = [], sv = [];
   FM.POINTS.forEach((pt, i) => {
     if (!m.vis[i]) return;
@@ -1847,12 +1891,6 @@ function stageDepth() {
   const mg = .04 * Math.max(bx1 - bx0, by1 - by0);
   bx0 = Math.max(0, bx0 - mg); by0 = Math.max(0, by0 - mg); bx1 = Math.min(S.iw, bx1 + mg); by1 = Math.min(S.ih, by1 + mg);
   const cell = Math.max(s.cell, Math.max(bx1 - bx0, by1 - by0) / 420), gw = Math.ceil((bx1 - bx0) / cell) + 1, gh = Math.ceil((by1 - by0) / cell) + 1, n = gw * gh, h = cell / sc;
-  // the shell: a smooth spline through those dots (evaluated coarsely, then interpolated)
-  const T = sx.length >= 3 ? scalarFit(sx, sy, sv, Math.max(S.iw, S.ih)) : null, st4 = 4, cw = Math.ceil(gw / st4) + 1, ch = Math.ceil(gh / st4) + 1, Hc = new Float32Array(cw * ch);
-  let zb = 0;
-  for (const v of sv) zb = Math.min(zb, v);
-  zb -= .5;
-  for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) Hc[j * cw + i] = T ? scalarAt(T, bx0 + i * st4 * cell, by0 + j * st4 * cell) : zb;
   // inside the head: over the hair, down past the ears and along the sides of the neck (a convex hull
   // also took in the background beside the neck, which hung below the jaw like extra necks), feathered
   const head = headMask(m, gw, gh, bx0, by0, cell) || (() => {
@@ -1862,63 +1900,74 @@ function stageDepth() {
     return a;
   })();
   const hm = SF.blur(head, gw, gh, Math.max(1, Math.round(.3 / h)), null, 2);
-  // the face, its depth carried a little past its edge (nearest edge value) so the join has no gap
-  const { gw: fw, gh: fh, act } = s, fn = fw * fh, dd = new Float32Array(fn).fill(1e9), fz = new Float32Array(fn);
-  for (let k = 0; k < fn; k++) if (act[k]) { dd[k] = 0; fz[k] = zs[k]; }
-  const relax = (k, q, w) => { if (dd[q] + w < dd[k]) { dd[k] = dd[q] + w; fz[k] = fz[q]; } };
-  for (let j = 0; j < fh; j++) for (let i = 0; i < fw; i++) { const k = j * fw + i; if (i > 0) relax(k, k - 1, 1); if (j > 0) { relax(k, k - fw, 1); if (i > 0) relax(k, k - fw - 1, 1.414); if (i < fw - 1) relax(k, k - fw + 1, 1.414); } }
-  for (let j = fh - 1; j >= 0; j--) for (let i = fw - 1; i >= 0; i--) { const k = j * fw + i; if (i < fw - 1) relax(k, k + 1, 1); if (j < fh - 1) { relax(k, k + fw, 1); if (i < fw - 1) relax(k, k + fw + 1, 1.414); if (i > 0) relax(k, k + fw - 1, 1.414); } }
-  const fzS = SF.blur(fz, fw, fh, Math.max(1, Math.round(.3 / s.h)), null, 2);
-  for (let k = 0; k < fn; k++) if (!act[k]) fz[k] = fzS[k];
-  // near its edge the face is read smoothed: the grid's staircase there (a cell in or out where the
-  // cheek's side falls steeply) otherwise runs out across the steep side as stripes
-  const fzB = SF.blur(fz, fw, fh, Math.max(1, Math.round(.25 / s.h)), null, 2);
-  // where the face is: its outline drawn smooth (anti-aliased, softened a little), not the grid's staircase
-  const fc = document.createElement('canvas'); fc.width = gw; fc.height = gh;
-  const fg = fc.getContext('2d', { willReadFrequently: true }), bd = mapBoundary();
-  fg.setTransform(1 / cell, 0, 0, 1 / cell, -bx0 / cell + .5, -by0 / cell + .5); fg.fillStyle = '#fff'; fg.beginPath();
-  FM.spline(bd.idx.map(i => ({ x: m.p[2 * i], y: m.p[2 * i + 1] })), true, 8).forEach((p, q) => q ? fg.lineTo(p.x, p.y) : fg.moveTo(p.x, p.y));
-  fg.closePath(); fg.fill();
-  const fd = fg.getImageData(0, 0, gw, gh).data, fa = new Float32Array(n);
-  for (let k = 0; k < n; k++) fa[k] = fd[4 * k + 3] / 255;
-  const faS = SF.blur(fa, gw, gh, Math.max(1, Math.round(.08 / h)), null, 2);
-  const Z = new Float32Array(n), face = new Float32Array(n), shellZ = new Float32Array(n);
+  // the face's depth on the photo (null where its surface isn't), and the same smoothed: near its edge
+  // the grid's staircase (a cell in or out where the cheek falls steeply) would run out as stripes
+  const { gw: fw, gh: fh, act } = s, zsB = SF.blur(zs, fw, fh, Math.max(1, Math.round(.25 / s.h)), Float32Array.from(act), 2);
+  // (where the face is: its grid's mask read smoothly, not as the grid's staircase; near the edge the
+  // smoothed depth, which reaches a little past the last node)
+  const actF = Float32Array.from(act);
+  const faceAt = (x, y, a = zs) => {
+    const fx = (x - s.x0) / s.cell, fy = (y - s.y0) / s.cell, i = Math.floor(fx), j = Math.floor(fy);
+    if (i < 0 || j < 0 || i >= fw - 1 || j >= fh - 1) return null;
+    const k = j * fw + i;
+    if (a === zsB) return bilin(actF, fw, fx, fy) >= .5 ? bilin(a, fw, fx, fy) : null;
+    return act[k] && act[k + 1] && act[k + fw] && act[k + fw + 1] ? bilin(a, fw, fx, fy) : null;
+  };
+  // the head on a coarse grid: a smooth spline through those dots …
+  const T = sx.length >= 3 ? scalarFit(sx, sy, sv, Math.max(S.iw, S.ih)) : null, F = 3, cw = Math.ceil(gw / F) + 1, ch = Math.ceil(gh / F) + 1, nc = cw * ch, hc = F * h;
+  let zb = 0;
+  for (const v of sv) zb = Math.min(zb, v);
+  zb -= .5;
+  const H0 = new Float32Array(nc), C = new Float32Array(nc), fix = new Uint8Array(nc), od = new Float32Array(nc).fill(1e9), oy = new Float32Array(nc);
+  for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+    const k = j * cw + i, x = bx0 + i * F * cell, y = by0 + j * F * cell, zf = faceAt(x, y, zsB);
+    H0[k] = T ? scalarAt(T, x, y) : zb;
+    if (zf != null) { fix[k] = 1; C[k] = zf - H0[k]; od[k] = 0; oy[k] = y; }
+  }
+  // … how far each node is from the face, and how low on the face its nearest edge is …
+  const rel = (k, q, w) => { if (od[q] + w < od[k]) { od[k] = od[q] + w; oy[k] = oy[q]; } };
+  for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) { const k = j * cw + i; if (i > 0) rel(k, k - 1, 1); if (j > 0) { rel(k, k - cw, 1); if (i > 0) rel(k, k - cw - 1, 1.414); if (i < cw - 1) rel(k, k - cw + 1, 1.414); } }
+  for (let j = ch - 1; j >= 0; j--) for (let i = cw - 1; i >= 0; i--) { const k = j * cw + i; if (i < cw - 1) rel(k, k + 1, 1); if (j < ch - 1) { rel(k, k + cw, 1); if (i < cw - 1) rel(k, k + cw + 1, 1.414); if (i > 0) rel(k, k + cw - 1, 1.414); } }
+  const pY = id => { const i = FM.INDEX[id]; return i != null && m.vis[i] ? m.p[2 * i + 1] : null; };
+  const yMouth = pY('sto'), yChin = pY('me'), jaw = !isProfile(m) && yMouth != null && yChin != null && yChin > yMouth;
+  // … and the face's edge carried out into the head: c = (∑ neighbours) / (4 + (cell / reach)²), the
+  // reach shorter under the jaw (SOR, coarse grid; the face's own nodes hold the edge)
+  const scr = new Float32Array(nc);
+  for (let k = 0; k < nc; k++) { const low = jaw ? smooth01(yMouth, yMouth + .6 * (yChin - yMouth), oy[k]) : 0, L = 1.4 - .95 * low; scr[k] = (hc / L) ** 2; }
+  for (let it = 0; it < 220; it++) for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+    const k = j * cw + i;
+    if (fix[k]) continue;
+    let sum = 0, cnt = 0;
+    if (i > 0) { sum += C[k - 1]; cnt++; } if (i < cw - 1) { sum += C[k + 1]; cnt++; }
+    if (j > 0) { sum += C[k - cw]; cnt++; } if (j < ch - 1) { sum += C[k + cw]; cnt++; }
+    C[k] += 1.7 * (sum / (cnt + scr[k]) - C[k]);
+  }
+  // the relief: the head (and the carried-out edge) inside the head's outline, the background outside;
+  // the face itself over its surface, turning into the head over its first ≈ 5 mm
+  const di = new Float32Array(n).fill(1e9);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) if (faceAt(bx0 + i * cell, by0 + j * cell, zsB) == null) di[j * gw + i] = 0;
+  const relI = (k, q, w) => { if (di[q] + w < di[k]) di[k] = di[q] + w; };
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) { const k = j * gw + i; if (i > 0) relI(k, k - 1, 1); if (j > 0) { relI(k, k - gw, 1); if (i > 0) relI(k, k - gw - 1, 1.414); if (i < gw - 1) relI(k, k - gw + 1, 1.414); } }
+  for (let j = gh - 1; j >= 0; j--) for (let i = gw - 1; i >= 0; i--) { const k = j * gw + i; if (i < gw - 1) relI(k, k + 1, 1); if (j < gh - 1) { relI(k, k + gw, 1); if (i < gw - 1) relI(k, k + gw + 1, 1.414); if (i > 0) relI(k, k + gw - 1, 1.414); } }
+  const shell = new Float32Array(n);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    const k = j * gw + i, fx = Math.min(cw - 1.001, i / F), fy = Math.min(ch - 1.001, j / F);
+    shell[k] = zb + (Math.max(zb, bilin(H0, cw, fx, fy) + bilin(C, cw, fx, fy)) - zb) * Math.max(hm[k], di[k] ? 1 : 0);
+  }
+  // (smoothed at full resolution: the coarse grid's cells otherwise show as facets in the shading)
+  const shellS = SF.blur(shell, gw, gh, Math.max(1, Math.round(.22 / h)), null, 3);
+  const Z = new Float32Array(n), face = new Float32Array(n);
   for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
     const k = j * gw + i;
-    shellZ[k] = zb + (bilin(Hc, cw, Math.min(cw - 1.001, i / st4), Math.min(ch - 1.001, j / st4)) - zb) * hm[k];
+    if (!di[k]) { Z[k] = shellS[k]; continue; }
+    const x = bx0 + i * cell, y = by0 + j * cell, d = di[k] * h, zB = faceAt(x, y, zsB), zr = faceAt(x, y) ?? zB;
+    const w = smooth01(0, .5, d);
+    face[k] = w;
+    Z[k] = shellS[k] + (zB + (zr - zB) * smooth01(.2, .7, d) - shellS[k]) * w;
   }
-  const shellS = SF.blur(shellZ, gw, gh, Math.max(2, Math.round(.45 / h)), null, 2);
-  // How far outside the face each node is, and how low on the face its nearest edge is: below the jaw
-  // the face's edge slopes back to the neck over ~1 cm — the underside of the chin and jaw — instead of
-  // dropping as a curtain; at the cheeks and temples it turns back steeply, as a head's side does.
-  // (and, inside, how far in from the edge)
-  const od = new Float32Array(n).fill(1e9), oy = new Float32Array(n), di = new Float32Array(n).fill(1e9);
-  for (let k = 0; k < n; k++) if (fa[k] >= .5) { od[k] = 0; oy[k] = by0 + ((k / gw) | 0) * cell; } else di[k] = 0;
-  const rel2 = (k, q, w) => { if (od[q] + w < od[k]) { od[k] = od[q] + w; oy[k] = oy[q]; } if (di[q] + w < di[k]) di[k] = di[q] + w; };
-  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) { const k = j * gw + i; if (i > 0) rel2(k, k - 1, 1); if (j > 0) { rel2(k, k - gw, 1); if (i > 0) rel2(k, k - gw - 1, 1.414); if (i < gw - 1) rel2(k, k - gw + 1, 1.414); } }
-  for (let j = gh - 1; j >= 0; j--) for (let i = gw - 1; i >= 0; i--) { const k = j * gw + i; if (i < gw - 1) rel2(k, k + 1, 1); if (j < gh - 1) { rel2(k, k + gw, 1); if (i < gw - 1) rel2(k, k + gw + 1, 1.414); if (i > 0) rel2(k, k + gw - 1, 1.414); } }
-  const pY = id => { const i = FM.INDEX[id]; return i != null && m.vis[i] ? m.p[2 * i + 1] : null; };
-  const yMouth = pY('sto'), yChin = pY('me');
-  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
-    const k = j * gw + i, x = bx0 + i * cell, y = by0 + j * cell, shell = shellS[k];
-    const fx = (x - s.x0) / s.cell, fy = (y - s.y0) / s.cell;
-    if (fx >= 0 && fy >= 0 && fx < fw - 1 && fy < fh - 1) {
-      const a = faS[k], zr = bilin(fz, fw, fx, fy), zB = bilin(fzB, fw, fx, fy), zf = zB + (zr - zB) * smooth01(.15, .6, di[k] * h);
-      const low = yMouth != null && yChin != null && yChin > yMouth ? smooth01(yMouth, yMouth + .6 * (yChin - yMouth), oy[k]) : 0;
-      const wOut = 1 - smooth01(0, .25 + .65 * low, od[k] * h), w = Math.max(smooth01(.2, .8, a), a < .5 ? wOut : 0);
-      face[k] = a;
-      // outside the face the head never stands in front of the face's edge
-      const zo = Math.min(shell, zf);
-      Z[k] = zo + (zf - zo) * w;
-    } else Z[k] = shell;
-  }
-  // soften the head (not the face): the shell's join, the face's stair-stepped edge and the slope under
-  // the jaw (its distance is measured from the grid's staircase, which left a comb along the jawline)
-  const sm = SF.blur(Z, gw, gh, Math.max(1, Math.round(.15 / h)), null, 2), smB = SF.blur(Z, gw, gh, Math.max(1, Math.round(.3 / h)), null, 2);
-  for (let k = 0; k < n; k++) {
-    if (face[k] > 0 && face[k] < 1) Z[k] += (sm[k] - Z[k]) * (1 - Math.abs(2 * face[k] - 1));
-    if (fa[k] < .5 && od[k] * h < 1.2) Z[k] += (smB[k] - Z[k]) * (1 - smooth01(.8, 1.2, od[k] * h));
-  }
+  // and the seam itself softened a little more
+  const sm = SF.blur(Z, gw, gh, Math.max(1, Math.round(.12 / h)), null, 2);
+  for (let k = 0; k < n; k++) { const b = face[k] > 0 && face[k] < 1 ? 1 - Math.abs(2 * face[k] - 1) : 0; if (b) Z[k] += (sm[k] - Z[k]) * b; }
   stageZ = { key, z: Z, gw, gh, x0: bx0, y0: by0, cell, h, face, zb };
   return stageZ;
 }
@@ -2025,7 +2074,9 @@ function stageDrag(sx, sy, e) {
   if (rotated() && el2 > .04 * Math.abs(det)) {
     if (!m.zo) m.zo = new Float32Array(NMAP).fill(NaN);
     const dzc = (ds.x * ez.x + ds.y * ez.y) / el2 / S.surf.pxcm;
-    const push = (i, w) => { const z0 = Number.isFinite(m.zo[i]) ? m.zo[i] : dotDepth(i); m.zo[i] = z0 + dzc * w; };
+    // brows and hair lie on the skin: they have no depth of their own (the brow ridge dots set the bone)
+    if (![...set.w.keys()].some(i => !COLOUR_ONLY(FM.POINTS[i])) && !d.cosNote) { d.cosNote = true; toast('Brows lie on the skin — drag the brow ridge dots (dashed line) to move the bone'); }
+    const push = (i, w) => { if (COLOUR_ONLY(FM.POINTS[i])) return; const z0 = Number.isFinite(m.zo[i]) ? m.zo[i] : dotDepth(i); m.zo[i] = z0 + dzc * w; };
     for (const [i, w] of set.w) push(i, w);
     for (const [j, w] of set.mirror) push(j, w);   // the partner moves the same way in depth
     m.zoRev = (m.zoRev || 0) + 1;
@@ -3857,8 +3908,10 @@ function dragSet() {
   S.mapSel.forEach(i => w.set(i, 1));
   if (cfg.mapSoft && S.mapSel.size) {
     const R = cfg.mapSoftR * mapScale(), R2 = R * R, sel = [...S.mapSel];
-    FM.POINTS.forEach((_, j) => {
-      if (w.has(j) || !dotShown(j)) return;
+    // a brow (or the hair) drags only brows: the skin and the bone under it stay where they are
+    const cos = sel.every(i => COLOUR_ONLY(FM.POINTS[i]));
+    FM.POINTS.forEach((pt, j) => {
+      if (w.has(j) || !dotShown(j) || (cos && !COLOUR_ONLY(pt))) return;
       let d2 = Infinity;
       for (const i of sel) d2 = Math.min(d2, (m.p[2 * i] - m.p[2 * j]) ** 2 + (m.p[2 * i + 1] - m.p[2 * j + 1]) ** 2);
       if (d2 < R2) { const t = 1 - d2 / R2; w.set(j, t * t); }
@@ -4132,6 +4185,9 @@ async function autoPlace() {
       if (lower) put(lower, lo.slice().reverse().map(P));
     }
     pos.set(FM.INDEX.sto, { x: (P(13).x + P(14).x) / 2, y: (P(13).y + P(14).y) / 2 });
+    // each lip's fullness: halfway across it on the midline (its border → the lip line)
+    pos.set(FM.INDEX.ulf, { x: (P(0).x + P(13).x) / 2, y: (P(0).y + P(13).y) / 2 });
+    pos.set(FM.INDEX.llf, { x: (P(14).x + P(17).x) / 2, y: (P(14).y + P(17).y) / 2 });
   }
   for (const k of ['FACE_LANDMARKS_RIGHT_EYEBROW', 'FACE_LANDMARKS_LEFT_EYEBROW']) {
     const chains = mpChains(FLM[k]).filter(ch => !ch.closed && ch.path.length >= 3);
@@ -4161,6 +4217,8 @@ async function autoPlace() {
   pos.set(ix('puL'), P(468)); pos.set(ix('puR'), P(473));
   const pairs = [...pos].map(([i, b]) => ({ i, b }));
   fitMap('front', pairs);
+  // the finder has no nasolabial folds: they're slid onto the crease the photo shows (and kept there)
+  if (snapFolds()) for (const c of pairs) c.b = mapPt(c.i);
   S.mapSel.clear();
   // 3 · the hairline and the ears aren't among the finder's points: a short guided fit for them
   //     (each ring starts at the guess — Enter accepts it), everything else stays where the finder put it
@@ -4506,7 +4564,7 @@ function qfitFinish() {
   const snap2 = snapshot(), clicked = new Set([...(q.base || []), ...q.hist.filter(Boolean)].map(c => c.i));
   // the outer edge gently, then the eyes, brows and lips — never the points you clicked (after Auto-place
   // the finder already traced the eyes, brows and lips: only the hairline is left to find its edge)
-  const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = q.auto ? 0 : snapEdges({ pinned: clicked, features: true });
+  const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = q.auto ? 0 : snapEdges({ pinned: clicked, features: true }) + snapFolds({ pinned: clicked });
   if (n1 + n2) { pushUndo(snap2); estimateLight(); }
   syncPts(); syncUI();
   toast(q.auto ? 'Face map placed — check it, and drag anything that’s off (Ctrl+Z undoes it).'
@@ -5781,7 +5839,7 @@ function buildFaceMapPanel() {
   $('#mFind').addEventListener('click', autoPlace);
   $('#mSnap').addEventListener('click', () => {
     if (!S.map) return;
-    const snap = snapshot(), n = snapEdges();
+    const snap = snapshot(), n = snapEdges() + snapFolds();
     if (n) { pushUndo(snap); estimateLight(); syncPts(); syncUI(); }
     toast(n ? `Snapped ${n} dot${n === 1 ? '' : 's'} to edges — check them` : 'No clear edges found near the dots — drag them instead', 4000);
   });
