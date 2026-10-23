@@ -774,18 +774,22 @@ function pca(src, w, h, comp) {
 /* ------------------------------------------------------- the 3D stage --
    The photo itself as a 3D relief (Face map → Surface): one mesh over the face's box (the surface,
    falling off smoothly to the photo plane around it) plus the rest of the photo as a flat plane
-   behind. Model space is the photo's own pixels (x right, y down) with depth z in pixels toward the
+   behind — and, with the measured head, the head's own mesh around the face (coloured from the side
+   photo too: a second texture and a colour per vertex). Model space is the photo's own pixels (x right, y down) with depth z in pixels toward the
    camera, so with no rotation it projects exactly onto the 2D photo. The caller supplies the matrix
    (rotation about the face + the photo → screen transform). */
+// (a vertex's colour: the photo, the second photo (the side one) and a colour of its own, mixed by aW —
+// and, as the view turns to face the photo's camera, the photo wherever it sees the vertex (aFs), so
+// facing you the relief is exactly the photo)
 const VSS = `#version 300 es
-in vec3 aPos; in vec3 aNrm; in vec2 aUv; in vec2 aOv;
+in vec3 aPos; in vec3 aNrm; in vec2 aUv; in vec2 aOv; in vec2 aUv2; in vec3 aW; in vec3 aCol; in float aFs;
 uniform mat4 uM; uniform mat3 uR;
-out vec3 vN; out vec2 vUv; out vec2 vOv;
-void main() { vN = uR * aNrm; vUv = aUv; vOv = aOv; gl_Position = uM * vec4(aPos, 1.0); }`;
+out vec3 vN; out vec2 vUv; out vec2 vOv; out vec2 vUv2; out vec3 vW; out vec3 vCol; out float vFs;
+void main() { vN = uR * aNrm; vUv = aUv; vOv = aOv; vUv2 = aUv2; vW = aW; vCol = aCol; vFs = aFs; gl_Position = uM * vec4(aPos, 1.0); }`;
 const FSS = `#version 300 es
 precision highp float;
-in vec3 vN; in vec2 vUv; in vec2 vOv;
-uniform sampler2D uTex; uniform sampler2D uOv;
+in vec3 vN; in vec2 vUv; in vec2 vOv; in vec2 vUv2; in vec3 vW; in vec3 vCol; in float vFs;
+uniform sampler2D uTex; uniform sampler2D uOv; uniform sampler2D uTex2; uniform vec3 uGain2; uniform float uFront;
 uniform int uMode; uniform float uOvA; uniform vec3 uLight; uniform vec4 uColor;
 out vec4 o;
 void main() {
@@ -793,7 +797,9 @@ void main() {
   vec3 n = normalize(vN);
   if (n.z < 0.0) n = -n;
   float l = max(dot(n, normalize(uLight)), 0.0);
-  vec3 c = uMode == 0 ? texture(uTex, vUv).rgb : vec3(0.82, 0.76, 0.72) * (0.24 + 0.86 * l);
+  float wf = vW.x + (1.0 - vW.x) * vFs * uFront, k = (1.0 - wf) / max(1e-4, 1.0 - vW.x);
+  vec3 ph = texture(uTex, vUv).rgb * wf + (texture(uTex2, vUv2).rgb * uGain2 * vW.y + vCol * vW.z) * k;
+  vec3 c = uMode == 0 ? ph : vec3(0.82, 0.76, 0.72) * (0.24 + 0.86 * l);
   if (uOvA > 0.0 && vOv.x >= 0.0) { vec4 ov = texture(uOv, vOv); c = mix(c, ov.rgb, ov.a * uOvA); }
   o = vec4(c, 1.0);
 }`;
@@ -804,9 +810,9 @@ function createStage(canvas) {
   const pr = gl.createProgram();
   gl.attachShader(pr, sh(gl.VERTEX_SHADER, VSS)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FSS)); gl.linkProgram(pr);
   const U = {};
-  ['uM', 'uR', 'uTex', 'uOv', 'uMode', 'uOvA', 'uLight', 'uColor'].forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
+  ['uM', 'uR', 'uTex', 'uOv', 'uTex2', 'uGain2', 'uFront', 'uMode', 'uOvA', 'uLight', 'uColor'].forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
   const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ibo = gl.createBuffer(), lbo = gl.createBuffer();
-  const tex = gl.createTexture(), ovTex = gl.createTexture();
+  const tex = gl.createTexture(), ovTex = gl.createTexture(), tex2 = gl.createTexture();
   const texInit = (t, src) => {
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -817,27 +823,33 @@ function createStage(canvas) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   };
   texInit(ovTex, new ImageData(1, 1));
+  texInit(tex2, new ImageData(1, 1));
   let nTri = 0, nLine = 0, hasOv = false;
   const loc = n => gl.getAttribLocation(pr, n);
   return {
     maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
     /** The photo (an image or canvas; its pixels map onto the photo's full width and height). */
     setPhoto(src) { texInit(tex, src); },
+    /** The second photo (the side one), or null. */
+    setPhoto2(src) { texInit(tex2, src || new ImageData(1, 1)); },
     /**
      * The mesh: { pos (x, y, z per vertex, photo px), nrm (3 per vertex), uv (photo 0…1),
-     * ov (overlay 0…1, or −1 for none), tri (Uint32Array), lines (Uint32Array, for Wire) }.
+     * ov (overlay 0…1, or −1 for none), tri (Uint32Array), lines (Uint32Array, for Wire) } and, optionally,
+     * uv2 (the second photo, 0…1), w (3 per vertex: how much of the photo, the second photo and col),
+     * col (3 per vertex, 0…1) and fs (1 where the photo sees the vertex) — without them, the photo alone.
      */
     setMesh(M) {
-      const nv = M.pos.length / 3, data = new Float32Array(nv * 10);
+      const nv = M.pos.length / 3, F = 19, data = new Float32Array(nv * F);
       for (let v = 0; v < nv; v++) {
-        data.set([M.pos[3 * v], M.pos[3 * v + 1], M.pos[3 * v + 2], M.nrm[3 * v], M.nrm[3 * v + 1], M.nrm[3 * v + 2], M.uv[2 * v], M.uv[2 * v + 1], M.ov[2 * v], M.ov[2 * v + 1]], 10 * v);
+        const o = F * v;
+        data.set([M.pos[3 * v], M.pos[3 * v + 1], M.pos[3 * v + 2], M.nrm[3 * v], M.nrm[3 * v + 1], M.nrm[3 * v + 2], M.uv[2 * v], M.uv[2 * v + 1], M.ov[2 * v], M.ov[2 * v + 1]], o);
+        if (M.w) data.set([M.uv2[2 * v], M.uv2[2 * v + 1], M.w[3 * v], M.w[3 * v + 1], M.w[3 * v + 2], M.col[3 * v], M.col[3 * v + 1], M.col[3 * v + 2], M.fs[v]], o + 10);
+        else data[o + 12] = 1;
       }
       gl.bindVertexArray(vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(loc('aPos')); gl.vertexAttribPointer(loc('aPos'), 3, gl.FLOAT, false, 40, 0);
-      gl.enableVertexAttribArray(loc('aNrm')); gl.vertexAttribPointer(loc('aNrm'), 3, gl.FLOAT, false, 40, 12);
-      gl.enableVertexAttribArray(loc('aUv')); gl.vertexAttribPointer(loc('aUv'), 2, gl.FLOAT, false, 40, 24);
-      gl.enableVertexAttribArray(loc('aOv')); gl.vertexAttribPointer(loc('aOv'), 2, gl.FLOAT, false, 40, 32);
+      const at = (n, k, off) => { const l = loc(n); if (l < 0) return; gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, k, gl.FLOAT, false, 4 * F, 4 * off); };
+      at('aPos', 3, 0); at('aNrm', 3, 3); at('aUv', 2, 6); at('aOv', 2, 8); at('aUv2', 2, 10); at('aW', 3, 12); at('aCol', 3, 15); at('aFs', 1, 18);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, M.tri, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, M.lines, gl.STATIC_DRAW);
       gl.bindVertexArray(null);
@@ -845,7 +857,7 @@ function createStage(canvas) {
     },
     /** A view drawn over the face (contours, relief…), covering the surface grid; null for none. */
     setOverlay(src) { hasOv = !!src; if (src) texInit(ovTex, src); },
-    /** p: { m (column-major 4×4), r (3×3 rotation), light [x, y, z], mode ('photo' | 'clay' | 'wire'), ovA, w, h (device px) } */
+    /** p: { m (column-major 4×4), r (3×3 rotation, column-major), light [x, y, z], mode ('photo' | 'clay' | 'wire'), ovA, w, h (device px), gain2 ([r, g, b] for the second photo) } */
     render(p) {
       if (canvas.width !== p.w) canvas.width = p.w;
       if (canvas.height !== p.h) canvas.height = p.h;
@@ -859,6 +871,11 @@ function createStage(canvas) {
       gl.uniform3fv(U.uLight, [r[0] * L[0] + r[3] * L[1] + r[6] * L[2], r[1] * L[0] + r[4] * L[1] + r[7] * L[2], r[2] * L[0] + r[5] * L[1] + r[8] * L[2]]);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(U.uTex, 0);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, ovTex); gl.uniform1i(U.uOv, 1);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, tex2); gl.uniform1i(U.uTex2, 2);
+      gl.uniform3fv(U.uGain2, p.gain2 || [1, 1, 1]);
+      // (how squarely the view faces the photo's camera: from ≈ 35° off on, the photo takes over everything it sees)
+      const fz = p.r[8], f = Math.min(1, Math.max(0, (fz - .82) / (.985 - .82)));
+      gl.uniform1f(U.uFront, f * f * (3 - 2 * f));
       gl.uniform1f(U.uOvA, hasOv ? p.ovA : 0);
       gl.uniform1i(U.uMode, p.mode === 'photo' ? 0 : 1);
       gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
@@ -876,5 +893,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '31' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '32' };
 })();
