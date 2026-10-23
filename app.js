@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '28';   // must match the build in presets.js, warp.js, facemap.js and surface.js
+const BUILD = '29';   // must match the build in presets.js, warp.js, facemap.js and surface.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -250,6 +250,9 @@ const S = {
   tone: { field: null, base: null }, toneRev: 0, tstroke: null,
   glDirty: true, fieldDirty: false,
 };
+// the photo tabs (Front · Side · 3D, set up with the image input below): which photo is shown, the other one put away
+let imgSeqTop = 0, curSlot = 'front', back3D = null;
+const slots = { front: null, side: null };
 const wake = (ms = 1200) => { S.awakeUntil = Math.max(S.awakeUntil, now() + ms); };
 
 const toS = p => ({ x: p.x * S.view.k + S.view.x, y: p.y * S.view.k + S.view.y });
@@ -632,7 +635,7 @@ function makeMap(view, p, snapped, light) {
  * Fit the face scan to the photo: the template seen from this view, then pulled onto every
  * measured landmark it shares a name with (and any quick-fit clicks), so matched points land exactly.
  */
-function fitMap(view = (S.map && S.map.view) || 'front', extraPairs = []) {
+function fitMap(view = (S.map && S.map.view) || (curSlot === 'side' ? 'left' : 'front'), extraPairs = []) {
   // the template sits on a first guess of the face frame (a profile is centred on the head)
   const yaw = FM.VIEWS[view], f = guessFace(), sx = f.ax / 6.75, sy = f.ay / 6;
   const T = FM.POINTS.map(pt => { const t = FM.project(pt, yaw); return { x: f.cx + t.x * sx, y: f.cy + t.y * sy }; });
@@ -1281,16 +1284,60 @@ function surfHints(I) {
   for (let k = 0; k < I.n; k++) if (I.act[k]) { const x = I.x0 + (k % I.gw) * I.cell, y = I.y0 + ((k / I.gw) | 0) * I.cell; hint[k] = hintAt(S.hints.hl, x, y); ignore[k] = hintAt(S.hints.ig, x, y); }
   return { hint, ignore };
 }
-/** Depths set by dragging dots in 3D (or from a side photo): the anatomy is fitted to them, then the surface bends through them. */
+/**
+ * Depths the surface must meet: set by dragging dots in 3D (or from a side map's file), and the Side
+ * tab's profile — its line down the midline and its landmarks (a depth set by hand wins). The anatomy
+ * is fitted to them, then the surface bends through them.
+ */
 function surfPins(I) {
-  const m = S.map, pins = [];
+  const m = S.map, pins = [], hand = new Set();
+  const node = (x, y) => { const gi = Math.round((x - I.x0) / I.cell), gj = Math.round((y - I.y0) / I.cell), k = gj * I.gw + gi; return gi < 0 || gj < 0 || gi >= I.gw || gj >= I.gh || !I.act[k] ? -1 : k; };
+  const use = pt => pt.field !== 'back' && !COLOUR_ONLY(pt);
   if (m.zo) FM.POINTS.forEach((pt, i) => {
-    if (!Number.isFinite(m.zo[i]) || !m.vis[i] || pt.field === 'back' || COLOUR_ONLY(pt)) return;
-    const x = m.p[2 * i], y = m.p[2 * i + 1], gi = Math.round((x - I.x0) / I.cell), gj = Math.round((y - I.y0) / I.cell), k = gj * I.gw + gi;
-    if (gi < 0 || gj < 0 || gi >= I.gw || gj >= I.gh || !I.act[k]) return;
-    pins.push({ k, z: m.zo[i], x, y });
+    if (!Number.isFinite(m.zo[i]) || !m.vis[i] || !use(pt)) return;
+    const x = m.p[2 * i], y = m.p[2 * i + 1], k = node(x, y);
+    if (k < 0) return;
+    pins.push({ k, z: m.zo[i], x, y }); hand.add(i);
   });
+  // the side photo's landmarks and its profile line (every ≈ 8 mm) guide the anatomy fit — soft: the
+  // surface isn't bent exactly through them (many close points made it ripple); the line itself is
+  // laid on afterwards as a smooth correction (surfProfile)
+  const sp = sideProfile();
+  if (sp) {
+    for (const [i, z] of sp.dots) {
+      if (hand.has(i) || !m.vis[i] || !use(FM.POINTS[i])) continue;
+      const x = m.p[2 * i], y = m.p[2 * i + 1], k = node(x, y);
+      if (k >= 0) pins.push({ k, z, x, y, soft: true });
+    }
+    for (const q of sideLine(sp, .8)) { const k = node(q.x, q.y); if (k >= 0) pins.push({ k, z: q.z, x: q.x, y: q.y, soft: true }); }
+  }
   return pins;
+}
+/** Points down this face's midline (photo px) with the side photo's profile depth (cm), every `step` cm. */
+function sideLine(sp, step) {
+  const m = S.map, sc = mapFrame().scale, out = [];
+  const mid = FM.POINTS.map((pt, i) => pt.side === 0 && !pt.mid && m.vis[i] && pt.field !== 'back' ? { x: m.p[2 * i], y: m.p[2 * i + 1] } : null).filter(Boolean).sort((a, b) => a.y - b.y);
+  const L = sp.line.filter(q => Number.isFinite(q.y)).sort((a, b) => a.y - b.y);
+  if (mid.length < 2 || L.length < 2) return out;
+  const lerp = (arr, y, key) => { if (y <= arr[0].y) return arr[0][key]; for (let q = 1; q < arr.length; q++) if (arr[q].y >= y) { const a = arr[q - 1], b = arr[q], t = (y - a.y) / ((b.y - a.y) || 1); return a[key] + (b[key] - a[key]) * t; } return arr[arr.length - 1][key]; };
+  for (let y = Math.max(L[0].y, mid[0].y); y <= Math.min(L[L.length - 1].y, mid[mid.length - 1].y); y += step * sc) out.push({ x: lerp(mid, y, 'x'), y, z: lerp(L, y, 'z') });
+  return out;
+}
+/**
+ * The side photo's profile line for the surface: points down the midline every ≈ 1.5 mm, each with how
+ * far sideways its correction reaches (≈ 1.8 cm, ≈ 0.9 cm along the nose, which is narrow). Null without
+ * a side map.
+ */
+function surfProfile() {
+  const sp = S.map && sideProfile();
+  if (!sp) return null;
+  const m = S.map, sc = mapFrame().scale, yOf = id => { const i = FM.INDEX[id]; return i != null && m.vis[i] ? m.p[2 * i + 1] : null; };
+  const yn = yOf('n'), ysn = yOf('sn'), pts = sideLine(sp, .15);
+  for (const q of pts) {
+    const nose = yn != null && ysn != null ? smooth01(yn, yn + .6 * sc, q.y) * (1 - smooth01(ysn - .5 * sc, ysn + .2 * sc, q.y)) : 0;
+    q.s = sc * (1.8 - .9 * nose);
+  }
+  return pts.length > 2 ? pts : null;
 }
 /* The face's own anatomy in the Surface panel: what the light suggested, corrected by hand while you
    look at the turned face. A value set here is held (m.af) — the fit works around it on every rebuild.
@@ -1309,7 +1356,7 @@ function setFaceAnat(upd) {
   if ('lean' in u) { const L = u.lean; delete u.lean; u.buccal = clamp(L, -2, 2); u.fat = clamp(-.7 * L, -2, 2); }
   m.af = { ...(m.af || {}), ...u };
   const I = surfInputs(), values = { ...(s.fit || {}), ...m.af };
-  const r = SF.compose({ ...I, basis: surfBasis(I), pins: surfPins(I), bendR: 3 * mapFrame().scale }, values, s.dz);
+  const r = SF.compose({ ...I, basis: surfBasis(I), pins: surfPins(I), profile: surfProfile(), bendR: 3 * mapFrame().scale }, values, s.dz);
   // a new surface object (the undo snapshot keeps the old one)
   S.surf = { ...s, z: r.z, zfit: r.zfit, fit: values, _zt: null, rev: ++surfRev };
   S.glDirty = true; syncFaceMapPanel(); wake();
@@ -1336,7 +1383,7 @@ function buildAnatPanel(an) {
 }
 /** What the surface depends on besides the dots: the light and the marks (a rebuild is due when it changes). */
 const zoSig = zo => { if (!zo) return '0'; let n = 0, s = 0; zo.forEach((v, i) => { if (Number.isFinite(v)) { n++; s += v * (i % 97 + 1); } }); return `${n}:${s.toFixed(3)}`; };
-const surfDeps = () => `${S.lightDir ? S.lightDir.map(v => v.toFixed(3)).join(',') : 'auto'}|${S.hints ? S.hints.rev : 0}|${S.map ? zoSig(S.map.zo) : 0}`;
+const surfDeps = () => { const sp = S.map ? sideProfile() : null; return `${S.lightDir ? S.lightDir.map(v => v.toFixed(3)).join(',') : 'auto'}|${S.hints ? S.hints.rev : 0}|${S.map ? zoSig(S.map.zo) : 0}|${sp ? sp.key : '-'}`; };
 async function buildSurface(opt = {}) {
   if (!SF || !S.map) return;
   if (S.surfBusy) { S.surfAgain = opt; return; }   // build again once this one is done
@@ -1349,7 +1396,7 @@ async function buildSurface(opt = {}) {
   syncFaceMapPanel();
   let res;
   try {
-    res = await SF.buildSurface({ ...I, basis: surfBasis(I), hint, ignore, pins, bendR: 3 * mapFrame().scale, fixed: m.af || {}, lightDir: S.lightDir, trust: cfg.surfTrust, detail: cfg.surfDetail }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
+    res = await SF.buildSurface({ ...I, basis: surfBasis(I), hint, ignore, pins, profile: surfProfile(), bendR: 3 * mapFrame().scale, fixed: m.af || {}, lightDir: S.lightDir, trust: cfg.surfTrust, detail: cfg.surfDetail }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
   } catch (err) { console.error(err); }
   S.surfBusy = null;
   const again = S.surfAgain;
@@ -3844,7 +3891,8 @@ function syncSurfacePane() {
     $('#sfaReset').disabled = !nh || !!busy;
     setText($('#sfaNote'), (stale ? 'The dots moved — rebuild before changing these. ' : '')
       + (nh ? 'Values marked • are yours and are kept on rebuilds. ' : 'Compared with the average face. ')
-      + (pins ? `${pins} dot depth${pins === 1 ? '' : 's'} set by hand or from a side photo.` : ''));
+      + (sideProfile() ? 'The profile is the side photo’s (Side tab). ' : '')
+      + (pins ? `${pins} dot depth${pins === 1 ? '' : 's'} set by hand or from a side map file.` : ''));
   }
   $$('#sfMode [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (cfg.surfMode || 'photo')));
   setRange('sfTrust', Math.round(cfg.surfTrust * 100), Math.round(cfg.surfTrust * 100) + '%');
@@ -4353,29 +4401,26 @@ async function importFaceMap(file) {
    A front photo can't show how far the chin, lips, nose or brow come forward. The face map of a side
    (profile) photo of the same person can: its dots' horizontal positions are those depths. The two
    maps are lined up on the dots they share (a similarity fit of the profile's (depth, height) onto
-   this face's (current depth, height), so the scale, a slightly different head tilt and the position
-   drop out), and the profile's depths are set on the midline and on the named landmarks — the dots
-   a side photo shows reliably. The partner on the far side gets the same depth. */
+   this face's (depth, height), so the scale, a slightly different head tilt and the position drop
+   out); then the profile's depths are set on the midline and on the named landmarks — the dots a side
+   photo shows reliably. The partner on the far side gets the same depth. */
 const SIDE_ROLE = pt => pt.field !== 'back' && (pt.side === 0 || !!pt.lm) && !pt.mid && !/^(zy|tem)/.test(pt.id);   // (the widest points of the face don't show on a profile)
-async function importSideMap(file) {
-  const m = S.map;
-  if (!m || !file) return;
-  if (isProfile(m)) { toast('This photo is a profile already — load a side photo’s map onto a front photo', 5000); return; }
-  let doc;
-  try { doc = JSON.parse(await file.text()); } catch (e) { toast('That file isn’t a Cranimeter face map', 5000); return; }
-  const yawP = doc && doc.map ? FM.VIEWS[doc.map.view] : null;
-  if (!doc || doc.app !== 'cranimeter' || !doc.map || !doc.map.points) { toast('That file isn’t a Cranimeter face map', 5000); return; }
-  if (yawP == null || Math.abs(yawP) < 45) { toast('That map is of a front photo — map a side (profile) photo, export it, and load that here', 6000); return; }
+/**
+ * Line a profile map up with this (front) face map. pointsOf(id) → the profile photo's [x, y] of a dot
+ * (or null), yawP its view, depthOf(i) this face's depth of dot i (cm) to line up against.
+ * Returns { n, use (the dots that fit), fitS (profile { u, v } → this photo's { z (px), y }), sP, pxcm }.
+ */
+function sideFit(m, pointsOf, yawP, depthOf) {
   const sP = Math.sin(yawP * Math.PI / 180), pxcm = mapFrame().scale, pairs = [];
   FM.POINTS.forEach((pt, i) => {
-    const xy = doc.map.points[pt.id];
+    const xy = pointsOf(pt.id);
     if (!xy || !m.vis[i] || !SIDE_ROLE(pt) || !FM.visible(pt, yawP)) return;
     // profile photo: forward is −x for a face looking left (yaw +90), +x looking right
-    pairs.push({ i, u: -sP * xy[0], v: xy[1], z: dotDepth(i) * pxcm, y: m.p[2 * i + 1] });
+    pairs.push({ i, u: -sP * xy[0], v: xy[1], z: depthOf(i) * pxcm, y: m.p[2 * i + 1] });
   });
-  if (pairs.length < 6) { toast(`Only ${pairs.length} dots match between the two maps — check that the side photo’s map is placed`, 6000); return; }
-  // similarity (scale, rotation, shift) from the profile's (depth, height) onto this face's — twice,
-  // the second time with the depths it found, and without dots that don't fit
+  if (pairs.length < 6) return { n: pairs.length };
+  // similarity (scale, rotation, shift) from the profile's (depth, height) onto this face's — three
+  // times, each with the depths the last one found, and without dots that don't fit
   let use = pairs, fitS = null;
   for (let pass = 0; pass < 3; pass++) {
     const n = use.length;
@@ -4392,11 +4437,24 @@ async function importSideMap(file) {
     use = pairs.filter((p, q) => err[q] <= Math.max(3 * med, .25 * pxcm));
     if (use.length < 6) use = pairs;
   }
+  return { n: pairs.length, use, fitS, sP, pxcm };
+}
+async function importSideMap(file) {
+  const m = S.map;
+  if (!m || !file) return;
+  if (isProfile(m)) { toast('This photo is a profile already — load a side photo’s map onto a front photo', 5000); return; }
+  let doc;
+  try { doc = JSON.parse(await file.text()); } catch (e) { toast('That file isn’t a Cranimeter face map', 5000); return; }
+  const yawP = doc && doc.map ? FM.VIEWS[doc.map.view] : null;
+  if (!doc || doc.app !== 'cranimeter' || !doc.map || !doc.map.points) { toast('That file isn’t a Cranimeter face map', 5000); return; }
+  if (yawP == null || Math.abs(yawP) < 45) { toast('That map is of a front photo — map a side (profile) photo, export it, and load that here', 6000); return; }
+  const f = sideFit(m, id => doc.map.points[id] || null, yawP, dotDepth);
+  if (!f.fitS) { toast(`Only ${f.n} dots match between the two maps — check that the side photo’s map is placed`, 6000); return; }
   const before = snapshot();
   if (!m.zo) m.zo = new Float32Array(NMAP).fill(NaN);
   let set = 0;
-  for (const p of use) {
-    const z = fitS(p).z / pxcm;
+  for (const p of f.use) {
+    const z = f.fitS(p).z / f.pxcm;
     m.zo[p.i] = z; set++;
     const j = FM.MIRROR[p.i];
     if (j != null && j !== p.i && m.vis[j]) m.zo[j] = z;
@@ -4406,6 +4464,60 @@ async function importSideMap(file) {
   syncUI();
   toast(`Side photo: depths set on ${set} dots (and their partners) — the surface is rebuilt to fit them. Ctrl+Z undoes it`, 5000);
   if (surfStep()) buildSurface({ auto: true });
+}
+/**
+ * The Side tab's face map, read onto the front one (the 3D tab builds from both): the named landmarks a
+ * profile shows (and their partners), and the profile line itself — every few millimetres down the
+ * midline, not only at the named dots, so the forehead, nose, lips and chin follow the side photo's
+ * outline. Lined up as a side map's file is (above), but against the template's depths, so the result
+ * never feeds back into itself. Null when there's no placed side map (or this isn't the front tab).
+ * { dots: [[i, z cm]], line: [{ y (front photo px), z (cm) }] top to bottom, n, key }
+ */
+let sideCache = null;
+function sideProfile() {
+  const sd = slots.side, sm = sd && sd.map, m = S.map;
+  if (curSlot !== 'front' || !m || isProfile(m) || !sm || !isProfile(sm) || !sm.snapped) return null;
+  const key = `${sd.imgSeq}|${sm.pver}|${sm.view}|${m.pver}`;
+  if (sideCache && sideCache.key === key) return sideCache.r;
+  const t = m.yaw * Math.PI / 180, tplZ = i => FM.POINTS[i].x * Math.sin(t) + FM.POINTS[i].z * Math.cos(t);
+  const f = sideFit(m, id => { const i = FM.INDEX[id]; return i != null && sm.vis[i] ? [sm.p[2 * i], sm.p[2 * i + 1]] : null; }, sm.yaw, tplZ);
+  let r = null;
+  if (f.fitS) {
+    const { fitS, sP, pxcm } = f, dots = [];
+    for (const p of f.use) {
+      if (!FM.POINTS[p.i].side) continue;   // (the midline comes from the line below)
+      const z = fitS(p).z / pxcm, j = FM.MIRROR[p.i];
+      dots.push([p.i, z]);
+      if (j != null && j !== p.i && m.vis[j]) dots.push([j, z]);
+    }
+    // Heights by anatomy, not by the photo: between two midline landmarks both maps have (nasion, nose
+    // tip, lips, chin …) the side's line is laid onto the same stretch of this face, so a face a little
+    // longer or shorter in one photo (or a slightly different head tilt) doesn't put the chin's depth
+    // at the jaw's underside.
+    const knots = [];
+    for (const id of ['tri', 'fhT', 'fhC', 'sg', 'gl', 'rx', 'n', 'rhi', 'dor', 'prn', 'col', 'sn', 'phil', 'phL', 'ls', 'ulf', 'sto', 'llf', 'li', 'bpt', 'pog', 'gn', 'me']) {
+      const i = FM.INDEX[id];
+      if (i == null || !sm.vis[i] || !m.vis[i]) continue;
+      const ys = fitS({ u: -sP * sm.p[2 * i], v: sm.p[2 * i + 1] }).y, yf = m.p[2 * i + 1];
+      if (!knots.length || (ys > knots[knots.length - 1].ys && yf > knots[knots.length - 1].yf)) knots.push({ ys, yf });
+    }
+    const remap = y => {
+      if (knots.length < 2) return y;
+      let a = knots[0], b = knots[1];
+      for (let q = 1; q < knots.length && knots[q - 1].ys < y; q++) { a = knots[q - 1]; b = knots[q]; }
+      if (y < a.ys) return y - a.ys + a.yf;   // (beyond the end ones: shifted with them)
+      if (y > b.ys) return y - b.ys + b.yf;
+      return a.yf + (y - a.ys) / ((b.ys - a.ys) || 1) * (b.yf - a.yf);
+    };
+    const pc = sm.contours.find(c => c.id === 'profile'), line = [];
+    if (pc) {
+      const pts = pc.idx.filter(i => sm.vis[i]).map(i => ({ x: sm.p[2 * i], y: sm.p[2 * i + 1] }));
+      for (const q of FM.spline(pts, false, 6)) { const o = fitS({ u: -sP * q.x, v: q.y }); line.push({ y: remap(o.y), z: o.z / pxcm }); }
+    }
+    r = { dots, line, n: f.n, key };
+  }
+  sideCache = { key, r };
+  return r;
 }
 
 /* ---- symmetry and the detail dots ---- */
@@ -4971,7 +5083,7 @@ function setImageState(rec) {
   glMaskVer = -1; glMapKey = '';
   customSig = null;
   S.imgRec = rec || null;
-  S.imgSeq++;
+  S.imgSeq = ++imgSeqTop;   // (unique across the tabs: caches are keyed on it)
   if (!rec) {
     Object.assign(S, { img: null, iw: 0, ih: 0 });
     body.classList.remove('has-img');
@@ -4990,6 +5102,101 @@ function setImageState(rec) {
   renderToolOpts();
 }
 
+/* ---- the tabs at the bottom: Front · Side · 3D ----
+   The front and the side photo each keep their own image, face map, measurements, view and undo
+   history: switching tabs puts one away and brings the other back exactly as it was. The side tab maps
+   a profile and lists the profile measurements; the front tab the rest. 3D is the front photo's face
+   map as a 3D head (the Surface step, turned) — built from both maps when the side one is placed too. */
+const SLOT_STATE = ['img', 'imgRec', 'iw', 'ih', 'imgSeq', 'imgA', 'view', 'viewT', 'fitK', 'meas', 'sel', 'active', 'showAll', 'refId', 'calibId', 'calibMM',
+  'undo', 'redo', 'adj', 'warp', 'map', 'mapOpen', 'mapStep', 'lightDir', 'rot3', 'surf', 'hints', 'anat', 'anatBase', 'tone'];
+function blankSlot() {
+  return {
+    img: null, imgRec: null, iw: 0, ih: 0, imgSeq: ++imgSeqTop, imgA: 1, view: { x: 0, y: 0, k: 1 }, viewT: { x: 0, y: 0, k: 1 }, fitK: 1,
+    meas: new Map(), sel: [], active: null, showAll: false, refId: null, calibId: null, calibMM: 11.7, undo: [], redo: [],
+    adj: DEFAULT_ADJ(), warp: { field: null, gw: 1, gh: 1, cs: 1 }, map: null, mapOpen: false, mapStep: 'points', lightDir: null,
+    rot3: { yaw: 0, pitch: 0 }, surf: null, hints: null, anat: {}, anatBase: {}, tone: { field: null, base: null },
+  };
+}
+slots.side = blankSlot();
+/** Which tab is showing: the side photo, the front photo's 3D head, or the front photo. */
+function curTab() { return curSlot === 'side' ? 'side' : mapping() && S.mapStep === 'surface' ? '3d' : 'front'; }
+/** Groups of measurement presets each photo lists (a profile's angles only on the side photo). */
+function slotHasGroup(g) { return curSlot === 'side' ? g === 'Profile' : g !== 'Profile'; }
+function slotPresets() { return PRESET_IDS.filter(id => slotHasGroup(P[id].group)); }
+function useSlot(name) {
+  if (name === curSlot) return;
+  // finish what's in progress here (a quick fit keeps what was placed), then put this photo away
+  if (S.qfit) qfitCancel();
+  if (S.mapDrag || S.mapBox || S.mapXf) morphUp({});
+  if (S.stroke) endStroke();
+  if (S.tstroke) endTone();
+  if (S.zstroke) endSurfBrush();
+  if (S.hstroke) endHintBrush();
+  const away = { vw: W, vh: H };
+  for (const k of SLOT_STATE) away[k] = S[k];
+  slots[curSlot] = away;
+  const o = slots[name] || blankSlot();
+  slots[name] = null;
+  curSlot = name;
+  for (const k of SLOT_STATE) S[k] = o[k];
+  Object.assign(S, { draft: null, draftM: null, drag: null, mdrag: null, press: null, pan: null, rpress: null, box: null, hover: null, listHover: null, leaving: [],
+    mapHover: null, mapDrag: null, mapBox: null, mapXf: null, qfit: null, orbit: null, stroke: null, tstroke: null, zstroke: null, hstroke: null, hdrag: null, compare: false, sfaSnap: null });
+  S.picked = new Set(); S.mapSel = new Set();
+  // nothing cached for the other photo is reused
+  S.toneRev++; glMaskVer = -1; glMapKey = ''; customSig = null;
+  stageZ = null; stageMeshKey = ''; stageOvKey = ''; stageKey = '';
+  S.glDirty = true; S.fieldDirty = true;
+  body.classList.toggle('has-img', !!S.img);
+  if (!S.img) { octx.setTransform(1, 0, 0, 1, 0, 0); octx.clearRect(0, 0, ov.width, ov.height); loupe._on = false; loupe.classList.remove('on'); }
+  else if (o.vw !== W || o.vh !== H) fitView(true);
+  toolOptsFor = null; renderToolOpts();
+  applyFilter();
+  syncPts(); syncUI();
+}
+function enter3D() {
+  if (!S.img) { syncUI(); toast('Add the front photo first — the 3D head is built from its face map', 5000); return; }
+  if (!S.map || !S.map.snapped) { openFaceMap(true); syncUI(); toast('Place the front face map first (Auto-place or Quick fit) — the 3D head is built from it', 6000); return; }
+  back3D = { open: S.mapOpen, step: S.mapStep === 'surface' ? 'points' : S.mapStep };
+  openFaceMap(true);
+  S.mapStep = 'surface'; S.qfit = null; S.mapSel.clear(); S.mapHover = null;
+  if (/^h[A-Z]/.test(cfg.surfBrush || '')) cfg.surfBrush = '';
+  if (!S.surf || S.surf.view !== S.map.view || S.surf.pver !== S.map.pver || S.surf.deps !== surfDeps()) buildSurface({ auto: true });
+  S.rot3 = { yaw: .55, pitch: .1 };
+  S.glDirty = true; syncUI();
+  if (!sideProfile()) toast(slots.side && slots.side.map && slots.side.map.snapped ? 'The side map didn’t line up with the front one — check its dots' : 'Built from the front photo alone — map the side photo too for the true profile', 5000);
+}
+function leave3D() {
+  if (curSlot !== 'front' || curTab() !== '3d') return;
+  S.mapStep = back3D ? back3D.step : 'points';
+  if (back3D && !back3D.open) openFaceMap(false);
+  S.rot3 = { yaw: 0, pitch: 0 }; back3D = null;
+  S.glDirty = true;
+}
+function goTab(t) {
+  if (t === curTab()) return;
+  // mapping one photo and switching to the other: that one opens for mapping too
+  const wasMapping = mapping();
+  if (t === 'side') { leave3D(); useSlot('side'); }
+  else if (t === 'front') { useSlot('front'); leave3D(); }
+  else { useSlot('front'); enter3D(); }
+  if (t !== '3d' && wasMapping && S.img && !S.mapOpen) { if (S.mapStep === 'surface' || curSlot === 'side') S.mapStep = 'points'; openFaceMap(true); }
+  syncUI();
+}
+function syncSlotBar() {
+  const t = curTab(), has = n => n === curSlot ? S : slots[n === '3d' ? 'front' : n];
+  $$('#slots [data-slot]').forEach(b => {
+    const n = b.dataset.slot, d = n === '3d' ? has('front') : has(n);
+    b.classList.toggle('on', n === t);
+    b.classList.toggle('done', !!(d && d.map && d.map.snapped && (n !== '3d' || (d.surf && d.surf.view === d.map.view))));
+    b.classList.toggle('has', !!(d && d.img));
+  });
+  // the landing card names the photo it wants
+  const side = curSlot === 'side';
+  setText($('#drop h1'), side ? 'Add the side photo' : 'Add the front photo');
+  setText($('#drop .drop-zone p'), side ? 'A true side profile of the same person — drop it here, paste it, or browse your files.' : 'Drop a photo here, paste it, or browse your files.');
+}
+
+$('#slots').addEventListener('click', e => { const b = e.target.closest('[data-slot]'); if (b) goTab(b.dataset.slot); });
 $('#btnBrowse').addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
 $('#dropZone').addEventListener('click', () => fileInput.click());
 $('#dropZone').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
@@ -5669,7 +5876,8 @@ function applyFilter() {
     let any = false;
     for (const id of G.ids) {
       const it = P[id];
-      const hit = !q || (it.name + ' ' + (it.full || '') + ' ' + it.group).toLowerCase().includes(q);
+      // (each photo lists its own presets: the profile's on the side photo, the rest on the front one)
+      const hit = slotHasGroup(it.group) && (!q || (it.name + ' ' + (it.full || '') + ' ' + it.group).toLowerCase().includes(q));
       itemEls.get(id).classList.toggle('hidden', !hit);
       any = any || hit;
     }
@@ -5744,7 +5952,7 @@ function buildFaceMapPanel() {
       <div class="to-actions" style="margin:2px 0 10px">
         <button type="button" class="btn sm" id="sfBuild">Build surface</button>
         <button type="button" class="btn ghost sm" id="sfFront" title="Face the photo again (or double-click it)">Front view</button>
-        <button type="button" class="btn ghost sm" id="sfSide" title="Load the face map of a side (profile) photo of the same person: its profile sets the depths a front photo can't show">Side photo…</button>
+        <button type="button" class="btn ghost sm" id="sfSide" title="Load a saved face map file of a side (profile) photo of the same person: its profile sets the depths a front photo can't show. (Or map the side photo in the Side tab — it's used here by itself.)">Side map file…</button>
       </div>
       <div id="sfAnat" class="sf-anat" hidden></div>
       ${sliderRow('sfTrust', 'Follow the photo', 0, 100, 1, 'How far the photo’s light and shade may change the anatomy from the average face (right) or keep it (left). Rebuild to apply.')}
@@ -5772,6 +5980,9 @@ function buildFaceMapPanel() {
   $('#fmStep').addEventListener('click', e => {
     const b = e.target.closest('[data-v]');
     if (!b || b.disabled || S.mapStep === b.dataset.v) return;
+    // (the front photo's Surface step is the 3D tab)
+    if (b.dataset.v === 'surface' && curSlot === 'front') { goTab('3d'); return; }
+    if (curTab() === '3d') { S.rot3 = { yaw: 0, pitch: 0 }; back3D = null; }   // (back to the front tab, at that step)
     S.mapStep = b.dataset.v; S.qfit = null; S.mapSel.clear(); S.mapHover = null;
     // keep the brush that belongs to the step
     if (S.mapStep === 'light' && !/^h[A-Z]/.test(cfg.surfBrush || '')) cfg.surfBrush = '';
@@ -5866,8 +6077,15 @@ function syncFaceMapPanel() {
   setText(fmapItem.querySelector('.it-sub'), m ? `${VIEW_LABEL[m.view]} · ${shown} dots${S.surf && S.surf.view === m.view ? ' · surface' : ''}` : 'Not placed — click to start');
   setText(fmapItem.querySelector('.it-val'), m ? (m.snapped ? 'fitted' : 'guess') : '');
   if (!open) return;
-  const st = S.mapStep;
-  $$('#fmStep [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === st));
+  const st = S.mapStep, side = curSlot === 'side';
+  $$('#fmStep [data-v]').forEach(b => {
+    b.classList.toggle('on', b.dataset.v === st);
+    // the side photo is mapped for its profile: its light and 3D are the front photo's (3D tab)
+    if (b.dataset.v !== 'points') {
+      if (b.dataset.t0 == null) b.dataset.t0 = b.title;
+      b.disabled = side || !SF; b.title = side ? 'The 3D head is built on the front photo, with this profile — open the 3D tab' : b.dataset.t0;
+    }
+  });
   $('#fmPoints').hidden = st !== 'points';
   $('#fmLight').hidden = st !== 'light';
   $('#fmSurface').hidden = st !== 'surface';
@@ -5877,7 +6095,8 @@ function syncFaceMapPanel() {
   const fk = m && isProfile(m) ? 'profile' : 'front', fe = $('#mFeat');
   if (fe._k !== fk) { fe._k = fk; fe.innerHTML = FEATURES[fk].map(([n], q) => `<button type="button" class="chip-dot look" data-f="${q}">${n}</button>`).join(''); }
   $$('#mFeat [data-f]').forEach(b => { b.disabled = !m; });
-  $$('#mView [data-v]').forEach(b => b.classList.toggle('on', !!m && b.dataset.v === m.view));
+  $$('#mView [data-v]').forEach(b => { b.classList.toggle('on', !!m && b.dataset.v === m.view); b.hidden = side === (b.dataset.v === 'front'); });
+  $('#mView').hidden = !side;   // (the front photo is mapped from the front; the side one faces left or right)
   $('#mShowLayers').checked = !!cfg.mShowLayers;
   $('#mSoft').checked = !!cfg.mapSoft; $('#mSoftRow').hidden = !cfg.mapSoft;
   setRange('mSoftR', Math.round(cfg.mapSoftR * 100), Math.round(cfg.mapSoftR * 100) + '%');
@@ -5906,13 +6125,13 @@ let RO = null, roKey = '';
 
 function freeReadout() {
   const t = TOOLS[S.tool], cal = S.meas.get(S.calibId);
-  const done = PRESET_IDS.filter(id => S.meas.has(id)).length;
+  const ids = slotPresets(), done = ids.filter(id => S.meas.has(id)).length;
   return `
     <div class="ro-kicker">${S.showAll ? 'All layers' : 'Free measure'}</div>
     <div class="ro-title">${S.showAll ? 'Showing everything' : t.title}</div>
     <p class="ro-desc">${S.showAll ? 'Every measurement is overlaid. Export saves exactly what you see as an annotated image.' : t.help}</p>
     <div class="ro-meta"><span>Scale</span><button class="link" type="button" data-act="calib">${cal ? fmtNum(S.calibMM) + ' mm reference' : 'Not calibrated'}</button></div>
-    <div class="ro-meta"><span>Measured</span><span>${done} / ${PRESET_IDS.length} presets · ${customs().length} custom</span></div>`;
+    <div class="ro-meta"><span>Measured</span><span>${done} / ${ids.length} presets · ${customs().length} custom</span></div>`;
 }
 function presetReadout(id) {
   const it = P[id], m = S.meas.get(id);
@@ -6148,7 +6367,9 @@ function syncUI() {
     const n = G.ids.filter(id => S.meas.has(id)).length;
     G.count.textContent = `${n}/${G.ids.length}`;
   }
-  $('#progress').textContent = `${PRESET_IDS.filter(id => S.meas.has(id)).length}/${PRESET_IDS.length}`;
+  const sp = slotPresets();
+  $('#progress').textContent = `${sp.filter(id => S.meas.has(id)).length}/${sp.length}`;
+  syncSlotBar();
   $('#btnShowAll').classList.toggle('on', S.showAll);
   const placingPreset = !!(tgt && tgt.preset);
   const shown = placingPreset ? (tgt.kind === 'ratio' ? 'ruler' : tgt.kind) : S.tool;
@@ -6283,6 +6504,7 @@ function paint(t, dt) {
 resize();
 applyCfg();
 buildList();
+applyFilter();   // (the front photo's presets)
 buildFaceMapPanel();
 buildSettings();
 syncSettingsUI();
@@ -6292,7 +6514,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
+window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
