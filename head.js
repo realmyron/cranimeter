@@ -71,6 +71,29 @@ function correspond() {
   const T = new Float32Array(m.N * 3);
   for (let i = 0; i < m.N; i++) { const p = bend(toT(V(i))); T[3 * i] = p[0]; T[3 * i + 1] = p[1]; T[3 * i + 2] = p[2]; }
   const near = (p, lo, hi, ok) => { let best = -1, bd = Infinity; for (let i = lo; i < hi; i++) { if (ok && !ok(i)) continue; const d = (T[3 * i] - p[0]) ** 2 + (T[3 * i + 1] - p[1]) ** 2 + (T[3 * i + 2] - p[2]) ** 2; if (d < bd) { bd = d; best = i; } } return best; };
+  // Below the jaw's lower border (the neck, under the chin): the model's neck is fixed to its head in one
+  // posture, while a photo's neck sits however the head is tilted on it — so it isn't used for the 3D,
+  // and the jaw's outline dots never take a neck vertex (below the chin the neck reaches lower in a front
+  // view, and was taken for the chin's edge)
+  const jaw = ['me', 'chinR', 'jaw2R', 'goR'].map(id => P[FM.INDEX[id]]).map(p => [Math.abs(p.x), p.y]);
+  const yJaw = ax => { if (ax >= jaw[3][0]) return jaw[3][1]; for (let q = 1; q < 4; q++) if (ax <= jaw[q][0]) { const t = (ax - jaw[q - 1][0]) / ((jaw[q][0] - jaw[q - 1][0]) || 1); return jaw[q - 1][1] + t * (jaw[q][1] - jaw[q - 1][1]); } return jaw[3][1]; };
+  const neck = new Uint8Array(m.N);
+  for (let i = 0; i < nS; i++) if (T[3 * i + 1] > yJaw(Math.abs(T[3 * i])) + .45) neck[i] = 1;
+  // … nor an ear's (at the jaw angle the ear lobe reaches further out)
+  const earPts = P.filter(p => p.group === 'ears' && p.x > 0), ear = new Uint8Array(m.N);
+  for (let i = 0; i < nS; i++) { const x = Math.abs(T[3 * i]), y = T[3 * i + 1], z = T[3 * i + 2]; if (earPts.some(p => (p.x - x) ** 2 + (p.y - y) ** 2 + (p.z - z) ** 2 < 1.2 * 1.2)) ear[i] = 1; }
+  // … nor the jaw's underside: the jaw outline's dot is the jawline — the border where the skin turns
+  // under — and below it the underside, facing down, reaches out as far in a front view
+  const down = new Uint8Array(m.N), nrm = new Float32Array(nS * 3);
+  for (let t = 0; t < m.nTri; t++) {
+    const a = m.tri[3 * t], b = m.tri[3 * t + 1], c = m.tri[3 * t + 2];
+    if (a >= nS || b >= nS || c >= nS) continue;
+    const ux = T[3 * b] - T[3 * a], uy = T[3 * b + 1] - T[3 * a + 1], uz = T[3 * b + 2] - T[3 * a + 2], vx = T[3 * c] - T[3 * a], vy = T[3 * c + 1] - T[3 * a + 1], vz = T[3 * c + 2] - T[3 * a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const v of [a, b, c]) { nrm[3 * v] += nx; nrm[3 * v + 1] += ny; nrm[3 * v + 2] += nz; }
+  }
+  const ip = LM68[30], sgn = nrm[3 * ip + 2] < 0 ? -1 : 1;   // (the nose tip's normal points forward)
+  for (let i = 0; i < nS; i++) { const L = Math.hypot(nrm[3 * i], nrm[3 * i + 1], nrm[3 * i + 2]) || 1; if (sgn * nrm[3 * i + 1] / L > .55) down[i] = 1; }
   // the front outline's normals, from the template's own outline
   const outline = FM.contours(0).find(c => c.boundary).idx, on = new Map();
   outline.forEach((i, q) => { const a = P[outline[(q + outline.length - 1) % outline.length]], b = P[outline[(q + 1) % outline.length]]; let nx = b.y - a.y, ny = -(b.x - a.x); const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L; if (nx * P[i].x + ny * (P[i].y + 1) < 0) { nx = -nx; ny = -ny; } on.set(i, [nx, ny]); });
@@ -82,12 +105,13 @@ function correspond() {
     if (SIL.test(pt.id) || (pt.mid && on.has(i) && pt.y > -4.5)) {
       // silhouette candidates: skin within ±0.6 cm of the dot's height on its side, in front of the ears
       const cand = [];
-      for (let j = 0; j < nS; j++) { const tx = T[3 * j], ty = T[3 * j + 1], tz = T[3 * j + 2]; if (Math.abs(ty - pt.y) < .6 && tz > -1 && (pt.x === 0 ? Math.abs(tx) < 2.5 : tx * pt.x > 0 && Math.abs(tx - pt.x) < 3)) cand.push(j); }
+      for (let j = 0; j < nS; j++) { if (neck[j] || ear[j] || (pt.y > 0 && down[j])) continue; const tx = T[3 * j], ty = T[3 * j + 1], tz = T[3 * j + 2]; if (Math.abs(ty - pt.y) < .6 && tz > -1 && (pt.x === 0 ? Math.abs(tx) < 2.5 : tx * pt.x > 0 && Math.abs(tx - pt.x) < 3)) cand.push(j); }
       if (cand.length) { out.cand = Int32Array.from(cand); out.nrm = on.get(i) || [Math.sign(pt.x), pt.x ? 0 : 1]; }
     }
     return out;
   });
   corr.T = T;
+  corr.neck = neck;
   return corr;
 }
 
@@ -258,12 +282,14 @@ function project(res, q = 0, earDot = 'traL') {
   }
   return { uv, z, s: p.s };
 }
-/** Rasterise the projected head (front-most surface) onto a grid: depth (cm) per node, NaN where it isn't. */
+/** Rasterise the projected head (front-most surface) onto a grid: depth (cm) per node, NaN where it isn't.
+    opt.noNeck: without the neck and the underside of the jaw. */
 function raster(P, grid, which = 'all', opt = {}) {
   const m = model, { x0, y0, cell, gw, gh } = grid, out = new Float32Array(gw * gh).fill(NaN), tri = m.tri, uv = P.uv, z = P.z;
   for (let t = 0; t < m.nTri; t++) {
     const a = tri[3 * t], b = tri[3 * t + 1], c = tri[3 * t + 2];
     if (which === 'skin' && (a >= m.nSkin || b >= m.nSkin || c >= m.nSkin)) continue;
+    if (opt.noNeck && (corr.neck[a] || corr.neck[b] || corr.neck[c])) continue;
     const ax = (uv[2 * a] - x0) / cell, ay = (uv[2 * a + 1] - y0) / cell, bx = (uv[2 * b] - x0) / cell, by = (uv[2 * b + 1] - y0) / cell, cx = (uv[2 * c] - x0) / cell, cy = (uv[2 * c + 1] - y0) / cell;
     const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
     // (only the side facing the camera: the lips' and nostrils' insides showed through as slits)
@@ -320,5 +346,5 @@ function raster(P, grid, which = 'all', opt = {}) {
   return out;
 }
 
-window.CraniHead = { load, fit, project, raster, correspond, get model() { return model; }, build: '30' };
+window.CraniHead = { load, fit, project, raster, correspond, get model() { return model; }, build: '31' };
 })();
