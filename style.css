@@ -5,7 +5,7 @@
    ========================================================================== */
 
 :root {
-  --cm-build: 28;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+  --cm-build: 29;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
   --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --c1: #7CCBF5;
@@ -655,7 +655,7 @@ input[type="range"].rng:active::-webkit-slider-thumb { transform: scale(1.15); }
 /* ---------- hint (plain text) & toast ---------- */
 .hint {
   position: fixed; z-index: 8;
-  bottom: 16px;
+  bottom: 62px;   /* above the photo tabs */
   left: calc(var(--rail-w) + 16px);
   right: calc(var(--panel-w) + 16px);
   display: flex; justify-content: center;
@@ -676,7 +676,7 @@ body.has-img .hint.show { opacity: 1; }
 .toast {
   position: fixed; z-index: 40;
   left: calc(50% + (var(--rail-w) - var(--panel-w)) / 2);
-  bottom: 48px;
+  bottom: 96px;
   transform: translate(-50%, 8px);
   padding: 8px 14px;
   border-radius: 10px;
@@ -691,6 +691,26 @@ body.has-img .hint.show { opacity: 1; }
   text-align: center;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- photo tabs (bottom centre): Front · Side · 3D ---------- */
+.slots {
+  position: fixed; z-index: 9;
+  left: calc(50% + (var(--rail-w) - var(--panel-w)) / 2); bottom: 14px;
+  transform: translateX(-50%);
+  display: flex; gap: 2px; padding: 4px; border-radius: 13px;
+}
+body:not(.has-img) .slots { left: calc(50% + var(--rail-w) / 2); }   /* (no panel without a photo) */
+.slots button {
+  position: relative; height: 32px; min-width: 76px; padding: 0 16px; border-radius: 9px;
+  font-size: 13px; font-weight: 500; color: var(--muted);
+  transition: color .2s, background .2s, box-shadow .2s;
+}
+.slots button:hover { color: var(--text); background: var(--hover); }
+.slots button.on { color: var(--text); background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-ring), inset 0 1px 0 var(--inset-hi); }
+/* a dot: grey once the photo is in, green once its face map is placed (3D: once the head is built) */
+.slots button i { position: absolute; top: 7px; right: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--faint); opacity: 0; transition: opacity .2s, background .2s; }
+.slots button.has i { opacity: .8; }
+.slots button.done i { opacity: 1; background: var(--ok); }
 
 /* ---------- landing ---------- */
 .drop {
@@ -887,7 +907,9 @@ body.dragging .dragveil { opacity: 1; }
   .panel::before { padding: 1px 0 0 0; }
   body.has-img .panel { transform: translateY(calc(100% + 24px)); }
   body.has-img .panel.open { transform: none; }
-  .hint { left: 12px; right: 12px; bottom: 12px; }
+  .hint { left: 12px; right: 12px; bottom: 60px; }
+  .slots, body:not(.has-img) .slots { left: 50%; bottom: 10px; }
+  .slots button { min-width: 64px; padding: 0 12px; }
   .toast { left: 50%; }
   .modal, body.topts-open .modal { padding: 68px 8px 8px; align-items: flex-start; }
   .toolpanel { left: 0; right: 0; top: 56px; bottom: auto; width: auto; max-height: 46vh; transform: translateY(-110%); border-radius: 0 0 16px 16px; }
