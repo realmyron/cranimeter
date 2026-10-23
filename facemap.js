@@ -74,7 +74,7 @@ mid('fhT', 'Upper forehead · centre', 0, -10.85, 8.75, 'skin', 'face', 5);
 pair('fh', 'Forehead', 3.7, -9.6, 8.2, 'skin', 'face', 5);
 pair('supra', 'Supraorbital rim (brow ridge)', 3.0, -8.1, 9.3, 'skin', 'face', 6);
 pair('temH', 'Temple hollow', 5.4, -6.4, 5.4, 'skin', 'face', 9);
-mid('gl', 'Glabella', 0, -6.9, 9.8, 'brows', 'face', 5.5, 'Glabella');
+mid('gl', 'Glabella', 0, -6.9, 9.8, 'skin', 'face', 5.5, 'Glabella');   // bone (between the brow ridges), not a brow dot
 pair('bi', 'Brow · inner', 1.2, -6.7, 9.0, 'brows', 'face', 6);
 pair('bm', 'Brow · centre', 2.1, -7.15, 8.8, 'brows', 'face', 6, null, { detail: true });
 pair('ba', 'Brow · arch (centre)', 3.0, -7.4, 8.4, 'brows', 'face', 6, null, { detail: true });
@@ -284,12 +284,15 @@ const FRONT_CONTOURS = [
     { id: 'nasolabial' + s, line: true, ids: ['nl0', 'nl1', 'nl2', 'nl3'].map(i => i + s) },
     { id: 'dorsum' + s, line: true, ids: ['dl1', 'dl2', 'tdp'].map(i => i + s) },
     { id: 'noseEdge' + s, line: true, ids: ['ne1', 'nsd', 'ne2', 'nsw', 'ar1', 'al', 'ac'].map(i => i + s) },
-    { id: 'orbit' + s, line: true, bone: true, ids: ['so4', 'lor', 'ior', 'tt3', 'tt2', 'tt1', 'mor'].map(i => i + s) },
+    // the whole orbital ring: lateral → infraorbital → medial rim and up to the inner supraorbital rim (the
+    // brow ridge line closes it over the top, so4 … so1)
+    { id: 'orbit' + s, line: true, bone: true, ids: ['so4', 'lor', 'ior', 'tt3', 'tt2', 'tt1', 'mor', 'so1'].map(i => i + s) },
     { id: 'philtrum' + s, line: true, ids: ['pc1', 'pc2', 'cph'].map(i => i + s) },
     { id: 'browShape' + s, closed: true, line: true, snapFine: true, ids: ['bi', 'bu1', 'bu2', 'bu3', 'bt', 'bl3', 'bl2', 'bl1'].map(i => i + s) },
     { id: 'supratoral' + s, line: true, bone: true, ids: ['sg', ...['ss1', 'ss2', 'ss3', 'tc1'].map(i => i + s)] },
     { id: 'temporal' + s, line: true, bone: true, ids: ['so4', 'tc1', 'tc2', 'tc3'].map(i => i + s) },
-    { id: 'radixSide' + s, line: true, ids: ['bi', 'ns', 'ne1'].map(i => i + s) },
+    // the side of the nasal root, from the inner brow ridge (bone — not from the brow, which is hair)
+    { id: 'radixSide' + s, line: true, ids: ['so1', 'ns', 'ne1'].map(i => i + s) },
     { id: 'iris' + s, line: true, ids: ['irI', 'pu', 'irO'].map(i => i + s) },
     { id: 'antihelix' + s, line: true, ids: ['crS', 'ah1', 'ah2', 'atr'].map(i => i + s) },
     { id: 'lowerCrus' + s, line: true, ids: ['crI', 'ah1'].map(i => i + s) },
@@ -657,6 +660,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '26',
+  mls, tpsFit, tpsEval, spline, build: '27',
 };
 })();
