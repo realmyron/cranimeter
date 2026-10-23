@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '30';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '31';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1120,12 +1120,34 @@ async function ensureHead() {
   if (S.map !== m || headKey() !== key) return null;
   const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false) }];
   if (sm) views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: headWeight(true) });
-  const res = HM.fit(views);
-  m.head = { key, res, P: HM.project(res, 0), side: !!sm, n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
+  const res = HM.fit(views), C = HM.correspond(), vertOf = new Int32Array(NMAP).map((_, i) => C[i] ? C[i].v : -1);
+  for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
+  m.head = { key, res, P: HM.project(res, 0), vertOf, side: !!sm, n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
   return m.head;
 }
+/* The bone and soft-tissue lines — the orbit's rims, the brow ridge, the cheekbones, the hollows, the
+   chin, the forehead, the lid creases, the nasolabial folds — aren't edges a photo shows sharply. After
+   Auto-place or Quick fit they go where the measured head has them, fitted to the dots that are clear
+   (eyes, nose, lips, the outline, the ears): a real head's anatomy, turned with the photo's own pose,
+   instead of a flat warp of the template between the clicked points. */
+const STRUCT = /^(so[134]|supra|gl|sg|ss\d|tc\d|lor|ior|tt\d|mor|malar|zr\d|sm\d|hcm|nl\d|mar|pjs|jowl|masse|mental|cpl|ms|bpt|temH|fh[CTU]?|cr\d|lc\d)[LR]?$/;
+async function placeStructure(pinned = new Set()) {
+  const m = S.map;
+  if (!HM || !m || isProfile(m) || curSlot !== 'front') return 0;
+  try { await HM.load(`ict-head.bin?v=${BUILD}`); } catch (e) { return 0; }
+  if (S.map !== m) return 0;
+  const w0 = headWeight(false), res = HM.fit([{ view: 'front', p: m.p, vis: m.vis, weight: i => STRUCT.test(FM.POINTS[i].id) ? 0 : w0(i) }]);
+  const P = HM.project(res, 0), C = HM.correspond();
+  let n = 0;
+  FM.POINTS.forEach((pt, i) => {
+    if (!m.vis[i] || pinned.has(i) || pt.mid || !STRUCT.test(pt.id) || !C[i] || C[i].v < 0) return;
+    m.p[2 * i] = P.uv[2 * C[i].v]; m.p[2 * i + 1] = P.uv[2 * C[i].v + 1]; n++;
+  });
+  if (n) { placeDetail(null); mapTouched(true); buildMask(); }
+  return n;
+}
 /** The fitted head's depth (cm, from the ear plane) on a grid over the photo — NaN where it isn't. */
-const headDepth = grid => { const h = S.map && S.map.head; return HM && h && h.key === headKey() ? HM.raster(h.P, grid) : null; };
+const headDepth = (grid, opt) => { const h = S.map && S.map.head; return HM && h && h.key === headKey() ? HM.raster(h.P, grid, 'all', opt) : null; };
 const SURF_DIV = 160;
 let surfIds = 0, surfRev = 0;
 const surfStep = () => mapping() && S.mapStep === 'surface';
@@ -1918,12 +1940,16 @@ function stageMatrix(F) {
 function dotDepth(i) {
   const m = S.map;
   if (m.zo && Number.isFinite(m.zo[i])) return m.zo[i];
+  // the face's edge (cheekbones down to the chin, the temples) and the ears: where the measured head has
+  // them — on the relief they'd sit anywhere on its steep side, or off the head altogether
+  const h = m.head, pt = FM.POINTS[i];
+  if (h && h.vertOf && h.key === headKey() && h.vertOf[i] >= 0 && (pt.group === 'ears' || (pt.group === 'outline' && !/^(tri|hl\d)/.test(pt.id)))) return h.P.z[h.vertOf[i]];
   const G = stageZ && stageZ.key === stageKeyOf() ? stageZ : null;
   if (G) {
     const fx = (m.p[2 * i] - G.x0) / G.cell, fy = (m.p[2 * i + 1] - G.y0) / G.cell;
     if (fx >= 0 && fy >= 0 && fx < G.gw - 1 && fy < G.gh - 1) return bilin(G.z, G.gw, fx, fy);
   }
-  const pt = FM.POINTS[i], t = m.yaw * Math.PI / 180;
+  const t = m.yaw * Math.PI / 180;
   return pt.x * Math.sin(t) + pt.z * Math.cos(t);
 }
 const bilin = (a, gw, fx, fy) => { const i0 = fx | 0, j0 = fy | 0, tx = fx - i0, ty = fy - j0, k = j0 * gw + i0; return (a[k] * (1 - tx) + a[k + 1] * tx) * (1 - ty) + (a[k + gw] * (1 - tx) + a[k + gw + 1] * tx) * ty; };
@@ -2014,10 +2040,11 @@ function stageDepth() {
   zb -= .5;
   const H0 = new Float32Array(nc), C = new Float32Array(nc), fix = new Uint8Array(nc), od = new Float32Array(nc).fill(1e9), oy = new Float32Array(nc);
   for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) H0[j * cw + i] = T ? scalarAt(T, bx0 + i * F * cell, by0 + j * F * cell) : zb;
-  // … where the measured head covers the photo (scalp, ears, the neck under the chin) and faces the
-  // camera, it's that head: held like the face's own nodes, so it too carries on smoothly into the hair's
-  // outline beyond it (not where it turns away at its own edge: held there, the edge made a crease)
-  const hd = headDepth({ x0: bx0, y0: by0, cell: F * cell, gw: cw, gh: ch });
+  // … where the measured head covers the photo (scalp, temples, ears) and faces the camera, it's that
+  // head: held like the face's own nodes, so it too carries on smoothly into the hair's outline beyond
+  // it (not where it turns away at its own edge: held there, the edge made a crease). Not below the
+  // jaw: the model's neck is fixed in one posture, and on real photos it stood out under the chin.
+  const hd = headDepth({ x0: bx0, y0: by0, cell: F * cell, gw: cw, gh: ch }, { noNeck: true });
   const steep = k => { const i = k % cw, j = (k / cw) | 0; if (i < 1 || j < 1 || i >= cw - 1 || j >= ch - 1) return true; const a = hd[k - 1], b = hd[k + 1], c = hd[k - cw], d = hd[k + cw]; return ![a, b, c, d].every(Number.isFinite) || Math.hypot(b - a, d - c) / (2 * hc) > 1.2; };
   for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
     const k = j * cw + i, x = bx0 + i * F * cell, y = by0 + j * F * cell, zf = faceAt(x, y, zsB);
@@ -4319,8 +4346,10 @@ async function autoPlace() {
   pos.set(ix('puL'), P(468)); pos.set(ix('puR'), P(473));
   const pairs = [...pos].map(([i, b]) => ({ i, b }));
   fitMap('front', pairs);
-  // the finder has no nasolabial folds: they're slid onto the crease the photo shows (and kept there)
-  if (snapFolds()) for (const c of pairs) c.b = mapPt(c.i);
+  // the bone and soft-tissue lines where the measured head has them; then the nasolabial folds slid onto
+  // the crease the photo shows (and both kept there)
+  const nStruct = await placeStructure();
+  if (snapFolds() + nStruct) for (const c of pairs) c.b = mapPt(c.i);
   S.mapSel.clear();
   // 3 · the hairline and the ears aren't among the finder's points: a short guided fit for them
   //     (each ring starts at the guess — Enter accepts it), everything else stays where the finder put it
@@ -4722,16 +4751,18 @@ function qfitBack() {
   qfitRefit();
   syncUI(); wake();
 }
-function qfitFinish() {
+async function qfitFinish() {
   const q = S.qfit;
   S.qfit = null;
   pushUndo(q.snap);
   // then pull the edge contours (and the eyes and lips) onto the photo's edges — its own undo step
   const snap2 = snapshot(), clicked = new Set([...(q.base || []), ...q.hist.filter(Boolean)].map(c => c.i));
   // the outer edge gently, then the eyes, brows and lips — never the points you clicked (after Auto-place
-  // the finder already traced the eyes, brows and lips: only the hairline is left to find its edge)
-  const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = q.auto ? 0 : snapEdges({ pinned: clicked, features: true }) + snapFolds({ pinned: clicked });
-  if (n1 + n2) { pushUndo(snap2); estimateLight(); }
+  // the finder already traced the eyes, brows and lips: only the hairline is left to find its edge);
+  // then the bone and soft-tissue lines from the measured head, and the folds onto their crease
+  const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = q.auto ? 0 : snapEdges({ pinned: clicked, features: true });
+  const n3 = q.auto ? 0 : await placeStructure(clicked) + snapFolds({ pinned: clicked });
+  if (n1 + n2 + n3) { pushUndo(snap2); estimateLight(); }
   syncPts(); syncUI();
   toast(q.auto ? 'Face map placed — check it, and drag anything that’s off (Ctrl+Z undoes it).'
     : 'Face map placed — the outer edge, eyes, brows and lips were fitted to the photo (Ctrl+Z undoes that). Pick a feature below to move it as a whole.', 6000);
@@ -6568,7 +6599,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
+window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, stageGrid: () => stageDepth(), dotDepth, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
