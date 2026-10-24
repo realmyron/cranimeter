@@ -311,7 +311,7 @@ function fit(views, opt = {}) {
  * The fitted head seen in a view's photo: per vertex its photo position (px) and depth toward the camera
  * (cm, forward from the ear plane — measured at the dot `ear`, the tragion's vertex, or the template's).
  */
-function project(res, q = 0, earDot = 'traL') {
+function project(res, q = 0, earDot = 'traL', opt = {}) {
   const m = model, p = res.poses[q], R = p.R, X = res.X, uv = new Float32Array(m.N * 2), z = new Float32Array(m.N);
   for (let i = 0; i < m.N; i++) {
     const x = X[3 * i], y = X[3 * i + 1], w = X[3 * i + 2];
@@ -323,16 +323,17 @@ function project(res, q = 0, earDot = 'traL') {
   const z0 = ev >= 0 ? z[ev] : 0;
   for (let i = 0; i < m.N; i++) z[i] -= z0;
   // What the model couldn't fit is taken up in the photo's plane: a smooth 2D bend through the eye,
-  // nose and lip dots and the face's outline, so they line up with the photo (the face's edge where the
-  // photo's is, not the model's); the depth stays the fitted head's. (Not through every dot: the soft
+  // nose, lip and ear dots and the face's outline, so they line up with the photo (the face's edge where
+  // the photo's is, not the model's; its ears where the photo's are — else the photo's ear was painted on
+  // the skull beside the model's); the depth stays the fitted head's. (Not through every dot: the soft
   // lines in between don't agree with each other closely enough, and bending through them put lumps in
-  // the cheeks.)
+  // the cheeks.) opt.all: through every dot (only for looking a photo's colours up, never for shape).
   const L = res.pairs && res.pairs[q];
   if (L && L.length > 3) {
     const ctl = [], seen = new Set();
     for (const o of L) {
-      const pt = FM.POINTS[o.i], edge = !!C[o.i].cand;
-      if (seen.has(o.vert) || !(edge || (!pt.mid && /^(eyes|nose|lips)$/.test(pt.group))) || /^(pu|irI|irO)$/.test(pt.id.replace(/[LR]$/, ''))) continue;
+      const pt = FM.POINTS[o.i], edge = !!C[o.i].cand || !!o.sc;
+      if (seen.has(o.vert) || !(opt.all || edge || (!pt.mid && /^(eyes|nose|lips|ears)$/.test(pt.group))) || /^(pu|irI|irO)$/.test(pt.id.replace(/[LR]$/, ''))) continue;
       seen.add(o.vert); ctl.push(uv[2 * o.vert], uv[2 * o.vert + 1], o.u, o.v);
     }
     if (ctl.length >= 24) {
@@ -458,5 +459,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, project, raster, correspond, topology, normals, get model() { return model; }, build: '32' };
+window.CraniHead = { load, fit, project, raster, correspond, topology, normals, get model() { return model; }, build: '33' };
 })();
