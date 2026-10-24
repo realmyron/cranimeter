@@ -794,8 +794,9 @@ uniform int uMode; uniform float uOvA; uniform vec3 uLight; uniform vec4 uColor;
 out vec4 o;
 void main() {
   if (uMode == 3) { o = uColor; return; }
+  // (the normals point out of the surface: a fragment whose smoothed normal leans just past edge-on is
+  // lit as edge-on, not as its mirror image — that flip drew bright rims along the ears)
   vec3 n = normalize(vN);
-  if (n.z < 0.0) n = -n;
   float l = max(dot(n, normalize(uLight)), 0.0);
   float wf = vW.x + (1.0 - vW.x) * vFs * uFront, k = (1.0 - wf) / max(1e-4, 1.0 - vW.x);
   vec3 ph = texture(uTex, vUv).rgb * wf + (texture(uTex2, vUv2).rgb * uGain2 * vW.y + vCol * vW.z) * k;
@@ -893,5 +894,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '33' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '34' };
 })();
