@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '34';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '39';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -55,8 +55,8 @@ const TOOLS = {
 const TOOL_KEYS = { v: 'move', r: 'ruler', a: 'angle', t: 'tilt', s: 'segments', c: 'calib', m: 'morph', e: 'adjust' };
 const EDIT_TOOLS = new Set(['morph', 'adjust']);
 
-const FONT = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-const MONO = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+const FONT = "Jost, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const MONO = "Jost, ui-sans-serif, system-ui, sans-serif";
 const TAU = Math.PI * 2, DEG = 180 / Math.PI;
 const LOUPE = 132, LOUPE_ZOOM = 3;
 const LEAVE_MS = 320, PAINT_MS = 260;
@@ -2671,8 +2671,8 @@ function applyTheme() {
   const t = cfg.theme === 'system' ? (mqDark.matches ? 'dark' : 'light') : cfg.theme;
   root.dataset.theme = t;
   const meta = $('meta[name="theme-color"]');
-  if (meta) meta.content = t === 'dark' ? '#080A0F' : '#EFF2F7';
-  grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '175,195,255';
+  if (meta) meta.content = t === 'dark' ? '#080605' : '#ECE6DD';
+  grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '80,235,180';
   grid.a0 = t === 'dark' ? .085 : .13;
   grid.a1 = t === 'dark' ? .32 : .3;
   grid.dirty = true;
@@ -3166,9 +3166,9 @@ function tag(ctx, text, x, y) {
   let tx = x + 18, ty = y + 18;
   if (tx + w > W - 8) tx = x - 18 - w;
   if (ty + h > H - 8) ty = y - 18 - h;
-  roundRect(ctx, tx, ty, w, h, 6);
-  ctx.fillStyle = 'rgba(13,14,17,.86)'; ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 1; ctx.stroke();
+  roundRect(ctx, tx, ty, w, h, 2);
+  ctx.fillStyle = 'rgba(14,11,9,.92)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(80,235,180,.26)'; ctx.lineWidth = 1; ctx.stroke();
   ctx.fillStyle = '#FFFFFF'; ctx.textBaseline = 'middle';
   ctx.fillText(text, tx + 8, ty + h / 2 + .5);
   ctx.restore();
@@ -3723,11 +3723,52 @@ function drawAdjustGuides(ctx) {
 
 /* ------------------------------------------------------------ overlay -- */
 
+/**
+ * The photo's frame: a hairline a little outside it, its corners marked, a ruler's ticks along the top
+ * and its size and slot written above it — so the photo sits in the app rather than floating bare on
+ * the grid. (Not while the 3D face is turned: the photo is no longer flat.)
+ */
+let frameInk = { theme: '' };
+function drawPhotoFrame(ctx) {
+  if (!S.img || (stageOn() && rotated())) return;
+  if (frameInk.theme !== root.dataset.theme) {
+    const cs = getComputedStyle(root);
+    frameInk = { theme: root.dataset.theme, line: cs.getPropertyValue('--line-strong').trim(), warm: cs.getPropertyValue('--accent').trim(), faint: cs.getPropertyValue('--faint').trim() };
+  }
+  const P = [mapToScreen({ x: 0, y: 0 }), mapToScreen({ x: S.iw, y: 0 }), mapToScreen({ x: S.iw, y: S.ih }), mapToScreen({ x: 0, y: S.ih })];
+  const x0 = Math.min(...P.map(p => p.x)) - 10, x1 = Math.max(...P.map(p => p.x)) + 10, y0 = Math.min(...P.map(p => p.y)) - 10, y1 = Math.max(...P.map(p => p.y)) + 10;
+  const a = v => Math.round(v) + .5;
+  ctx.save();
+  ctx.lineWidth = 1; ctx.strokeStyle = frameInk.line;
+  ctx.strokeRect(a(x0), a(y0), Math.round(x1 - x0), Math.round(y1 - y0));
+  // the ruler along the top: a tick every tenth, longer at the middle
+  ctx.beginPath();
+  for (let q = 1; q < 10; q++) { const x = a(x0 + (x1 - x0) * q / 10), L = q === 5 ? 7 : 4; ctx.moveTo(x, a(y0)); ctx.lineTo(x, a(y0) + L); }
+  for (let q = 1; q < 10; q++) { const y = a(y0 + (y1 - y0) * q / 10), L = q === 5 ? 7 : 4; ctx.moveTo(a(x0), y); ctx.lineTo(a(x0) + L, y); }
+  ctx.stroke();
+  // the corners
+  ctx.lineWidth = 1.5; ctx.strokeStyle = frameInk.warm;
+  const k = 14;
+  ctx.beginPath();
+  for (const [x, y, sx, sy] of [[x0, y0, 1, 1], [x1, y0, -1, 1], [x1, y1, -1, -1], [x0, y1, 1, -1]]) { ctx.moveTo(a(x) + sx * k, a(y)); ctx.lineTo(a(x), a(y)); ctx.lineTo(a(x), a(y) + sy * k); }
+  ctx.stroke();
+  // what it is, above it
+  if (y0 > 18) {
+    ctx.font = `500 10px ${FONT}`; ctx.textBaseline = 'bottom';
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '1.5px';
+    ctx.fillStyle = frameInk.warm; ctx.textAlign = 'left';
+    ctx.fillText(curSlot === 'side' ? 'SIDE' : curTab() === '3d' ? '3D' : 'FRONT', x0, y0 - 6);
+    ctx.fillStyle = frameInk.faint; ctx.textAlign = 'right';
+    ctx.fillText(`${S.iw} × ${S.ih}`, x1, y0 - 6);
+  }
+  ctx.restore();
+}
 function drawOverlay(t, dt) {
   const ctx = octx;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ov.width, ov.height);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawPhotoFrame(ctx);
   let busy = false;
   const labels = [];
   const base = { toS, u: 1, t, labels };
@@ -5690,7 +5731,7 @@ function drawEditedPhoto(ctx) {
 }
 /** The annotated export: the edited photo, every visible measurement and a legend → PNG blob. */
 async function renderExport() {
-  try { await Promise.all([document.fonts.load(`500 12px 'JetBrains Mono'`), document.fonts.load('600 12px Inter')]); } catch (e) { /* system fonts */ }
+  try { await Promise.all([document.fonts.load('500 12px Jost'), document.fonts.load('600 12px Jost')]); } catch (e) { /* system fonts */ }
   const vis = [...S.meas.values()].filter(isVisible);
   const iw = S.iw, ih = S.ih;
   const u = Math.max(1, Math.max(iw, ih) / 1000);
@@ -6310,6 +6351,22 @@ panel.addEventListener('click', e => {
   deselectAll();
 });
 $('#btnShowAll').addEventListener('click', toggleShowAll);
+// the panel's two pages: the face map (opens it) or the measurements (closes it; from 3D, back to the photo)
+$('#ptabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-pt]');
+  if (!b) return;
+  if (b.dataset.pt === 'map') { if (!mapping()) openFaceMap(true); }
+  else if (mapping()) { if (curTab() === '3d') goTab('front'); openFaceMap(false); }
+});
+function syncPanelPage() {
+  const onMap = mapping(), sp = slotPresets(), n = sp.filter(id => S.meas.has(id)).length;
+  panel.classList.toggle('pt-map', onMap);
+  panel.classList.toggle('pt-meas', !onMap);
+  const [tm, tz] = $$('#ptabs [data-pt]');
+  tm.classList.toggle('on', onMap); tz.classList.toggle('on', !onMap);
+  tm.classList.toggle('has', !!S.map); tz.classList.toggle('has', n > 0 || customs().length > 0);
+  setText($('#ptCount'), n ? `${n}/${sp.length}` : '');
+}
 $('#btnPanel').addEventListener('click', () => panel.classList.toggle('open'));
 
 /* ------------------------------------------------------- face map panel --
@@ -6797,10 +6854,13 @@ function syncUI() {
   $('#btnRedo').disabled = !S.redo.length;
   body.classList.toggle('has-hist', !!(S.img || S.undo.length || S.redo.length));
   syncFaceMapPanel();
+  syncPanelPage();
   renderReadout();
   renderHint();
   refreshCursor();
   if (toolOptsFor) syncToolOpts();
+  // (a switch's description shows as its tooltip: the panels show only the controls)
+  $$('.tg:not([title]) small').forEach(s => { s.closest('.tg').title = s.textContent; });
 }
 
 /* ------------------------------------------------------------- settings -- */
