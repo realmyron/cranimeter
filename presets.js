@@ -14,7 +14,7 @@
    ========================================================================== */
 
 window.CRANI = {
-  build: '34',
+  build: '39',
   LANDMARKS: {
     'Trichion': 'Midpoint of the hairline at the top of the forehead.',
     'Glabella': 'Most prominent midline point between the eyebrows.',
