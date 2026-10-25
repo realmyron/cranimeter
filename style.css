@@ -11,7 +11,7 @@
      ========================================================================== */
 
   :root {
-    --cm-build: 39;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+    --cm-build: 40;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
     --font: 'Jost', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --mono: 'Jost', ui-sans-serif, system-ui, sans-serif;
     --c1: #7CCBF5;
@@ -29,27 +29,27 @@
        a very dark, desaturated orange (a brown-black); the panels a step lighter than the field. Everything
        drawn on them — the grid's dots, lines, words — is cyan-green at some strength: faint for the grid
        and rules, grey-green for secondary words, pale for names, bright for what's active or measured. */
-    --bg: #080605;
-    --dot-rgb: 80, 235, 180;
-    --backdrop: radial-gradient(1200px 800px at 50% 40%, rgba(80, 235, 180, .02), transparent 70%);
-    --panel: #0E0B09;
-    --panel-solid: #0E0B09;
-    --well: rgba(80, 235, 180, .04);
-    --line: rgba(80, 235, 180, .1);
-    --line-strong: rgba(80, 235, 180, .2);
-    --text: #D4F7EA;
-    --muted: #6DBA9F;
-    --faint: #3B6656;
-    --hover: rgba(80, 235, 180, .06);
-    --press: rgba(80, 235, 180, .1);
+    --bg: #070606;
+    --dot-rgb: 178, 186, 184;
+    --backdrop: none;
+    --panel: #0D0C0B;
+    --panel-solid: #0D0C0B;
+    --well: rgba(255, 255, 255, .03);
+    --line: rgba(255, 255, 255, .07);
+    --line-strong: rgba(255, 255, 255, .14);
+    --text: #E2E3E1;
+    --muted: #8B8D8A;
+    --faint: #50524F;
+    --hover: rgba(255, 255, 255, .045);
+    --press: rgba(255, 255, 255, .08);
     --warm: var(--muted);
-    --accent: #36E8A9;
-    --accent-ink: #080605;
-    --accent-soft: rgba(54, 232, 169, .11);
+    --accent: #5FB8B0;
+    --accent-ink: #070606;
+    --accent-soft: rgba(95, 184, 176, .1);
     --blue: var(--accent);
-    --sel: rgba(54, 232, 169, .08);
-    --sel-ring: rgba(54, 232, 169, .55);
-    --ok: #36E8A9;
+    --sel: rgba(255, 255, 255, .05);
+    --sel-ring: rgba(95, 184, 176, .5);
+    --ok: #5FB8B0;
     --shadow: 0 18px 40px -18px rgba(0, 0, 0, .7);
     --inset-hi: transparent;
     color-scheme: dark;
@@ -57,27 +57,27 @@
 
   :root[data-theme="light"] {
     /* (the same, inverted: a pale desaturated-orange paper, everything on it a deep cyan-green) */
-    --bg: #ECE6DD;
-    --dot-rgb: 40, 90, 78;
-    --backdrop: radial-gradient(1200px 800px at 50% 40%, rgba(255, 255, 255, .25), transparent 70%);
-    --panel: #F4EFE8;
-    --panel-solid: #F4EFE8;
-    --well: rgba(40, 90, 78, .04);
-    --line: rgba(40, 90, 78, .12);
-    --line-strong: rgba(40, 90, 78, .24);
-    --text: #173A33;
-    --muted: #5E7A72;
-    --faint: #9AABA5;
-    --hover: rgba(40, 90, 78, .05);
-    --press: rgba(40, 90, 78, .09);
+    --bg: #E8E6E3;
+    --dot-rgb: 60, 66, 64;
+    --backdrop: none;
+    --panel: #F2F1EF;
+    --panel-solid: #F2F1EF;
+    --well: rgba(0, 0, 0, .03);
+    --line: rgba(0, 0, 0, .08);
+    --line-strong: rgba(0, 0, 0, .16);
+    --text: #1B1C1B;
+    --muted: #6A6C69;
+    --faint: #A4A6A3;
+    --hover: rgba(0, 0, 0, .04);
+    --press: rgba(0, 0, 0, .07);
     --warm: var(--muted);
-    --accent: #0BA676;
+    --accent: #2E8A83;
     --accent-ink: #FFFFFF;
-    --accent-soft: rgba(11, 166, 118, .1);
+    --accent-soft: rgba(46, 138, 131, .09);
     --blue: var(--accent);
-    --sel: rgba(11, 166, 118, .08);
-    --sel-ring: rgba(11, 166, 118, .5);
-    --ok: #0BA676;
+    --sel: rgba(0, 0, 0, .045);
+    --sel-ring: rgba(46, 138, 131, .5);
+    --ok: #2E8A83;
     --shadow: 0 18px 40px -20px rgba(30, 50, 100, .25);
     --inset-hi: transparent;
     color-scheme: light;
@@ -1009,30 +1009,41 @@
   .tg small, .to-note:not([id]), .ro-desc, .new-note, .to-label small, .anat-head small, .lv-key, .to-beta, .ro-note { display: none; }
   .to-callout .to-note { display: block; }
 
-  /* ---------- hierarchy: one hue, four strengths, so the panels don't read as one block ----------
-     headings — small spaced capitals, grey-green · names and labels — pale · notes and secondary
-     words — grey-green · values and whatever is active — bright */
+  /* ---------- hierarchy: neutral greys at four strengths; the teal only marks what's chosen ----------
+     headings — small spaced capitals, grey · names and labels — off-white · notes and secondary words —
+     grey · the teal: the selected tool, the open page, a segment or switch that's on, the one main
+     button, the selected measurement's value — nothing else */
   .panel-head h2, .to-sec, .to-title, .ro-kicker, .modal-head h3, .pop-title, .drop-brand span, .s3-title { color: var(--muted); }
   .panel-head h2::before { color: var(--faint); }
   .grp-head, .to-label, .set-label { color: var(--muted); }
   .grp-head:hover { color: var(--text); }
-  .it-val, .srow b, .ro-row b, .sf-an-list b { color: var(--accent); }
+  .it-val, .srow b, .ro-row b, .sf-an-list b { color: var(--text); }
   .item:not(.measured) .it-name { color: var(--muted); }
   .ro-value { color: var(--accent); }
   .ro-value.empty { color: var(--faint); }
-  .fmap-item .it-val { color: var(--accent); }
+  .fmap-item .it-val { color: var(--muted); }
   #mMapStatus, #sfStatus, #lgStatus { color: var(--muted); font-size: 11.5px; }
-  /* buttons: the main action of a panel is cyan-green, the rest are quiet grey frames */
+  /* buttons: the one main action is teal, everything else a quiet grey frame */
   .btn { background: var(--accent); color: var(--accent-ink); }
   .btn:hover { background: var(--text); color: var(--panel); }
   .btn.ghost { color: var(--muted); }
   .btn.ghost:hover { color: var(--text); }
-  .topts-body .btn:not(.ghost), .fmap-inner .btn:not(.ghost) { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--sel-ring); }
-  .topts-body .btn:not(.ghost):hover, .fmap-inner .btn:not(.ghost):hover { background: var(--accent); color: var(--accent-ink); box-shadow: none; }
+  .topts-body .btn:not(.ghost), .fmap-inner .btn:not(.ghost) { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  .topts-body .btn:not(.ghost):hover, .fmap-inner .btn:not(.ghost):hover { background: var(--hover); color: var(--text); box-shadow: inset 0 0 0 1px var(--muted); }
   .chip-dot { color: var(--muted); }
   .chip-dot:hover { color: var(--text); }
-  .chip-dot.look.on, #mQuick.on, .to-actions .btn.on { color: var(--accent); }
-  .seg button.on { color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 -1px 0 var(--accent); }
+  .chip-dot.look.on, #mQuick.on, .to-actions .btn.on { color: var(--text); background: var(--sel); box-shadow: inset 0 0 0 1px var(--accent); }
+  .seg button.on { color: var(--text); background: var(--sel); box-shadow: inset 0 -1px 0 var(--accent); }
+  .seg.msub button.on b { background: var(--text); color: var(--panel); }
+  .slots button.on { color: var(--text); background: var(--sel); box-shadow: inset 0 -2px 0 var(--accent); }
+  .slots button.on.done i { background: var(--accent); }
+  .anat-cnt { background: var(--text); color: var(--panel); }
+  .item.sel.measured .dot, .fmap-item.measured .dot { background: var(--accent); }
+  .item.measured .dot { background: var(--muted); }
+  input[type="range"].rng::-webkit-slider-runnable-track { background: linear-gradient(90deg, var(--muted) var(--p, 50%), var(--line-strong) var(--p, 50%)) center / 100% 1px no-repeat; }
+  input[type="range"].rng::-moz-range-progress { background: var(--muted); }
+  input[type="range"].rng::-webkit-slider-thumb { border-color: var(--text); }
+  input[type="range"].rng::-moz-range-thumb { border-color: var(--text); }
   .tg { color: var(--text); }
   /* sections separated by space and a rule, controls grouped in frames */
   .fmap.open .fmap-inner > div > .to-actions, .fmap.open .fmap-inner > .to-actions { padding-bottom: 10px; border-bottom: 1px solid var(--line); }
@@ -1056,8 +1067,8 @@
   .ptabs button.on::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); }
   /* a dot: hollow until there's something there, bright once there is */
   .ptabs i { width: 6px; height: 6px; border-radius: 50%; box-shadow: inset 0 0 0 1px currentColor; }
-  .ptabs button.has i { background: var(--accent); box-shadow: none; }
-  .ptabs span { font-size: 10.5px; letter-spacing: .04em; color: var(--accent); }
+  .ptabs button.has i { background: currentColor; box-shadow: none; }
+  .ptabs span { font-size: 10.5px; letter-spacing: .04em; color: var(--muted); }
   .ptabs span:empty { display: none; }
   /* (the pages' own headings would repeat the switch) */
   .fmap-head, .panel > .panel-head h2 { display: none; }
