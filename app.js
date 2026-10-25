@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '39';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '40';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -2671,8 +2671,8 @@ function applyTheme() {
   const t = cfg.theme === 'system' ? (mqDark.matches ? 'dark' : 'light') : cfg.theme;
   root.dataset.theme = t;
   const meta = $('meta[name="theme-color"]');
-  if (meta) meta.content = t === 'dark' ? '#080605' : '#ECE6DD';
-  grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '80,235,180';
+  if (meta) meta.content = t === 'dark' ? '#070606' : '#E8E6E3';
+  grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '178,186,184';
   grid.a0 = t === 'dark' ? .085 : .13;
   grid.a1 = t === 'dark' ? .32 : .3;
   grid.dirty = true;
@@ -3167,8 +3167,8 @@ function tag(ctx, text, x, y) {
   if (tx + w > W - 8) tx = x - 18 - w;
   if (ty + h > H - 8) ty = y - 18 - h;
   roundRect(ctx, tx, ty, w, h, 2);
-  ctx.fillStyle = 'rgba(14,11,9,.92)'; ctx.fill();
-  ctx.strokeStyle = 'rgba(80,235,180,.26)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = 'rgba(13,12,11,.92)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.16)'; ctx.lineWidth = 1; ctx.stroke();
   ctx.fillStyle = '#FFFFFF'; ctx.textBaseline = 'middle';
   ctx.fillText(text, tx + 8, ty + h / 2 + .5);
   ctx.restore();
@@ -3733,7 +3733,7 @@ function drawPhotoFrame(ctx) {
   if (!S.img || (stageOn() && rotated())) return;
   if (frameInk.theme !== root.dataset.theme) {
     const cs = getComputedStyle(root);
-    frameInk = { theme: root.dataset.theme, line: cs.getPropertyValue('--line-strong').trim(), warm: cs.getPropertyValue('--accent').trim(), faint: cs.getPropertyValue('--faint').trim() };
+    frameInk = { theme: root.dataset.theme, line: cs.getPropertyValue('--line-strong').trim(), warm: cs.getPropertyValue('--muted').trim(), faint: cs.getPropertyValue('--faint').trim() };
   }
   const P = [mapToScreen({ x: 0, y: 0 }), mapToScreen({ x: S.iw, y: 0 }), mapToScreen({ x: S.iw, y: S.ih }), mapToScreen({ x: 0, y: S.ih })];
   const x0 = Math.min(...P.map(p => p.x)) - 10, x1 = Math.max(...P.map(p => p.x)) + 10, y0 = Math.min(...P.map(p => p.y)) - 10, y1 = Math.max(...P.map(p => p.y)) + 10;
