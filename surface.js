@@ -894,5 +894,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '40' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '41' };
 })();
