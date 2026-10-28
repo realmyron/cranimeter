@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '40';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '41';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1099,14 +1099,16 @@ const HM = window.CraniHead && window.CraniHead.build === BUILD ? window.CraniHe
 /** Which dots the head is fitted to, and how much each counts: the skin's landmarks and lines — not
     the brows and hair (colour), the hairline or the neck (they vary or move); the ears and the detail
     dots between named ones less. On a side photo: its midline and named landmarks. */
-const headWeight = side => i => {
+const headWeight = (side, m) => i => {
   const pt = FM.POINTS[i], g = pt.group;
   // (the ears a little: they set where the model's ears sit, and the head's width and depth with them)
   // (in profile the ear is sharp and sets where the head's ear sits: weighted like the face's own dots)
   if (g === 'ears') return side ? (pt.lm ? .8 : .4) : pt.mid ? .2 : .4;
   if (g === 'brows' || g === 'hair' || g === 'neck' || g === 'ears' || pt.field === 'back' || /^(tri|hl)/.test(pt.id)) return 0;
-  // (a side photo's jaw line — its lower border, the angle, the ramus's back edge — fits as an edge)
-  if (side) return pt.side === 0 ? (pt.mid ? .6 : 1) : /^(jaw2|go|ramus)[LR]$/.test(pt.id) ? .8 : pt.lm ? .5 : 0;
+  // (a side photo's jaw line — its lower border, the angle, the ramus's back edge — fits as an edge: firmly
+  // where you placed the dot, lightly where it's still the template's guess, which would only pull the
+  // model's jaw toward the template's)
+  if (side) return pt.side === 0 ? (pt.mid ? .6 : 1) : /^(jaw2|go|ramus)[LR]$/.test(pt.id) ? (isUser(m, i) ? .9 : .25) : pt.lm ? .5 : 0;
   // (soft features — the temporal line, the cheekbone's ridge, the hollows — are placed less exactly)
   return /^(tem|tc|zr|sm|hcm|ss)/.test(pt.id) ? .3 : pt.mid ? .5 : 1;
 };
@@ -1121,7 +1123,7 @@ async function ensureHead() {
   try { await HM.load(`ict-head.bin?v=${BUILD}`); } catch (e) { console.warn(e); if (!ensureHead.warned) { ensureHead.warned = true; toast('The head model (ict-head.bin) didn’t load — the 3D uses the template instead', 6000); } return null; }
   if (S.map !== m || headKey() !== key) return null;
   const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false) }];
-  if (sm) views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: headWeight(true), outline: (sm.contours.find(c => c.boundary) || {}).idx });
+  if (sm) views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: headWeight(true, sm), outline: (sm.contours.find(c => c.boundary) || {}).idx });
   const res = HM.fit(views), C = HM.correspond(), vertOf = new Int32Array(NMAP).map((_, i) => C[i] ? C[i].v : -1);
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
@@ -3447,7 +3449,11 @@ const QFIT = {
     { id: 'sto', label: 'Where the lips meet' },
     { id: 'pog', label: 'Front of the chin' },
     { id: 'me', label: 'Bottom of the chin' },
+    // (the jaw in profile is its lower border and the ramus's back edge meeting at the angle: one dot on
+    // each line besides the angle, so its shape is yours, not the template's)
+    { id: 'jaw2#', label: 'Lower edge of the jaw — halfway from the chin to the angle' },
     { id: 'go#', label: 'Jaw angle' },
+    { id: 'ramus#', label: 'Back edge of the jaw — halfway up from the angle to the ear' },
     { id: 'tra#', label: 'Ear opening (tragus)' },
     { id: 'sa#', label: 'Top of the ear' },
     { id: 'eo#', label: 'Back edge of the ear’s rim' },
@@ -4424,14 +4430,18 @@ function dragSet() {
   }
   return { w, mirror };
 }
+/** Mark a dot as placed by you (a click, a drag, accepted in Quick fit) — not a guess of the template's or
+    the face finder's. The head is fitted to these more firmly, and constructions won't override them. */
+function markUser(m, i) { (m.user || (m.user = new Uint8Array(NMAP)))[i] = 1; }
+const isUser = (m, i) => !!(m && m.user && m.user[i]);
 function moveDrag(set, dx, dy) {
-  const list = [];
-  for (const [i, wi] of set.w) list.push([i, dx * wi, dy * wi]);
+  const list = [], m = S.map;
+  for (const [i, wi] of set.w) { list.push([i, dx * wi, dy * wi]); if (wi > .999) markUser(m, i); }
   if (set.mirror.size) {
     // reflect the move across the face's vertical axis
     const f = mapFrame(), L = Math.hypot(f.zr, f.zi) || 1, ux = -f.zi / L, uy = f.zr / L, d = dx * ux + dy * uy;
     const mx = 2 * d * ux - dx, my = 2 * d * uy - dy;
-    for (const [j, wj] of set.mirror) list.push([j, mx * wj, my * wj]);
+    for (const [j, wj] of set.mirror) { list.push([j, mx * wj, my * wj]); if (wj > .999) markUser(m, j); }
   }
   shiftDots(list);
 }
@@ -4598,6 +4608,89 @@ function alongAt(P, t) {
   for (let k = 1; k < P.length; k++) if (L[k] >= s) { const u = (s - L[k - 1]) / ((L[k] - L[k - 1]) || 1); return { x: P[k - 1].x + (P[k].x - P[k - 1].x) * u, y: P[k - 1].y + (P[k].y - P[k - 1].y) * u }; }
   return { ...P[P.length - 1] };
 }
+/**
+ * The jaw angle on a front jaw outline (photo points from the cheekbone down to the chin): where the outline
+ * turns most — the corner between the ramus's edge and the jaw's lower border, which is what the gonion is
+ * — looked for near f0 (the template's place for it, as a fraction of the outline's length; a turn far from
+ * it, at the chin, counts less). Returns that fraction; f0 when there's no clear corner (a soft, round jaw).
+ */
+function jawCorner(poly, f0) {
+  const N = 80, R = Array.from({ length: N + 1 }, (_, k) => alongAt(poly, k / N)), w = 6;
+  let best = f0, bs = 0, bt = 0;
+  for (let k = w; k <= N - w; k++) {
+    const f = k / N;
+    if (f < .25 || f > .85) continue;
+    const a = Math.atan2(R[k].y - R[k - w].y, R[k].x - R[k - w].x), b = Math.atan2(R[k + w].y - R[k].y, R[k + w].x - R[k].x);
+    let t = Math.abs(b - a);
+    if (t > Math.PI) t = 2 * Math.PI - t;
+    const s = t * Math.exp(-((f - f0) ** 2) / (2 * .2 * .2));
+    if (s > bs) { bs = s; best = f; bt = t; }
+  }
+  return bt > .12 ? best : f0;   // (under ≈ 7° of turn there isn't a corner)
+}
+/** Where two lines (point, direction) cross, or null if they're near parallel. */
+function lineCross(p, u, q, v) {
+  const d = u.x * v.y - u.y * v.x;
+  if (Math.abs(d) < 1e-6) return null;
+  const t = ((q.x - p.x) * v.y - (q.y - p.y) * v.x) / d;
+  return { x: p.x + u.x * t, y: p.y + u.y * t };
+}
+/** Where a ray (from o along d) first crosses a polyline, or null. */
+function rayHit(o, d, poly) {
+  let best = null, bt = Infinity;
+  for (let k = 1; k < poly.length; k++) {
+    const a = poly[k - 1], e = { x: poly[k].x - a.x, y: poly[k].y - a.y }, den = d.x * e.y - d.y * e.x;
+    if (Math.abs(den) < 1e-9) continue;
+    const t = ((a.x - o.x) * e.y - (a.y - o.y) * e.x) / den, s = ((a.x - o.x) * d.y - (a.y - o.y) * d.x) / den;
+    if (t > 0 && s >= 0 && s <= 1 && t < bt) { bt = t; best = { x: o.x + d.x * t, y: o.y + d.y * t }; }
+  }
+  return best;
+}
+const unit = (a, b) => { const x = b.x - a.x, y = b.y - a.y, L = Math.hypot(x, y) || 1; return { x: x / L, y: y / L }; };
+/**
+ * The jaw in profile by its anatomical construction, as cephalometry defines it: the mandibular plane (the
+ * line along the jaw's lower border through the chin's bottom, menton) and the ramus line (along its back
+ * edge, up toward the ear lobe's attachment) meet at the gonial angle; the gonion is where that angle's
+ * bisector meets the jaw's outline. The gnathion is where the bisector of the facial line (nasion →
+ * pogonion) and the mandibular plane meets the chin. A jaw angle you placed moves onto the construction
+ * only if it's within ≈ 1 cm of it (your dot says where the angle is roughly, the construction exactly);
+ * the gnathion, never a click, is always placed. Returns how many dots moved.
+ */
+function refineProfileJaw() {
+  const m = S.map;
+  if (!m || !isProfile(m)) return 0;
+  const s = FM.nearSide(m.yaw), at = id => { const i = FM.INDEX[id.replace('#', s)]; return i != null && m.vis[i] ? i : null; };
+  const [me, gn, pog, nas, go, jaw2, ramus, obi] = ['me', 'gn', 'pog', 'n', 'go#', 'jaw2#', 'ramus#', 'obi#'].map(at);
+  const b = m.contours.find(c => c.boundary);
+  if ([me, go, jaw2, ramus, obi].some(v => v == null) || !b) return 0;
+  const P = mapPt, sc = mapScale(), idx = b.idx;
+  // the outline between two dots of it (either way round)
+  const between = (a, z, skip) => { const ia = idx.indexOf(a), iz = idx.indexOf(z); if (ia < 0 || iz < 0) return null; const r = (ia <= iz ? idx.slice(ia, iz + 1) : idx.slice(iz, ia + 1).reverse()).filter(i => i !== skip); return r.length > 1 ? FM.spline(r.map(P), false, 6) : null; };
+  let n = 0;
+  // the mandibular plane and the ramus line, and where they meet
+  const M0 = P(me), um = unit(P(me), P(jaw2)), R0 = P(ramus), ur = unit(P(ramus), P(obi));
+  const X = lineCross(M0, um, R0, ur);
+  if (X) {
+    const a = unit(X, M0), r = unit(X, R0), ang = Math.acos(clamp(a.x * r.x + a.y * r.y, -1, 1)) * 180 / Math.PI;
+    const bis = unit({ x: 0, y: 0 }, { x: a.x + r.x, y: a.y + r.y }), jaw = between(jaw2, ramus);
+    const hit = ang > 95 && ang < 155 && jaw && rayHit(X, bis, jaw);
+    if (hit && (!isUser(m, go) || Math.hypot(hit.x - P(go).x, hit.y - P(go).y) < sc)) {
+      m.p[2 * go] = hit.x; m.p[2 * go + 1] = hit.y; n++;
+    }
+  }
+  // the gnathion: on the chin, half way round from the facial line to the mandibular plane
+  if (gn != null && pog != null && nas != null && !isUser(m, gn)) {
+    // (the chin's outline without the gnathion itself: it's what's being placed)
+    const uf = unit(P(nas), P(pog)), Y = lineCross(P(nas), uf, M0, um), chin = between(pog, me, gn);
+    if (Y && chin) {
+      const f = unit(Y, P(nas)), g = unit(Y, P(jaw2)), bis = unit({ x: 0, y: 0 }, { x: f.x + g.x, y: f.y + g.y });
+      const hit = rayHit(Y, bis, chin);
+      if (hit) { m.p[2 * gn] = hit.x; m.p[2 * gn + 1] = hit.y; n++; }
+    }
+  }
+  if (n) { if (cfg.mapAutoDetail) placeDetail(null); mapTouched(true); buildMask(); }
+  return n;
+}
 /** Relative arc-length positions (0…1) of template dots along a run of them (template cm). */
 function tplParams(ids) {
   const L = [0];
@@ -4702,15 +4795,23 @@ async function autoPlace() {
     if (lower) put(lower, [out, ...lo.slice(1, -1).reverse().map(P), inn]);
   }
   {
-    // the jawline: zygion → jaw angle → menton on each side, along the face oval (sides by the photo)
+    // the jawline: zygion → jaw angle → menton on each side, along the face oval (sides by the photo).
+    // The jaw angle (gonion) is where that outline turns most — the corner between the ramus's edge and the
+    // jaw's lower border, which is what the gonion is — not one fixed point of the finder's oval (which sat
+    // above or below the corner depending on the face); the dots either side keep their template spacing
+    // between the cheekbone and the corner, and between the corner and the chin.
     const oval = loopOf('FACE_LANDMARKS_FACE_OVAL'), c = tpl.find(ct => ct.boundary);
-    const side = (a, b) => L[a].x > L[b].x ? [a, b] : [b, a], [zyR, zyL] = side(454, 234), [goR, goL] = side(397, 172);
+    const side = (a, b) => L[a].x > L[b].x ? [a, b] : [b, a], [zyR, zyL] = side(454, 234);
     const ab = arcs(oval, zyR, zyL), low = ab && (ab[0].includes(152) ? ab[0] : ab[1]);   // right zygion → … → 152 → … → left
-    const seg = (a, b) => { const i0 = low.indexOf(a), i1 = low.indexOf(b); return i0 >= 0 && i1 >= 0 ? low.slice(Math.min(i0, i1), Math.max(i0, i1) + 1).map(P) : null; };
-    if (c && low) for (const [a, b, ma, mb] of [['zyR', 'goR', zyR, goR], ['goR', 'me', goR, 152], ['me', 'goL', 152, goL], ['goL', 'zyL', goL, zyL]]) {
-      const r = run(c, FM.INDEX[a], FM.INDEX[b]), poly = seg(ma, mb);
-      if (!r || !poly) continue;
-      put(r, low.indexOf(ma) <= low.indexOf(mb) ? poly : poly.slice().reverse());
+    if (c && low) for (const [s, zy] of [['R', zyR], ['L', zyL]]) {
+      const i0 = low.indexOf(zy), i1 = low.indexOf(152);
+      if (i0 < 0 || i1 < 0) continue;
+      const poly = FM.spline((i0 <= i1 ? low.slice(i0, i1 + 1) : low.slice(i1, i0 + 1).reverse()).map(P), false, 6);   // zygion → menton
+      const ids = s === 'R' ? run(c, FM.INDEX.zyR, FM.INDEX.me) : (run(c, FM.INDEX.me, FM.INDEX.zyL) || []).slice().reverse();
+      const kg = ids ? ids.indexOf(FM.INDEX['go' + s]) : -1;
+      if (kg <= 0) continue;
+      const t = tplParams(ids), fg = jawCorner(poly, t[kg]);
+      ids.forEach((i, k) => pos.set(i, alongAt(poly, k <= kg ? t[k] / t[kg] * fg : fg + (t[k] - t[kg]) / ((1 - t[kg]) || 1) * (1 - fg))));
     }
   }
   // the pupils at the iris centres
@@ -4788,7 +4889,7 @@ function exportFaceMap() {
   const doc = {
     app: 'cranimeter', kind: 'face-map', version: 1, build: BUILD, saved: new Date().toISOString(),
     image: { width: S.iw, height: S.ih },
-    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null } : null,
+    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [] } : null,
     measurements, reference: S.refId || null, calibration: S.calibId ? { id: S.calibId, mm: S.calibMM } : null,
     light: S.lightDir, marks: S.hints ? { gw: S.hints.gw, gh: S.hints.gh, highlight: enc8(S.hints.hl), notShape: enc8(S.hints.ig) } : null,
     surface: { trust: cfg.surfTrust, detail: cfg.surfDetail }, morph: { ...S.anat },
@@ -4820,6 +4921,10 @@ async function importFaceMap(file) {
     if (!same) placeDetail(null);
     S.map.snapped = doc.map.snapped || pairs.length;
     S.map.af = doc.map.anatomy && typeof doc.map.anatomy === 'object' ? { ...doc.map.anatomy } : null;
+    // (which dots you placed yourself; a map from before build 41 doesn't say: its landmarks count as placed)
+    S.map.user = null;
+    if (Array.isArray(doc.map.user)) for (const id of doc.map.user) { const i = take(id); if (i != null) markUser(S.map, i); }
+    else for (const { i } of pairs) if (FM.POINTS[i].lm) markUser(S.map, i);
     if (doc.map.depth && Object.keys(doc.map.depth).length) {
       S.map.zo = new Float32Array(NMAP).fill(NaN);
       for (const [id, z] of Object.entries(doc.map.depth)) { const i = take(id); if (i != null) S.map.zo[i] = z; }
@@ -5131,11 +5236,14 @@ async function qfitFinish() {
   pushUndo(q.snap);
   // then pull the edge contours (and the eyes and lips) onto the photo's edges — its own undo step
   const snap2 = snapshot(), clicked = new Set([...(q.base || []), ...q.hist.filter(Boolean)].map(c => c.i));
+  // (the dots you clicked or accepted are yours; the face finder's aren't)
+  for (const c of q.hist) if (c) markUser(S.map, c.i);
   // the outer edge gently, then the eyes, brows and lips — never the points you clicked (after Auto-place
   // the finder already traced the eyes, brows and lips: only the hairline is left to find its edge);
-  // then the bone and soft-tissue lines from the measured head, and the folds onto their crease
+  // then the bone and soft-tissue lines from the measured head, and the folds onto their crease; in
+  // profile, the jaw's angle and the gnathion by their construction
   const n1 = snapEdges({ pinned: clicked, gentle: true }), n2 = q.auto ? 0 : snapEdges({ pinned: clicked, features: true });
-  const n3 = q.auto ? 0 : await placeStructure(clicked) + snapFolds({ pinned: clicked });
+  const n3 = q.auto ? 0 : await placeStructure(clicked) + snapFolds({ pinned: clicked }) + refineProfileJaw();
   if (n1 + n2 + n3) { pushUndo(snap2); estimateLight(); }
   syncPts(); syncUI();
   toast(q.auto ? 'Face map placed — check it, and drag anything that’s off (Ctrl+Z undoes it).'
@@ -6525,7 +6633,7 @@ function buildFaceMapPanel() {
   $('#mFind').addEventListener('click', autoPlace);
   $('#mSnap').addEventListener('click', () => {
     if (!S.map) return;
-    const snap = snapshot(), n = snapEdges() + snapFolds();
+    const snap = snapshot(), n = snapEdges() + snapFolds() + refineProfileJaw();
     if (n) { pushUndo(snap); estimateLight(); syncPts(); syncUI(); }
     toast(n ? `Snapped ${n} dot${n === 1 ? '' : 's'} to edges — check them` : 'No clear edges found near the dots — drag them instead', 4000);
   });
@@ -6992,7 +7100,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, stageGrid: () => stageDepth(), dotDepth, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
+window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, stageGrid: () => stageDepth(), dotDepth, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
