@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '41';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '42';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1124,7 +1124,8 @@ async function ensureHead() {
   if (S.map !== m || headKey() !== key) return null;
   const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false) }];
   if (sm) views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: headWeight(true, sm), outline: (sm.contours.find(c => c.boundary) || {}).idx });
-  const res = HM.fit(views), C = HM.correspond(), vertOf = new Int32Array(NMAP).map((_, i) => C[i] ? C[i].v : -1);
+  // the modes' fit, then bent to what the photos show beyond them (the side photo's whole profile and jaw line)
+  const res = HM.deform(HM.fit(views), views), C = HM.correspond(), vertOf = new Int32Array(NMAP).map((_, i) => C[i] ? C[i].v : -1);
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
   // against its pose's scale, and only its depth for its width in the photo is the head's
@@ -1132,6 +1133,20 @@ async function ensureHead() {
   for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
   m.head = { key, res, P, vertOf, side: !!sm, n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
   return m.head;
+}
+/** The fitted head, in numbers (for the console: cranimeter.headReport()): each photo's pose off its nominal
+    view, how far the bend beyond the modes moved the chin and jaw, and the dots the photos still disagree on. */
+function headReport() {
+  const h = S.map && S.map.head;
+  if (!h) return 'No head fitted yet — open the 3D tab first.';
+  const res = h.res, deg = x => (x * 180 / Math.PI).toFixed(1), VR = { front: [[1, 0, 0], [0, -1, 0], [0, 0, -1]], left: [[0, 0, -1], [0, -1, 0], [-1, 0, 0]], right: [[0, 0, 1], [0, -1, 0], [1, 0, 0]] };
+  const views = ['front', h.side ? sideMapOf().view : null].filter(Boolean), C = HM.correspond(), mm = v => res.dX ? (10 * Math.hypot(res.dX[3 * v], res.dX[3 * v + 1], res.dX[3 * v + 2])).toFixed(1) : '—';
+  const L = views.map((vw, q) => { const V = VR[vw], R = res.poses[q].R, M = R.map(r => [0, 1, 2].map(j => r[0] * V[j][0] + r[1] * V[j][1] + r[2] * V[j][2])); return `${q ? 'side ' : 'front'}  pitch ${deg(Math.atan2(M[1][2], M[2][2]))}°  yaw ${deg(Math.asin(-M[0][2]))}°  roll ${deg(Math.atan2(M[0][1], M[0][0]))}°`; });
+  L.push(`fit rms ${(10 * res.rms).toFixed(1)} mm · modes ±${Math.max(...res.c.map(Math.abs)).toFixed(1)}σ · bend ${(res.bendMs || 0) | 0} ms`);
+  L.push('bend at ' + ['n', 'prn', 'ls', 'li', 'pog', 'me', 'goL', 'goR'].filter(id => FM.INDEX[id] != null && C[FM.INDEX[id]]).map(id => `${id} ${mm(C[FM.INDEX[id]].v)}`).join(' · ') + ' mm');
+  const bad = (res.misfit || []).filter(o => o.mm > 2).slice(0, 12);
+  L.push(bad.length ? 'still off (mm): ' + bad.map(o => `${o.q ? 'side' : 'front'} ${FM.POINTS[o.i].id} ${o.mm.toFixed(1)}`).join(' · ') : 'every dot within 2 mm');
+  return L.join('\n');
 }
 /* The bone and soft-tissue lines — the orbit's rims, the brow ridge, the cheekbones, the hollows, the
    chin, the forehead, the lid creases, the nasolabial folds — aren't edges a photo shows sharply. After
@@ -7100,7 +7115,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, stageGrid: () => stageDepth(), dotDepth, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
+window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
