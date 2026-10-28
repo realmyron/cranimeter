@@ -129,6 +129,8 @@ function correspond() {
   });
   corr.T = T;
   corr.neck = neck;
+  corr.ear = ear;
+  corr.turn = turn;
   return corr;
 }
 
@@ -259,8 +261,11 @@ function fit(views, opt = {}) {
       for (let g = 0; g < 3; g++) {
         const p = poses[q], A = Array.from({ length: 6 }, () => new Array(6).fill(0)), b = new Array(6).fill(0);
         for (const o of obs[q]) {
+          // (in a side photo the pose is read off the upper face — eyes, nose, ears: the jaw, chin and lips are
+          // where faces differ most from the scans, and fitted with the modes' guess of them they tilted the
+          // whole head a few degrees to make up for a chin they couldn't reach)
           const P = vert(o.vert), Y = [0, 1, 2].map(r => p.R[r][0] * P[0] + p.R[r][1] * P[1] + p.R[r][2] * P[2]);
-          const eu = o.u - (p.s * Y[0] + p.t[0]), ev = o.v - (p.s * Y[1] + p.t[1]), w = o.w / (p.s * p.s);
+          const eu = o.u - (p.s * Y[0] + p.t[0]), ev = o.v - (p.s * Y[1] + p.t[1]), w = o.w * (V.view !== 'front' && (FM.POINTS[o.i].y > .3 || SIDE_EDGE.test(FM.POINTS[o.i].id)) ? .05 : 1) / (p.s * p.s);
           const Ju = [Y[0], 0, p.s * Y[2], -p.s * Y[1], 1, 0], Jv = [Y[1], -p.s * Y[2], 0, p.s * Y[0], 0, 1];
           for (const [e, Jr] of rows(o, eu, ev, Ju, Jv)) for (let a = 0; a < 6; a++) { b[a] += w * Jr[a] * e; for (let f = 0; f < 6; f++) A[a][f] += w * Jr[a] * Jr[f]; }
         }
@@ -304,7 +309,209 @@ function fit(views, opt = {}) {
   }
   shape();
   views.forEach((V, q) => march(q));
-  return { c: Array.from(c), poses, X: Float32Array.from(X), rms, pairs: obs.map(L => L.map(o => ({ i: o.i, vert: o.vert, u: o.u, v: o.v, w: o.w }))) };
+  return { c: Array.from(c), poses, X: Float32Array.from(X), rms, pairs: obs.map(L => L.map(o => ({ i: o.i, vert: o.vert, u: o.u, v: o.v, w: o.w, n: o.n, sc: !!o.sc }))) };
+}
+
+/* ---- what the modes can't reach ----
+   The identity modes are 60 numbers learned from a few hundred scans: a chin longer or further forward
+   than theirs, a squarer jaw — a face unlike the scans — they reach only part of the way (a chin 13 mm
+   forward came out 5 mm short at pogonion and 15 mm short under it). So after the fit the head is bent,
+   smoothly in 3D, to pass through what the photos show: every dot the fit used, and in the side photo
+   its outline itself — the profile line from the glabella to the neck–chin angle and the jaw line from the
+   lower border round the angle up the ramus — each where the head's edge is in that view.
+   The bend is a sum of 3D Gaussians (≈ 1, 2.5 and 5 cm) on the constrained vertices: it fades out away
+   from them (the back of the head stays the model's) and is least-squares, so dots that disagree between
+   the photos meet halfway; one that disagrees by more than ≈ 3 mm counts less and less (res.misfit). */
+// (e^(−d²/2σ²) at σ = 5, 2.5 and 1 cm: the one exponential's 4th and 25th powers)
+const kern = d2 => { if (d2 > 900) return 0; const e1 = Math.exp(-d2 / 50), e2 = e1 * e1, e4 = e2 * e2, e8 = e4 * e4; return .35 * e8 * e8 * e8 * e1 + e4 + .5 * e1; };
+/** Cholesky solve of a symmetric positive definite system (A: n×n Float64Array, row-major; overwritten). */
+function cholSolve(A, b, n) {
+  for (let j = 0; j < n; j++) {
+    let s = A[j * n + j];
+    for (let k = 0; k < j; k++) s -= A[j * n + k] * A[j * n + k];
+    const d = Math.sqrt(Math.max(s, 1e-12));
+    A[j * n + j] = d;
+    for (let i = j + 1; i < n; i++) {
+      let t = A[i * n + j];
+      for (let k = 0; k < j; k++) t -= A[i * n + k] * A[j * n + k];
+      A[i * n + j] = t / d;
+    }
+  }
+  const y = new Float64Array(n);
+  for (let i = 0; i < n; i++) { let s = b[i]; for (let k = 0; k < i; k++) s -= A[i * n + k] * y[k]; y[i] = s / A[i * n + i]; }
+  for (let i = n - 1; i >= 0; i--) { let s = y[i]; for (let k = i + 1; k < n; k++) s -= A[k * n + i] * y[k]; y[i] = s / A[i * n + i]; }
+  return y;
+}
+/** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
+function deform(res, views, opt = {}) {
+  const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, T = C.T, X0 = Float32Array.from(res.X), lam = opt.lambda ?? .02, P = FM.POINTS;
+  // each view's outline chains: the side photo's profile (glabella → neck–chin angle) and jaw line
+  const chains = views.map(V => {
+    if (V.view === 'front' || !V.outline) return [];
+    const L = V.outline, at = id => L.indexOf(FM.INDEX[id]), out = [];
+    const a = at('gl'), b = at('cerv');
+    if (a >= 0 && b > a) out.push({ idx: L.slice(a, b + 1), prof: true });
+    const j0 = L.findIndex(i => /^jaw2[LR]$/.test(P[i].id)), j1 = L.findIndex(i => /^ramus[LR]$/.test(P[i].id));
+    if (j0 >= 0 && j1 > j0) { const sg = Math.sign(P[L[j0]].x); out.push({ idx: L.slice(j0, j1 + 1), cand: v => C.turn[v] && T[3 * v] * sg > 0 }); }
+    return out.map(ch => ({ ...ch, idx: ch.idx.filter(i => V.vis[i]) })).filter(ch => ch.idx.length >= 3);
+  });
+  const onChain = views.map((V, q) => new Set(chains[q].flatMap(ch => ch.idx)));
+  // the chains as samples every ≈ 3 mm, each with its outward normal in the photo and a weight (its dots')
+  const samples = views.map((V, q) => {
+    const s = res.poses[q].s, out = [];
+    let cx = 0, cy = 0, k = 0;
+    P.forEach((_, i) => { if (V.vis[i]) { cx += V.p[2 * i]; cy += V.p[2 * i + 1]; k++; } });
+    cx /= k || 1; cy /= k || 1;
+    for (const ch of chains[q]) {
+      const pts = ch.idx.map(i => ({ x: V.p[2 * i], y: V.p[2 * i + 1] })), ws = ch.idx.map(i => V.weight(i));
+      const seg = i => Math.max(1, Math.round(Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y) / (.3 * s)));
+      const sp = FM.spline(pts, false, seg), wq = [];
+      pts.slice(0, -1).forEach((_, i) => { const n = seg(i); for (let t = 0; t < n; t++) wq.push(ws[i] + (ws[i + 1] - ws[i]) * t / n); });
+      wq.push(ws[ws.length - 1]);
+      for (let t = 1; t < sp.length - 1; t++) {
+        let nx = sp[t + 1].y - sp[t - 1].y, ny = -(sp[t + 1].x - sp[t - 1].x);
+        const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+        if (nx * (sp[t].x - cx) + ny * (sp[t].y - cy) < 0) { nx = -nx; ny = -ny; }
+        out.push({ x: sp[t].x, y: sp[t].y, n: [nx, ny], w: .7 * wq[t], cand: ch.cand, prof: ch.prof });
+      }
+    }
+    return out;
+  });
+  const dX = new Float32Array(3 * N), cur = v => [X0[3 * v] + dX[3 * v], X0[3 * v + 1] + dX[3 * v + 1], X0[3 * v + 2] + dX[3 * v + 2]];
+  const proj = (p, pose) => [pose.s * (pose.R[0][0] * p[0] + pose.R[0][1] * p[1] + pose.R[0][2] * p[2]) + pose.t[0], pose.s * (pose.R[1][0] * p[0] + pose.R[1][1] * p[1] + pose.R[1][2] * p[2]) + pose.t[1]];
+  // the head's own outline in a view (as bent so far): the skin seen on a ≈ 1 mm grid, and the vertices on its
+  // edge — a profile sample is matched to the nearest of them (not the one furthest out along its normal:
+  // at the creases — nasion, under the nose, between the lips — that one could be the nose's or a lip's)
+  const outlineVerts = pose => {
+    const uv = new Float32Array(2 * nS);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let v = 0; v < nS; v++) { const [u, w] = proj(cur(v), pose); uv[2 * v] = u; uv[2 * v + 1] = w; x0 = Math.min(x0, u); y0 = Math.min(y0, w); x1 = Math.max(x1, u); y1 = Math.max(y1, w); }
+    const cell = .1 * pose.s, gw = Math.ceil((x1 - x0) / cell) + 3, gh = Math.ceil((y1 - y0) / cell) + 3, cov = new Uint8Array(gw * gh);
+    x0 -= cell; y0 -= cell;
+    for (let t = 0; t < m.nTri; t++) {
+      const a = m.tri[3 * t], b = m.tri[3 * t + 1], c = m.tri[3 * t + 2];
+      if (a >= nS || b >= nS || c >= nS) continue;
+      const ax = (uv[2 * a] - x0) / cell, ay = (uv[2 * a + 1] - y0) / cell, bx = (uv[2 * b] - x0) / cell, by = (uv[2 * b + 1] - y0) / cell, cx = (uv[2 * c] - x0) / cell, cy = (uv[2 * c + 1] - y0) / cell;
+      const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+      if (Math.abs(den) < 1e-9) continue;
+      for (let j = Math.max(0, Math.ceil(Math.min(ay, by, cy))); j <= Math.min(gh - 1, Math.floor(Math.max(ay, by, cy))); j++) for (let i = Math.max(0, Math.ceil(Math.min(ax, bx, cx))); i <= Math.min(gw - 1, Math.floor(Math.max(ax, bx, cx))); i++) {
+        const l1 = ((by - cy) * (i - cx) + (cx - bx) * (j - cy)) / den, l2 = ((cy - ay) * (i - cx) + (ax - cx) * (j - cy)) / den;
+        if (l1 >= -1e-6 && l2 >= -1e-6 && l1 + l2 <= 1 + 1e-6) cov[j * gw + i] = 1;
+      }
+    }
+    const edge = k => cov[k] && (!cov[k - 1] || !cov[k + 1] || !cov[k - gw] || !cov[k + gw]), out = [];
+    for (let v = 0; v < nS; v++) {
+      if (C.ear[v]) continue;
+      const i = Math.round((uv[2 * v] - x0) / cell), j = Math.round((uv[2 * v + 1] - y0) / cell);
+      let on = false;
+      for (let dj = -1; dj <= 1 && !on; dj++) for (let di = -1; di <= 1 && !on; di++) { const ii = i + di, jj = j + dj; if (ii > 0 && jj > 0 && ii < gw - 1 && jj < gh - 1 && edge(jj * gw + ii)) on = true; }
+      if (on) out.push(v, uv[2 * v], uv[2 * v + 1]);
+    }
+    return out;
+  };
+  let rows = [], prev = null;
+  for (let it = 0; it < (opt.iters || 3); it++) {
+    // the rows (cm): g · d(vertex) should equal e, both in the photo's plane (g: the view's direction in the model frame)
+    rows = [];
+    views.forEach((V, q) => {
+      const pose = res.poses[q], R = pose.R, front = V.view === 'front', s = pose.s;
+      for (const o of res.pairs[q] || []) {
+        const pt = P[o.i];
+        if (!front && pt.mid && onChain[q].has(o.i)) continue;   // (the dots between landmarks on the outline: the samples have them)
+        // (in the front photo the landmarks and the outline: project()'s 2D bend lines the rest up with it)
+        if (front && !o.n && !pt.lm) continue;
+        let vert = o.vert;
+        // an edge dot: the vertex furthest out along its normal (on the head as bent so far)
+        const cs = o.n ? (front ? C[o.i].cand : C[o.i].scand) : null;
+        if (cs) {
+          let bv = -Infinity;
+          for (const j of cs) { const [u, v] = proj(cur(j), pose); if (!front && Math.abs((o.v - v) * o.n[0] - (o.u - u) * o.n[1]) > s) continue; const sc = u * o.n[0] + v * o.n[1]; if (sc > bv) { bv = sc; vert = j; } }
+        }
+        const [u, v] = proj(X0.subarray(3 * vert, 3 * vert + 3), pose), eu = (o.u - u) / s, ev = (o.v - v) / s;
+        if (o.n) rows.push({ v: vert, g: [0, 1, 2].map(k => o.n[0] * R[0][k] + o.n[1] * R[1][k]), e: eu * o.n[0] + ev * o.n[1], w: o.w, i: o.i, q });
+        else if (!front && onChain[q].has(o.i)) {   // (a landmark on the side outline: firmly across it, lightly along)
+          const L = chains[q].find(ch => ch.idx.includes(o.i)).idx, k = L.indexOf(o.i), a = L[Math.max(0, k - 1)], b = L[Math.min(L.length - 1, k + 1)];
+          let nx = V.p[2 * b + 1] - V.p[2 * a + 1], ny = -(V.p[2 * b] - V.p[2 * a]);
+          const l = Math.hypot(nx, ny) || 1, n = [nx / l, ny / l];
+          rows.push({ v: vert, g: [0, 1, 2].map(k => n[0] * R[0][k] + n[1] * R[1][k]), e: eu * n[0] + ev * n[1], w: o.w, i: o.i, q });
+          rows.push({ v: vert, g: [0, 1, 2].map(k => -n[1] * R[0][k] + n[0] * R[1][k]), e: -eu * n[1] + ev * n[0], w: .3 * o.w, i: o.i, q });
+        } else {
+          rows.push({ v: vert, g: R[0].slice(), e: eu, w: o.w, i: o.i, q }, { v: vert, g: R[1].slice(), e: ev, w: o.w, i: o.i, q });
+        }
+      }
+      // the outline's samples: the head's edge there — on the profile, the nearest vertex of the head's own
+      // outline (across the line counts double: ahead of the sample, not beside it); on the jaw line, of its
+      // turn the one furthest out near the line across it
+      const OV = samples[q].some(S => S.prof) ? outlineVerts(pose) : null;
+      for (const S of samples[q]) {
+        let best = -1, bv = -Infinity;
+        if (S.prof) {
+          let bd = (3 * s) ** 2;
+          // (any of the outline's vertices, not only the midline's: under the chin the skin beside it hangs lower)
+          for (let k = 0; k < OV.length; k += 3) {
+            const du = OV[k + 1] - S.x, dv = OV[k + 2] - S.y, al = du * S.n[0] + dv * S.n[1], pe = dv * S.n[0] - du * S.n[1], d = al * al + 4 * pe * pe;
+            if (d < bd) { bd = d; best = OV[k]; }
+          }
+        } else for (let j = 0; j < nS; j++) {
+          if (!S.cand(j)) continue;
+          const [u, v] = proj(cur(j), pose), du = u - S.x, dv = v - S.y, along = du * S.n[0] + dv * S.n[1];
+          if (Math.abs(dv * S.n[0] - du * S.n[1]) > .25 * s || Math.abs(along) > 2.5 * s) continue;
+          if (along > bv) { bv = along; best = j; }
+        }
+        if (best < 0) continue;
+        const [u, v] = proj(X0.subarray(3 * best, 3 * best + 3), pose);
+        rows.push({ v: best, g: [0, 1, 2].map(k => S.n[0] * R[0][k] + S.n[1] * R[1][k]), e: ((S.x - u) * S.n[0] + (S.y - v) * S.n[1]) / s, w: S.w, q, at: S });
+      }
+    });
+    // (robust: a row the last bend still missed by more than 3 mm — a dot the other photo disagrees with — counts less)
+    if (prev) for (const r of rows) { const d = prev(r.v), e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])); if (e > .3) r.w *= .3 / e; }
+    // per row vertex: Σ w g gᵀ and Σ w e g
+    const rv = new Map();
+    for (const r of rows) {
+      if (!(r.w > 0)) continue;
+      let o = rv.get(r.v);
+      if (!o) rv.set(r.v, o = { G: new Float64Array(9), B: new Float64Array(3) });
+      for (let x = 0; x < 3; x++) { o.B[x] += r.w * r.e * r.g[x]; for (let y = 0; y < 3; y++) o.G[3 * x + y] += r.w * r.g[x] * r.g[y]; }
+    }
+    // the centres: the rows' vertices, one per ≈ 4 mm cell; normal equations (Σ w (k_v ⊗ g)ᵀ(k_v ⊗ g) + λ K ⊗ I) a = Σ w e (k_v ⊗ g)
+    const cell = new Set(), cv = [];
+    for (const v of rv.keys()) { const key = `${Math.round(X0[3 * v] / .4)},${Math.round(X0[3 * v + 1] / .4)},${Math.round(X0[3 * v + 2] / .4)}`; if (!cell.has(key)) { cell.add(key); cv.push(v); } }
+    const nc = cv.length, n3 = 3 * nc;
+    if (!nc) break;
+    const CX = new Float64Array(3 * nc);
+    cv.forEach((v, c) => { CX[3 * c] = X0[3 * v]; CX[3 * c + 1] = X0[3 * v + 1]; CX[3 * c + 2] = X0[3 * v + 2]; });
+    const kvec = (p, out) => { for (let c = 0; c < nc; c++) out[c] = kern((CX[3 * c] - p[0]) ** 2 + (CX[3 * c + 1] - p[1]) ** 2 + (CX[3 * c + 2] - p[2]) ** 2); return out; };
+    const A = new Float64Array(n3 * n3), rhs = new Float64Array(n3), kv = new Float64Array(nc);
+    for (const [v, o] of rv) {
+      kvec(X0.subarray(3 * v, 3 * v + 3), kv);
+      const Gc = o.G;
+      for (let a = 0; a < nc; a++) {
+        const ka = kv[a];
+        for (let x = 0; x < 3; x++) rhs[3 * a + x] += ka * o.B[x];
+        for (let b = 0; b <= a; b++) { const kab = ka * kv[b]; for (let x = 0; x < 3; x++) { const row = (3 * a + x) * n3 + 3 * b; A[row] += kab * Gc[3 * x]; A[row + 1] += kab * Gc[3 * x + 1]; A[row + 2] += kab * Gc[3 * x + 2]; } }
+      }
+    }
+    for (let a = 0; a < nc; a++) for (let b = 0; b <= a; b++) { const k = lam * kern((CX[3 * a] - CX[3 * b]) ** 2 + (CX[3 * a + 1] - CX[3 * b + 1]) ** 2 + (CX[3 * a + 2] - CX[3 * b + 2]) ** 2); for (let x = 0; x < 3; x++) A[(3 * a + x) * n3 + 3 * b + x] += k; }
+    for (let i = 0; i < n3; i++) { A[i * n3 + i] += 1e-6; for (let j = i + 1; j < n3; j++) A[i * n3 + j] = A[j * n3 + i]; }
+    const coef = cholSolve(A, rhs, n3);
+    for (let v = 0; v < N; v++) {
+      kvec(X0.subarray(3 * v, 3 * v + 3), kv);
+      let dx = 0, dy = 0, dz = 0;
+      for (let c = 0; c < nc; c++) { const k = kv[c]; dx += k * coef[3 * c]; dy += k * coef[3 * c + 1]; dz += k * coef[3 * c + 2]; }
+      dX[3 * v] = dx; dX[3 * v + 1] = dy; dX[3 * v + 2] = dz;
+    }
+    prev = v => [dX[3 * v], dX[3 * v + 1], dX[3 * v + 2]];
+  }
+  for (let i = 0; i < 3 * N; i++) res.X[i] = X0[i] + dX[i];
+  // what's left per dot (mm, worst row): where the photos and the head still disagree
+  const mis = new Map();
+  for (const r of rows) { if (r.i == null) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); }
+  res.dX = dX;
+  res.bendMs = performance.now() - t0;
+  // (the outline's samples: where, and what's left — mm across the outline, + = the head inside it)
+  res.outline = rows.filter(r => r.at).map(r => ({ x: r.at.x, y: r.at.y, q: r.q, v: r.v, mm: 10 * (r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2])) }));
+  res.misfit = [...mis].map(([k, e]) => { const [q, i] = k.split(':').map(Number); return { q, i, mm: e }; }).sort((a, b) => b.mm - a.mm);
+  return res;
 }
 
 /**
@@ -459,5 +666,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, project, raster, correspond, topology, normals, get model() { return model; }, build: '41' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '42' };
 })();
