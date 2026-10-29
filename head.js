@@ -356,7 +356,10 @@ function deform(res, views, opt = {}) {
     if (a >= 0 && b > a) out.push({ idx: L.slice(a, b + 1), prof: true });
     const j0 = L.findIndex(i => /^jaw2[LR]$/.test(P[i].id)), j1 = L.findIndex(i => /^ramus[LR]$/.test(P[i].id));
     if (j0 >= 0 && j1 > j0) { const sg = Math.sign(P[L[j0]].x); out.push({ idx: L.slice(j0, j1 + 1), cand: v => C.turn[v] && T[3 * v] * sg > 0 }); }
-    return out.map(ch => ({ ...ch, idx: ch.idx.filter(i => V.vis[i]) })).filter(ch => ch.idx.length >= 3);
+    // the front of the neck below the neck–chin angle (V.neck: its dots in order), lightly — the neck's posture
+    // on the head varies more than the face does
+    if (V.neck && V.neck.length >= 2) out.push({ idx: V.neck, prof: true, w: .3 });
+    return out.map(ch => ({ ...ch, idx: ch.idx.filter(i => V.vis[i]) })).filter(ch => ch.idx.length >= (ch.w ? 2 : 3));
   });
   const onChain = views.map((V, q) => new Set(chains[q].flatMap(ch => ch.idx)));
   // the chains as samples every ≈ 3 mm, each with its outward normal in the photo and a weight (its dots')
@@ -366,7 +369,7 @@ function deform(res, views, opt = {}) {
     P.forEach((_, i) => { if (V.vis[i]) { cx += V.p[2 * i]; cy += V.p[2 * i + 1]; k++; } });
     cx /= k || 1; cy /= k || 1;
     for (const [ci, ch] of chains[q].entries()) {
-      const pts = ch.idx.map(i => ({ x: V.p[2 * i], y: V.p[2 * i + 1] })), ws = ch.idx.map(i => V.weight(i));
+      const pts = ch.idx.map(i => ({ x: V.p[2 * i], y: V.p[2 * i + 1] })), ws = ch.idx.map(i => ch.w ?? V.weight(i));
       const seg = i => Math.max(1, Math.round(Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y) / (.3 * s)));
       const sp = FM.spline(pts, false, seg), wq = [], at = [];
       // (each sample's place on the template too: that far between the two dots it lies between)
@@ -473,8 +476,14 @@ function deform(res, views, opt = {}) {
         rows.push({ v: best, g: [0, 1, 2].map(k => S.n[0] * R[0][k] + S.n[1] * R[1][k]), e: ((S.x - u) * S.n[0] + (S.y - v) * S.n[1]) / s, w: S.w, q, at: S });
       }
     });
+    // depths set by hand (opt.pins: { v, depth — toward the front camera, model cm — w }): firmly, the head bends to them
+    const R0 = res.poses[0].R;
+    for (const p of opt.pins || []) {
+      const v = p.v, d0 = -(R0[2][0] * X0[3 * v] + R0[2][1] * X0[3 * v + 1] + R0[2][2] * X0[3 * v + 2]);
+      rows.push({ v, g: R0[2].map(c => -c), e: p.depth - d0, w: p.w ?? 2, i: p.i, q: 0, pin: true });
+    }
     // (robust: a row the last bend still missed by more than 3 mm — a dot the other photo disagrees with — counts less)
-    if (prev) for (const r of rows) { const d = prev(r.v), e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])); if (e > .3) r.w *= .3 / e; }
+    if (prev) for (const r of rows) { if (r.pin) continue; const d = prev(r.v), e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])); if (e > .3) r.w *= .3 / e; }
     // per row vertex: Σ w g gᵀ and Σ w e g
     const rv = new Map();
     for (const r of rows) {
@@ -485,7 +494,8 @@ function deform(res, views, opt = {}) {
     }
     // the centres: the rows' vertices, one per ≈ 4 mm cell; normal equations (Σ w (k_v ⊗ g)ᵀ(k_v ⊗ g) + λ K ⊗ I) a = Σ w e (k_v ⊗ g)
     const cell = new Set(), cv = [];
-    for (const v of rv.keys()) { const key = `${Math.round(X0[3 * v] / .4)},${Math.round(X0[3 * v + 1] / .4)},${Math.round(X0[3 * v + 2] / .4)}`; if (!cell.has(key)) { cell.add(key); cv.push(v); } }
+    const cs = opt.cell || .6;   // (≈ 6 mm: as close as 4 mm on test heads, in two thirds of the time)
+    for (const v of rv.keys()) { const key = `${Math.round(X0[3 * v] / cs)},${Math.round(X0[3 * v + 1] / cs)},${Math.round(X0[3 * v + 2] / cs)}`; if (!cell.has(key)) { cell.add(key); cv.push(v); } }
     const nc = cv.length, n3 = 3 * nc;
     if (!nc) break;
     const CX = new Float64Array(3 * nc);
@@ -546,7 +556,8 @@ function project(res, q = 0, earDot = 'traL', opt = {}) {
   // the skull beside the model's); the depth stays the fitted head's. (Not through every dot: the soft
   // lines in between don't agree with each other closely enough, and bending through them put lumps in
   // the cheeks.) opt.all: through every dot (only for looking a photo's colours up, never for shape).
-  const L = res.pairs && res.pairs[q];
+  // (opt.noBend: the head as it is, for its shape — the bend is only for where the photo's colours lie on it)
+  const L = !opt.noBend && res.pairs && res.pairs[q];
   if (L && L.length > 3) {
     const ctl = [], seen = new Set();
     for (const o of L) {
@@ -677,5 +688,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '44' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '45' };
 })();
