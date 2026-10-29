@@ -325,8 +325,11 @@ function fit(views, opt = {}) {
    The bend is a sum of 3D Gaussians (≈ 1, 2.5 and 5 cm) on the constrained vertices: it fades out away
    from them (the back of the head stays the model's) and is least-squares, so dots that disagree between
    the photos meet halfway; one that disagrees by more than ≈ 3 mm counts less and less (res.misfit). */
-// (e^(−d²/2σ²) at σ = 5, 2.5 and 1 cm: the one exponential's 4th and 25th powers)
-const kern = d2 => { if (d2 > 900) return 0; const e1 = Math.exp(-d2 / 50), e2 = e1 * e1, e4 = e2 * e2, e8 = e4 * e4; return .35 * e8 * e8 * e8 * e1 + e4 + .5 * e1; };
+// (e^(−d²/2σ²) at σ = 5, 2.5 and 1 cm: the one exponential's 4th and 25th powers; KW: their weights, the 1 cm one,
+// the 2.5 cm and the 5 cm. The 1 cm one is off: on a real face it put dents and humps into the jaw and a dent
+// in the chin — the head's own shape holds there, and the broad ones still carry a chin set further forward)
+let KW = [0, 1, .5];
+const kern = d2 => { if (d2 > 900) return 0; const e1 = Math.exp(-d2 / 50), e2 = e1 * e1, e4 = e2 * e2, e8 = e4 * e4; return (KW[0] ? KW[0] * e8 * e8 * e8 * e1 : 0) + KW[1] * e4 + KW[2] * e1; };
 /** Cholesky solve of a symmetric positive definite system (A: n×n Float64Array, row-major; overwritten). */
 function cholSolve(A, b, n) {
   for (let j = 0; j < n; j++) {
@@ -448,9 +451,16 @@ function fineFit(res, views, X0, dX, rows, opt) {
   }
   res.fine = { n, rows: F.length, it, ms: Math.round(performance.now() - t0) };
 }
+// What the bend uses (see deform), and how much — set from a real face, turning on one kind at a time: the side
+// photo's profile, dots and jaw line in full; the front photo's outline lightly (in full it widened the jaw and
+// creased the cheeks); its landmarks very lightly (in full they sheared the face — a flat, wide mid-face, pinched
+// eyes, lumpy cheeks: the photo's eyes and mouth differ from the scans' by expression, lens and pose, and the
+// photo is laid onto the head through its own 2D bend anyway); not the ears (they flared out). Your depths in full.
+const ROW_KINDS = ['fp', 'fe', 'sp', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1 };
 /** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
 function deform(res, views, opt = {}) {
   const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, T = C.T, X0 = Float32Array.from(res.X), lam = opt.lambda ?? .02, P = FM.POINTS;
+  KW = opt.kw || [0, 1, .5];
   // each view's outline chains: the side photo's profile (glabella → neck–chin angle) and jaw line
   const chains = views.map(V => {
     if (V.view === 'front' || !V.outline) return [];
@@ -585,6 +595,15 @@ function deform(res, views, opt = {}) {
       const v = p.v, d0 = -(R0[2][0] * X0[3 * v] + R0[2][1] * X0[3 * v + 1] + R0[2][2] * X0[3 * v + 2]);
       rows.push({ v, g: R0[2].map(c => -c), e: p.depth - d0, w: p.w ?? 2, i: p.i, q: 0, pin: true });
     }
+    // (opt.only, for testing: the kinds of rows used — 'fp' front points, 'fe' front edges, 'sp' side points,
+    // 'se' side edges, 'ss' the side outline's samples, 'ear', 'pin')
+    // (opt.catW: their weights, × the row's own)
+    const only = opt.only || ROW_KINDS, catW = opt.catW || ROW_W;
+    {
+      const edge = new Set(res.pairs.flatMap((L, q) => L.filter(o => o.n).map(o => `${q}:${o.i}`)));
+      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : 'p');
+      rows = rows.filter(r => { const k = kind(r); if (!only.includes(k)) return false; if (catW[k] != null) r.w *= catW[k]; r.w0 = r.w; return true; });
+    }
     // (robust: a row the last bend still missed by more than 3 mm — a dot the other photo disagrees with — counts less)
     if (prev) for (const r of rows) { if (r.pin) continue; const d = prev(r.v), e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])); if (e > .3) r.w *= .3 / e; }
     // per row vertex: Σ w g gᵀ and Σ w e g
@@ -625,12 +644,16 @@ function deform(res, views, opt = {}) {
     }
     prev = v => [dX[3 * v], dX[3 * v + 1], dX[3 * v + 2]];
   }
-  if (opt.fine !== false) fineFit(res, views, X0, dX, rows, opt);
+  // (the fine fit is off unless asked for: on a real face it pulled the lids and lips to the front photo's dots and
+  // the face came out humped and pinched round the eyes — "Quasimodo")
+  if (opt.fine === true) fineFit(res, views, X0, dX, rows, opt);
   for (let i = 0; i < 3 * N; i++) res.X[i] = X0[i] + dX[i];
   // what's left per dot (mm, worst row): where the photos and the head still disagree
   const mis = new Map();
-  const wOf = new Map(views.map((V, q) => (res.pairs[q] || []).map(o => [`${q}:${o.i}`, o.w])).flat());
-  for (const r of rows) { if (r.i == null) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); }
+  // (with each dot's weight in the bend: the front photo's landmarks count little in it — they aren't a
+  // disagreement between the photos when the head passes them by)
+  const wOf = new Map();
+  for (const r of rows) { if (r.i == null) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); wOf.set(key, Math.max(wOf.get(key) || 0, r.w0 ?? r.w)); }
   res.dX = dX;
   res.bendMs = performance.now() - t0;
   // (the outline's samples: where, and what's left — mm across the outline, + = the head inside it)
@@ -792,5 +815,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '47' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '48' };
 })();
