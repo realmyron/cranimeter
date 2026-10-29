@@ -800,7 +800,9 @@ void main() {
   // (a surface seen from behind and facing away — the head's skin from inside, through the mouth's slit — is
   // a cavity: dark. Not at the head's own edge, where a sliver of its far side seen edge-on showed as dark
   // lines along the outline; uBack: which way round the mesh's triangles go, 0 for none)
-  if (uBack != 0.0 && (gl_FrontFacing ? uBack < 0.0 : uBack > 0.0) && n.z < -0.2) { o = vec4(0.09, 0.055, 0.045, 1.0); return; }
+  // (with the photo on: the photo's own colour there, a little darker — through the closed lips' seam it showed as
+  // a black slit, an open mouth, where the photo has the lips' soft line; in the nostrils the photo is dark anyway)
+  if (uBack != 0.0 && (gl_FrontFacing ? uBack < 0.0 : uBack > 0.0) && n.z < -0.2) { o = vec4(uMode == 0 ? texture(uTex, vUv).rgb * 0.75 : vec3(0.09, 0.055, 0.045), 1.0); return; }
   float l = max(dot(n, normalize(uLight)), 0.0);
   float wf = vW.x + (1.0 - vW.x) * vFs * uFront, k = (1.0 - wf) / max(1e-4, 1.0 - vW.x);
   vec3 ph = texture(uTex, vUv).rgb * wf + (texture(uTex2, vUv2).rgb * uGain2 * vW.y + vCol * vW.z) * k;
@@ -899,5 +901,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '53' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '54' };
 })();
