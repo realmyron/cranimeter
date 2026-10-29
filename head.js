@@ -345,6 +345,109 @@ function cholSolve(A, b, n) {
   for (let i = n - 1; i >= 0; i--) { let s = y[i]; for (let k = i + 1; k < n; k++) s -= A[k * n + i] * y[k]; y[i] = s / A[i * n + i]; }
   return y;
 }
+/**
+ * The fine fit, after the bend: the bend's Gaussians are ≈ 1–5 cm, so the shape of a lid, a nostril or a lip
+ * stayed the scans' — the photo was then warped onto it, and smeared round the eyes' inner corners and the
+ * nose. Here every dot the front photo marks well (the eyes' and lids' lines, the nose, the lips, the outline —
+ * not the brows or the hair) and what the bend still misses go into a smooth displacement of the mesh itself:
+ * the least bending (its Laplacian, squared) that meets them, screened so it fades ≈ 2 cm from them, solved
+ * by conjugate gradients on the skin near the dots. Then the eyeballs follow their lids. Adds to dX.
+ */
+function fineFit(res, views, X0, dX, rows, opt) {
+  // (α 10: tested on a real face, 1 rippled the skin between the dots; ε: the screening)
+  const m = model, C = correspond(), N = m.N, nS = m.nSkin, T = topology(), P = FM.POINTS, alpha = opt.fineAlpha ?? 10, eps = opt.fineEps ?? 2e-3;
+  const cur = v => [X0[3 * v] + dX[3 * v], X0[3 * v + 1] + dX[3 * v + 1], X0[3 * v + 2] + dX[3 * v + 2]];
+  // the rows: the bend's own (what's left of them), and the front photo's other dots as points
+  const F = [];
+  for (const r of rows) { if (!(r.w > 0) || r.v >= nS) continue; const res0 = r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2]); F.push({ v: r.v, g: r.g, r: res0, w: r.w }); }
+  const p0 = res.poses[0], R0 = p0.R;
+  for (const o of res.pairs[0] || []) {
+    const pt = P[o.i];
+    if (o.n || pt.lm || !(o.w > 0) || o.vert >= nS || !(opt.fineGroups || /^(eyes|nose|lips)$/).test(pt.group)) continue;
+    const x = cur(o.vert), u = p0.s * (R0[0][0] * x[0] + R0[0][1] * x[1] + R0[0][2] * x[2]) + p0.t[0], v = p0.s * (R0[1][0] * x[0] + R0[1][1] * x[1] + R0[1][2] * x[2]) + p0.t[1];
+    F.push({ v: o.vert, g: R0[0].slice(), r: (o.u - u) / p0.s, w: o.w }, { v: o.vert, g: R0[1].slice(), r: (o.v - v) / p0.s, w: o.w });
+  }
+  // (a dot the bend couldn't bring within 4 mm disagrees with the rest: it counts less)
+  for (const f of F) if (Math.abs(f.r) > .4) f.w *= .4 / Math.abs(f.r);
+  if (!F.length) return;
+  // the skin within ≈ 2 cm of the dots is solved for; beyond, the bend's shape stays
+  const cv = [...new Set(F.map(f => f.v))], act = new Int32Array(nS).fill(-1), list = [], R2 = (opt.fineR || 2) ** 2;
+  for (let v = 0; v < nS; v++) {
+    const x = X0[3 * v], y = X0[3 * v + 1], z = X0[3 * v + 2];
+    for (const c of cv) if ((X0[3 * c] - x) ** 2 + (X0[3 * c + 1] - y) ** 2 + (X0[3 * c + 2] - z) ** 2 < R2) { act[v] = list.length; list.push(v); break; }
+  }
+  const n = list.length, n3 = 3 * n, deg = new Float64Array(nS);
+  for (let v = 0; v < nS; v++) deg[v] = Math.max(1, T.off[v + 1] - T.off[v]);
+  // data: per vertex Σ w g gᵀ and Σ w r g
+  const Gd = new Float64Array(9 * n), b = new Float64Array(n3);
+  for (const f of F) { const a = act[f.v]; if (a < 0) continue; for (let x = 0; x < 3; x++) { b[3 * a + x] += f.w * f.r * f.g[x]; for (let y = 0; y < 3; y++) Gd[9 * a + 3 * x + y] += f.w * f.g[x] * f.g[y]; } }
+  // A u = α LᵀL u + G u + ε u, matrix-free (L: the uniform Laplacian over the solved skin; outside it, 0) —
+  // the neighbours as local indices once (with 1 / their degree), not looked up on every product
+  const t0 = performance.now(), lo = new Int32Array(n + 1), lnb = [], lw = [], ideg = new Float64Array(n);
+  for (let a = 0; a < n; a++) {
+    const v = list[a];
+    ideg[a] = 1 / deg[v];
+    for (let q = T.off[v]; q < T.off[v + 1]; q++) { const k = act[T.nb[q]]; if (k >= 0) { lnb.push(k); lw.push(1 / deg[T.nb[q]]); } }
+    lo[a + 1] = lnb.length;
+  }
+  const NB = Int32Array.from(lnb), NW = Float64Array.from(lw);
+  const Lu = new Float64Array(n3), Au = (u, out) => {
+    for (let a = 0; a < n; a++) {
+      let s0 = 0, s1 = 0, s2 = 0;
+      for (let q = lo[a]; q < lo[a + 1]; q++) { const k = 3 * NB[q]; s0 += u[k]; s1 += u[k + 1]; s2 += u[k + 2]; }
+      const d = ideg[a], o = 3 * a;
+      Lu[o] = u[o] - s0 * d; Lu[o + 1] = u[o + 1] - s1 * d; Lu[o + 2] = u[o + 2] - s2 * d;
+    }
+    for (let a = 0; a < n; a++) {
+      let s0 = 0, s1 = 0, s2 = 0;
+      for (let q = lo[a]; q < lo[a + 1]; q++) { const k = 3 * NB[q], w = NW[q]; s0 += Lu[k] * w; s1 += Lu[k + 1] * w; s2 += Lu[k + 2] * w; }
+      const o = 3 * a, g = 9 * a, u0 = u[o], u1 = u[o + 1], u2 = u[o + 2];
+      out[o] = alpha * (Lu[o] - s0) + eps * u0 + Gd[g] * u0 + Gd[g + 1] * u1 + Gd[g + 2] * u2;
+      out[o + 1] = alpha * (Lu[o + 1] - s1) + eps * u1 + Gd[g + 3] * u0 + Gd[g + 4] * u1 + Gd[g + 5] * u2;
+      out[o + 2] = alpha * (Lu[o + 2] - s2) + eps * u2 + Gd[g + 6] * u0 + Gd[g + 7] * u1 + Gd[g + 8] * u2;
+    }
+  };
+  // (Jacobi preconditioner: the diagonal)
+  const Md = new Float64Array(n3);
+  for (let a = 0; a < n; a++) {
+    const v = list[a];
+    let s = 1;
+    for (let q = T.off[v]; q < T.off[v + 1]; q++) if (act[T.nb[q]] >= 0) s += 1 / deg[T.nb[q]] ** 2;
+    for (let x = 0; x < 3; x++) Md[3 * a + x] = 1 / (alpha * s + eps + Gd[9 * a + 4 * x]);
+  }
+  const u = new Float64Array(n3), r = Float64Array.from(b), z = r.map((v, i) => v * Md[i]), p = Float64Array.from(z), Ap = new Float64Array(n3);
+  let rz = 0, b2 = 0;
+  for (let i = 0; i < n3; i++) { rz += r[i] * z[i]; b2 += b[i] * b[i]; }
+  let it = 0;
+  for (; it < (opt.fineIters || 300) && rz > 0; it++) {
+    Au(p, Ap);
+    let pAp = 0;
+    for (let i = 0; i < n3; i++) pAp += p[i] * Ap[i];
+    const al = rz / (pAp || 1e-30);
+    let r2 = 0;
+    for (let i = 0; i < n3; i++) { u[i] += al * p[i]; r[i] -= al * Ap[i]; r2 += r[i] * r[i]; }
+    if (r2 < 1e-10 * b2) break;
+    let rz1 = 0;
+    for (let i = 0; i < n3; i++) { z[i] = r[i] * Md[i]; rz1 += r[i] * z[i]; }
+    const be = rz1 / rz;
+    rz = rz1;
+    for (let i = 0; i < n3; i++) p[i] = z[i] + be * p[i];
+  }
+  for (let a = 0; a < n; a++) for (let x = 0; x < 3; x++) dX[3 * list[a] + x] += u[3 * a + x];
+  // the eyeballs move with the lids round them (their mean shift within 2 cm of each eye's centre)
+  for (const sg of [-1, 1]) {
+    const c = [0, 0, 0];
+    let ne = 0;
+    for (let v = nS; v < N; v++) if (Math.sign(X0[3 * v]) === sg) { for (let k = 0; k < 3; k++) c[k] += X0[3 * v + k]; ne++; }
+    if (!ne) continue;
+    for (let k = 0; k < 3; k++) c[k] /= ne;
+    const s = [0, 0, 0];
+    let ns = 0;
+    for (let a = 0; a < n; a++) { const v = list[a]; if ((X0[3 * v] - c[0]) ** 2 + (X0[3 * v + 1] - c[1]) ** 2 + (X0[3 * v + 2] - c[2]) ** 2 < 4) { for (let k = 0; k < 3; k++) s[k] += u[3 * a + k]; ns++; } }
+    if (ns) for (let v = nS; v < N; v++) if (Math.sign(X0[3 * v]) === sg) for (let k = 0; k < 3; k++) dX[3 * v + k] += s[k] / ns;
+  }
+  res.fine = { n, rows: F.length, it, ms: Math.round(performance.now() - t0) };
+}
 /** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
 function deform(res, views, opt = {}) {
   const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, T = C.T, X0 = Float32Array.from(res.X), lam = opt.lambda ?? .02, P = FM.POINTS;
@@ -522,6 +625,7 @@ function deform(res, views, opt = {}) {
     }
     prev = v => [dX[3 * v], dX[3 * v + 1], dX[3 * v + 2]];
   }
+  if (opt.fine !== false) fineFit(res, views, X0, dX, rows, opt);
   for (let i = 0; i < 3 * N; i++) res.X[i] = X0[i] + dX[i];
   // what's left per dot (mm, worst row): where the photos and the head still disagree
   const mis = new Map();
@@ -688,5 +792,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '46' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '47' };
 })();
