@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '45';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '46';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1470,7 +1470,7 @@ function setFaceAnat(upd) {
   const I = surfInputs(), values = { ...(s.fit || {}), ...m.af };
   const r = SF.compose({ ...I, basis: surfBasis(I), pins: surfPins(I), profile: surfProfile(), bendR: 3 * mapFrame().scale }, values, s.dz);
   // a new surface object (the undo snapshot keeps the old one)
-  S.surf = { ...s, z: r.z, zfit: r.zfit, fit: values, _zt: null, rev: ++surfRev };
+  S.surf = { ...s, z: surfFromHead(I, r.z, m.af) || r.z, zfit: r.zfit, fit: values, _zt: null, rev: ++surfRev };
   S.glDirty = true; syncFaceMapPanel(); wake();
 }
 const ANAT_TIPS = {
@@ -1492,6 +1492,25 @@ function buildAnatPanel(an) {
     el.addEventListener('change', () => { if (S.sfaSnap) { pushUndo(S.sfaSnap); S.sfaSnap = null; } });
   });
   $('#sfaReset').addEventListener('click', () => { if (!S.map) return; pushUndo(); S.map.af = {}; buildSurface({ auto: true }); });
+}
+/**
+ * With the measured head, the surface is the head: its depth where the front photo sees it (on the surface's
+ * grid) plus the anatomy you hold by hand — one shape for the 3D, the analysis views and Morph. (The light's
+ * own relief, built beside it, disagreed with the head the 3D showed.) z: the light's relief, kept where the
+ * head isn't. Returns the new depths, or null without a head.
+ */
+function surfFromHead(I, z, af = (S.map && S.map.af) || {}) {
+  const h = S.map && S.map.head;
+  if (!HM || !h || !h.Pg || isProfile(S.map)) return null;
+  const zh = HM.raster({ uv: h.P.uv, z: h.Pg.z, s: h.P.s }, I, 'skin', { smooth: 0 }), out = Float32Array.from(z), keys = Object.keys(af).filter(k => af[k]);
+  const B = keys.length ? surfBasis(I) : null;
+  for (let k = 0; k < I.n; k++) {
+    if (!I.act[k] || !Number.isFinite(zh[k])) continue;
+    let v = zh[k];
+    if (B) for (const key of keys) { const j = B.keys.indexOf(key); if (j >= 0) v += af[key] * B.B[j][k]; }
+    out[k] = v;
+  }
+  return out;
 }
 /** What the surface depends on besides the dots: the light and the marks (a rebuild is due when it changes). */
 const zoSig = zo => { if (!zo) return '0'; let n = 0, s = 0; zo.forEach((v, i) => { if (Number.isFinite(v)) { n++; s += v * (i % 97 + 1); } }); return `${n}:${s.toFixed(3)}`; };
@@ -1522,6 +1541,8 @@ async function buildSurface(opt = {}) {
   const again = S.surfAgain;
   S.surfAgain = null;
   if (!res || seq !== S.imgSeq || S.map !== m || m.pver !== pver) { syncUI(); if (again) buildSurface(again); else if (res) toast('The face map changed while building — build again'); return; }
+  const zh = surfFromHead(I, res.z);
+  if (zh) res.z = zh;
   const old = S.surf, keep = old && old.edit && old.gw === gw && old.gh === gh && Math.abs(old.x0 - x0) < 1e-6 && Math.abs(old.y0 - y0) < 1e-6 && Math.abs(old.cell - cell) < 1e-6;
   if (!opt.auto) pushUndo();
   let zs = 0, zn = 0;
@@ -2351,10 +2372,58 @@ function headDots(G) {
     }
     if (!best && nv >= 0) best = [g[3 * nv], g[3 * nv + 1], g[3 * nv + 2]];
     if (!best) return;
-    d[3 * i] = best[0]; d[3 * i + 1] = best[1]; d[3 * i + 2] = m.zo && Number.isFinite(m.zo[i]) ? m.zo[i] * k2 : best[2];
+    d[3 * i] = best[0]; d[3 * i + 1] = best[1]; d[3 * i + 2] = best[2];
   });
+  outlineOnRim(hd, d);
+  if (m.zo) FM.POINTS.forEach((_, i) => { if (Number.isFinite(m.zo[i]) && Number.isFinite(d[3 * i])) d[3 * i + 2] = m.zo[i] * k2; });
   hd.dots = { key, d };
   return d;
+}
+/**
+ * The face's outline (cheekbones to chin) on the head as one line. Where the front photo sees the outline it
+ * looks along the skin: the jaw's side, its underside and the neck all lie on that spot, and each dot put
+ * there by itself took another of them — the jaw's line zigzagged when turned. Nor is it everywhere the
+ * head's edge: at the cheekbone it's where the face's skin meets the hair and the ear, ≈ 3 cm before the
+ * ear, while the head is widest further back. So each dot looks along the outline's normal in a narrow strip
+ * through it and takes the skin there that's nearest its anatomical depth — its own place on the fitted head,
+ * smoothed along the line (a median of three, then ¼ ½ ¼) — while near the edge: 1 mm inside the edge
+ * costs as much as 3 mm off in depth.
+ */
+function outlineOnRim(hd, d) {
+  const m = S.map, C = HM.correspond(), g = hd.geo, sc = mapScale(), oc = m.contours.find(c => c.id === 'outline');
+  if (!oc) return;
+  const L = oc.idx, n = L.length;
+  const info = L.map((i, k) => {
+    const Ci = C[i];
+    if (!Ci || !Ci.cand || !m.vis[i] || !Number.isFinite(d[3 * i])) return null;
+    const a = L[(k - 1 + n) % n], b = L[(k + 1) % n];
+    let nx = m.p[2 * b + 1] - m.p[2 * a + 1], ny = -(m.p[2 * b] - m.p[2 * a]);
+    const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    if (nx * Ci.nrm[0] + ny * Ci.nrm[1] < 0) { nx = -nx; ny = -ny; }
+    const cx = d[3 * i], cy = d[3 * i + 1], cand = [];
+    let bv = -Infinity;
+    for (const v of Ci.cand) {
+      const du = g[3 * v] - cx, dv = g[3 * v + 1] - cy, al = du * nx + dv * ny;
+      if (Math.abs(dv * nx - du * ny) > .25 * sc || Math.abs(al) > 1.5 * sc) continue;
+      cand.push(v, al);
+      bv = Math.max(bv, al);
+    }
+    if (!cand.length) return null;
+    return { i, cand, bv, z: Ci.v >= 0 ? g[3 * Ci.v + 2] : g[3 * cand[0] + 2] };
+  });
+  // runs of consecutive outline dots that have skin in their strip
+  for (let k0 = 0; k0 < n; k0++) {
+    if (!info[k0] || info[(k0 - 1 + n) % n]) continue;
+    const run = [];
+    for (let k = k0; info[k % n] && run.length < n; k++) run.push(info[k % n]);
+    const z = run.map(r => r.z), med = z.map((v, q) => q && q < z.length - 1 ? [z[q - 1], v, z[q + 1]].sort((a, b) => a - b)[1] : v);
+    const sm = med.map((v, q) => q && q < med.length - 1 ? .25 * med[q - 1] + .5 * v + .25 * med[q + 1] : v);
+    run.forEach((r, q) => {
+      let best = -1, be = Infinity;
+      for (let c = 0; c < r.cand.length; c += 2) { const v = r.cand[c], e = Math.abs(g[3 * v + 2] - sm[q]) + 3 * (r.bv - r.cand[c + 1]); if (e < be) { be = e; best = v; } }
+      d[3 * r.i] = g[3 * best]; d[3 * r.i + 1] = g[3 * best + 1]; d[3 * r.i + 2] = g[3 * best + 2];
+    });
+  }
 }
 /** The measured head's mesh for the 3D view (headStage): its own shape, coloured as headSkin has it — the
     photo where the head lies on it bent through the dots — on its own (no photo plane behind: around the
@@ -2400,7 +2469,32 @@ function headMesh(G) {
     // (the analysis views only where the head faces the camera: on its sides they smeared into stripes)
     if (Math.abs(nrm[3 * v + 2]) < .55 || !fs[v]) ov.set([-1, -1], 2 * v);
   }
-  return { pos, nrm, uv, ov, uv2, w, col, fs, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines) };
+  // the neck's open end, closed: a cap across the cut — its own vertices (facing away from the head, in the
+  // neck's colour) so the neck's edge keeps its shading. (From below, the inside of the neck showed as a
+  // dark hole.)
+  const ring = [];
+  for (let v = 0; v < HMm.nSkin; v++) if (edge[v]) ring.push(v);
+  if (ring.length < 3) return { pos, nrm, uv, ov, uv2, w, col, fs, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines) };
+  let cx = 0, cz = 0;
+  for (const v of ring) { cx += X[3 * v]; cz += X[3 * v + 2]; }
+  cx /= ring.length; cz /= ring.length;
+  ring.sort((a, b) => Math.atan2(X[3 * a + 2] - cz, X[3 * a] - cx) - Math.atan2(X[3 * b + 2] - cz, X[3 * b] - cx));
+  const nr = ring.length, nv2 = N + nr + 1, grow = (A, k) => { const B = new Float32Array(nv2 * k); B.set(A); return B; };
+  const pos2 = grow(pos, 3), nrm2 = grow(nrm, 3), uv2b = grow(uv, 2), ov2 = grow(ov, 2), uv22 = grow(uv2, 2), w2 = grow(w, 3), col2 = grow(col, 3), fs2 = grow(fs, 1);
+  const c0 = [0, 0, 0], cc = [0, 0, 0], hc = [0, 0, 0];
+  for (const v of ring) for (let k = 0; k < 3; k++) { c0[k] += pos[3 * v + k] / nr; cc[k] += col[3 * v + k] / nr; }
+  for (let v = 0; v < HMm.nSkin; v++) for (let k = 0; k < 3; k++) hc[k] += pos[3 * v + k] / HMm.nSkin;
+  // (its normal: across the ring, turned away from the head's middle)
+  const p0 = ring[0], p1 = ring[nr >> 2], a = [0, 1, 2].map(k => pos[3 * p0 + k] - c0[k]), b = [0, 1, 2].map(k => pos[3 * p1 + k] - c0[k]);
+  let cn = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const cl = Math.hypot(...cn) || 1;
+  cn = cn.map(x => x / cl);
+  if (cn[0] * (c0[0] - hc[0]) + cn[1] * (c0[1] - hc[1]) + cn[2] * (c0[2] - hc[2]) < 0) cn = cn.map(x => -x);
+  const put = (q, p) => { pos2.set(p, 3 * q); nrm2.set(cn, 3 * q); ov2.set([-1, -1], 2 * q); w2.set([0, 0, 1], 3 * q); col2.set(cc, 3 * q); };
+  ring.forEach((v, q) => put(N + q, [pos[3 * v], pos[3 * v + 1], pos[3 * v + 2]]));
+  put(N + nr, c0);
+  for (let q = 0; q < nr; q++) tri.push(N + nr, N + q, N + (q + 1) % nr);
+  return { pos: pos2, nrm: nrm2, uv: uv2b, ov: ov2, uv2: uv22, w: w2, col: col2, fs: fs2, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines) };
 }
 function stageMesh() {
   const s = S.surf, G = stageDepth(), { gw, gh, cell, x0, y0, h, z: Z, face } = G, n = gw * gh, k2 = s.pxcm;
@@ -2451,7 +2545,10 @@ function photoPixels(img, iw, ih) {
  * in across the head. gain: the side photo's colour matched to the front's on the skin both see.
  */
 function headSkin(h) {
-  const sd = h.side ? slots.side : null, key = `${S.imgSeq}|${sd ? sd.imgSeq : '-'}`;
+  // (each photo's labels when they're known: its colour only where it shows skin or hair — a collar, the
+  // background beside the neck, were painted on the jaw's underside and the neck)
+  const sd = h.side ? slots.side : null, labF = photoLabels(S.img, S.iw, S.ih), labS = sd && sd.img ? photoLabels(sd.img, sd.iw, sd.ih) : null;
+  const key = `${S.imgSeq}|${sd ? sd.imgSeq : '-'}|${labF ? 1 : 0}${labS ? 1 : 0}`;
   if (h.skin && h.skin.key === key) return h.skin;
   const nS = HM.model.nSkin, T = HM.topology(), nrm = HM.normals(h.res.X);
   // which vertices a view sees (in front, on a ≈ 2 mm grid) and how squarely (0 where it doesn't)
@@ -2483,6 +2580,7 @@ function headSkin(h) {
     }
   };
   inside(S.map, S.iw, S.ih, false, P, fF, mapFrame().scale);
+  if (labF) for (let v = 0; v < nS; v++) if (fF[v] > 0) fF[v] *= smooth01(.35, .85, paintable(labF, P.uv[2 * v], P.uv[2 * v + 1]));
   const px = (I, x, y) => { const i = Math.min(I.w - 1, Math.max(0, Math.round(x * I.sc))), j = Math.min(I.h - 1, Math.max(0, Math.round(y * I.sc))), o = 4 * (j * I.w + i); return [I.d[o] / 255, I.d[o + 1] / 255, I.d[o + 2] / 255]; };
   const N = HM.model.N, uv2 = new Float32Array(N * 2), w = new Float32Array(N * 3), col = new Float32Array(N * 3), fS = new Float32Array(nS), src = new Int32Array(nS).fill(-1);
   let side = null, gain = [1, 1, 1];
@@ -2492,6 +2590,7 @@ function headSkin(h) {
     // side photo's ear was painted on the skull beside the model's ear)
     const Ps = HM.project(h.res, 1, 'traL', { all: true }), s1 = seen(Ps, h.res.poses[1]);
     inside(sd.map, sd.iw, sd.ih, true, Ps, s1, h.res.poses[1].s);
+    if (labS) for (let v = 0; v < nS; v++) if (s1[v] > 0) s1[v] *= smooth01(.35, .85, paintable(labS, Ps.uv[2 * v], Ps.uv[2 * v + 1]));
     side = photoPixels(sd.img, sd.iw, sd.ih);
     for (let v = 0; v < nS; v++) { const u = s1[v] > 0 ? v : s1[T.mir[v]] > 0 ? T.mir[v] : -1; if (u < 0) continue; src[v] = u; fS[v] = s1[u]; uv2[2 * v] = Ps.uv[2 * u] / sd.iw; uv2[2 * v + 1] = Ps.uv[2 * u + 1] / sd.ih; }
     // (the side photo's light and white balance matched to the front's on the skin both see well)
@@ -2581,7 +2680,19 @@ function drawStage() {
   // the head follows the dots: when a drag ends — or the side map or a depth you set in 3D changed — it's
   // fitted again and redrawn (it used to wait for Rebuild: moving the jaw's dots seemed to do nothing)
   if (HM && HM.model && S.map.head && S.map.head.key !== headKey() && !S.mapDrag && !headRefit && !S.surfBusy) {
-    headRefit = setTimeout(async () => { try { await ensureHead(); } catch (e) { console.error(e); } headRefit = 0; S.glDirty = true; syncFaceMapPanel(); wake(); }, 150);
+    headRefit = setTimeout(async () => {
+      try {
+        await ensureHead();
+        // (the surface follows: the analysis views and Morph read the head as fitted now)
+        const s = S.surf, m = S.map;
+        if (s && m && s.view === m.view) {
+          const I = surfInputs(), same = I.gw === s.gw && I.gh === s.gh && Math.abs(I.x0 - s.x0) < 1e-6 && Math.abs(I.y0 - s.y0) < 1e-6 && Math.abs(I.cell - s.cell) < 1e-6;
+          const z = same ? surfFromHead(I, s.z) : null;
+          if (z) S.surf = { ...s, z, pver: m.pver, _zt: null, rev: ++surfRev };
+        }
+      } catch (e) { console.error(e); }
+      headRefit = 0; S.glDirty = true; syncFaceMapPanel(); wake();
+    }, 150);
     syncFaceMapPanel();
   }
   const mk = stageKeyOf();
@@ -3626,27 +3737,30 @@ function stageZBuffer(F) {
   return zbCache;
 }
 /**
- * The side photo's own outline — its profile line and jaw line as you traced them — in the 3D view, beside
- * the head: each traced point where the head's matching edge is drawn, moved by what the head still misses
- * it by. Shown once the head is turned toward profile; where the two lines part, the 3D and the side
- * photo disagree. [[{x, y, z} …] per line] in stage coordinates (photo px, depth px), or null.
+ * The side photo's own outline — its profile line, jaw line and neck as you traced them — in the 3D view, in
+ * the head's own frame: each traced point back where the side photo's pose puts it, the profile and the neck
+ * on the midline, the jaw line at the jaw's distance from it (one for the whole line). Shown once the head is
+ * turned toward profile; where it parts from the head's edge, the 3D and the side photo disagree.
+ * [[{x, y, z} …] per line] in stage coordinates (photo px, depth px), or null. (It used to be placed point by
+ * point at each matched vertex's own distance from the midline, and zigzagged where those differed.)
  */
 function sideOutline3() {
   const h = S.map.head, G = stageZ && stageZ.key === stageKeyOf() ? stageZ : null;
   if (!sideHead() || !G || !G.hd || !h.res.outline) return null;
-  const res = h.res, X = res.X, P = h.Pg, g = G.hd.geo, p1 = res.poses[1], p0 = res.poses[0], R1 = p1.R, R0 = p0.R, kz = P.s / mapFrame().scale, k2 = S.surf.pxcm, lines = [];
-  for (const o of res.outline) {
-    if (o.q !== 1) continue;
-    const v = o.v, x = X[3 * v];
-    // the traced point back in the model's frame, at the matched vertex's distance from the midline
+  const res = h.res, X = res.X, p1 = res.poses[1], p0 = res.poses[0], R1 = p1.R, R0 = p0.R, kz = h.Pg.s / mapFrame().scale, k2 = S.surf.pxcm, C = HM.correspond();
+  const ev = FM.INDEX.traL != null && C[FM.INDEX.traL] ? C[FM.INDEX.traL].v : -1, zEar = ev >= 0 ? -(R0[2][0] * X[3 * ev] + R0[2][1] * X[3 * ev + 1] + R0[2][2] * X[3 * ev + 2]) : 0;
+  const byCh = [];
+  for (const o of res.outline) if (o.q === 1) (byCh[o.ch] || (byCh[o.ch] = [])).push(o);
+  return byCh.filter(Boolean).map(L => {
+    // (the jaw line: off the midline by its matched skin's median distance)
+    const xs = L.map(o => X[3 * o.v]).sort((a, b) => a - b), x = L.some(o => o.ch === 1) ? xs[xs.length >> 1] : 0;
     const a = R1[0][1], b = R1[0][2], c = R1[1][1], d = R1[1][2], det = a * d - b * c;
-    if (Math.abs(det) < 1e-6) continue;
-    const ru = (o.x - p1.t[0]) / p1.s - R1[0][0] * x, rv = (o.y - p1.t[1]) / p1.s - R1[1][0] * x;
-    const D = [0, (ru * d - b * rv) / det - X[3 * v + 1], (a * rv - c * ru) / det - X[3 * v + 2]];
-    const L = lines[o.ch] || (lines[o.ch] = []);
-    L.push({ x: g[3 * v] + p0.s * (R0[0][1] * D[1] + R0[0][2] * D[2]), y: g[3 * v + 1] + p0.s * (R0[1][1] * D[1] + R0[1][2] * D[2]), z: g[3 * v + 2] - (R0[2][1] * D[1] + R0[2][2] * D[2]) * kz * k2 });
-  }
-  return lines.filter(L => L && L.length > 1);
+    return L.map(o => {
+      const ru = (o.x - p1.t[0]) / p1.s - R1[0][0] * x, rv = (o.y - p1.t[1]) / p1.s - R1[1][0] * x, M = [x, (ru * d - b * rv) / det, (a * rv - c * ru) / det];
+      const dot = r => r[0] * M[0] + r[1] * M[1] + r[2] * M[2];
+      return { x: p0.s * dot(R0[0]) + p0.t[0], y: p0.s * dot(R0[1]) + p0.t[1], z: (-dot(R0[2]) - zEar) * kz * k2 };
+    });
+  }).filter(L => L.length > 1);
 }
 function drawMap(ctx) {
   const P_ = mapScreenPts(), m = S.map, busy = !!S.mapDrag;
@@ -4866,6 +4980,52 @@ function mpLoad() {
     try { return await make('GPU'); } catch (e) { return await make('CPU'); }
   })().catch(e => { mpTask = null; throw e; });
   return mpTask;
+}
+/* ---- what each photo shows where: MediaPipe's multi-class selfie segmenter (Apache-2.0, ≈ 16 MB once,
+   in the browser like the face finder): per pixel 0 background, 1 hair, 2 body skin (neck), 3 face skin,
+   4 clothes, 5 other. Used so the head takes a photo's colour only where that photo shows skin or hair. */
+const MP_SEG = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
+let segTask = null;
+const segOf = new WeakMap();
+function segLoad() {
+  if (!segTask) segTask = (async () => {
+    const mp = mpMod || (mpMod = await import(`${MP_BASE}/vision_bundle.mjs`));
+    const fs = await mp.FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+    const make = d => mp.ImageSegmenter.createFromOptions(fs, { baseOptions: { modelAssetPath: MP_SEG, delegate: d }, runningMode: 'IMAGE', outputCategoryMask: true, outputConfidenceMasks: false });
+    try { return await make('GPU'); } catch (e) { return await make('CPU'); }
+  })().catch(e => { segTask = null; throw e; });
+  return segTask;
+}
+/** A photo's labels { w, h, d (Uint8Array), sc (label px per photo px) } — or null while they're being found
+    (the head is coloured again when they are) or if the segmenter couldn't load. */
+function photoLabels(img, iw, ih) {
+  const s = segOf.get(img);
+  if (s) return s.d ? s : null;
+  segOf.set(img, { busy: true });
+  (async () => {
+    try {
+      const seg = await segLoad(), sc = Math.min(1, 1024 / Math.max(iw, ih)), c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(iw * sc)); c.height = Math.max(1, Math.round(ih * sc));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const r = seg.segment(c), mk = r.categoryMask;
+      segOf.set(img, { w: mk.width, h: mk.height, d: Uint8Array.from(mk.getAsUint8Array()), sc: mk.width / iw });
+      if (r.close) r.close();
+    } catch (e) { console.warn('segmenter', e); segOf.set(img, { failed: true }); return; }
+    const h = S.map && S.map.head;
+    if (h) h.skin = null;
+    stageMeshKey = ''; S.glDirty = true; wake();
+  })();
+  return null;
+}
+/** How surely a photo shows skin or hair at (x, y) — not the background or clothes (0…1, over ≈ 5 label px). */
+function paintable(L, x, y) {
+  const i0 = Math.round(x * L.sc), j0 = Math.round(y * L.sc);
+  let ok = 0, n = 0;
+  for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+    const i = Math.min(L.w - 1, Math.max(0, i0 + di)), j = Math.min(L.h - 1, Math.max(0, j0 + dj)), c = L.d[j * L.w + i];
+    n++; if (c !== 0 && c !== 4) ok++;
+  }
+  return ok / n;
 }
 let autoBusy = false;
 async function autoPlace() {
