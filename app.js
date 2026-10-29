@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '43';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '44';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -34,7 +34,13 @@ if (!cssOk()) await new Promise(res => { const l = document.createElement('link'
 if (!cssOk()) {
   const old = !!getComputedStyle(document.documentElement).getPropertyValue('--c1').trim();
   document.body.insertAdjacentHTML('beforeend', `<p style="position:fixed;z-index:99;left:12px;right:12px;bottom:16px;margin:0;padding:10px 14px;border-radius:10px;background:#2a1418;color:#f5c2c2;font:13px/1.45 system-ui,sans-serif;text-align:center">${old ? 'The site still has an older <b>style.css</b>' : '<b>style.css</b> didn’t load'} — upload the new style.css next to index.html, named exactly <b>style.css</b>.</p>`);
-}if (!window.CRANI) { document.body.insertAdjacentHTML('beforeend', '<p style="position:fixed;inset:auto 0 24px;text-align:center;color:#f5a3a3;font:14px system-ui">presets.js didn’t load — upload it next to index.html.</p>'); return; }
+}
+// The measured head too: an older head.js (or none) still lets the app run, but the 3D quietly falls back to the
+// template's guessed head — it looked like a preset that doesn't follow the dots. Say so plainly instead.
+if (!moduleOk('CraniHead')) {
+  document.body.insertAdjacentHTML('beforeend', `<p style="position:fixed;z-index:99;left:12px;right:12px;bottom:${cssOk() ? 16 : 70}px;margin:0;padding:10px 14px;border-radius:10px;background:#2a1418;color:#f5c2c2;font:13px/1.45 system-ui,sans-serif;text-align:center">${window.CraniHead ? 'The site still has an older <b>head.js</b>' : '<b>head.js</b> didn’t load'} — the 3D head uses the template until the new head.js is uploaded next to index.html.</p>`);
+}
+if (!window.CRANI) { document.body.insertAdjacentHTML('beforeend', '<p style="position:fixed;inset:auto 0 24px;text-align:center;color:#f5a3a3;font:14px system-ui">presets.js didn’t load — upload it next to index.html.</p>'); return; }
 const { GROUPS, LANDMARKS } = window.CRANI;
 const P = {};
 GROUPS.forEach(g => g.items.forEach(it => { it.group = g.name; P[it.id] = it; }));
@@ -1106,9 +1112,9 @@ const headWeight = (side, m) => i => {
   if (g === 'ears') return side ? (pt.lm ? .8 : .4) : pt.mid ? .2 : .4;
   if (g === 'brows' || g === 'hair' || g === 'neck' || g === 'ears' || pt.field === 'back' || /^(tri|hl)/.test(pt.id)) return 0;
   // (a side photo's jaw line — its lower border, the angle, the ramus's back edge — fits as an edge: firmly
-  // where you placed the dot, lightly where it's still the template's guess, which would only pull the
-  // model's jaw toward the template's)
-  if (side) return pt.side === 0 ? (pt.mid ? .6 : 1) : /^(jaw2|go|ramus)[LR]$/.test(pt.id) ? (isUser(m, i) ? .9 : .25) : pt.lm ? .5 : 0;
+  // where you placed the dot; where it's Auto-place's or Snap's, half as firmly — on a real face it lies on
+  // the photo's jaw line too, and at a quarter the model's own jaw won: it looked like a preset)
+  if (side) return pt.side === 0 ? (pt.mid ? .6 : 1) : /^(jaw2|go|ramus)[LR]$/.test(pt.id) ? (isUser(m, i) ? .9 : .5) : pt.lm ? .5 : 0;
   // (soft features — the temporal line, the cheekbone's ridge, the hollows — are placed less exactly)
   return /^(tem|tc|zr|sm|hcm|ss)/.test(pt.id) ? .3 : pt.mid ? .5 : 1;
 };
@@ -1938,13 +1944,39 @@ function rot3(yaw, pitch) {
   const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
   return [cy, 0, sy, sp * sy, cp, -sp * cy, -cp * sy, sp, cp * cy];
 }
+/**
+ * How much more the head is nodded in the side photo than in the front one (radians, about the head's
+ * ear-to-ear axis; 0 without a side photo). The 3D is the front photo's view of the head; turned to profile,
+ * it takes on the side photo's nod by degrees, so its profile is seen as that photo shows it. (Shown with
+ * the front photo's nod instead — 12° chin-down on a test face — the measured profile looked like a chin
+ * set back and a different jaw angle.)
+ */
+function stageNod() {
+  const h = S.map && S.map.head;
+  if (!sideHead() || !h.res.poses[1]) return 0;
+  if (h.nod != null) return h.nod;
+  const R0 = h.res.poses[0].R, R1 = h.res.poses[1].R, D = [1, 1, -1];
+  // the side camera's frame from the front one's (both x right, y down; on the stage, depth toward the camera)
+  const Rs = [0, 1, 2].map(i => [0, 1, 2].map(j => D[i] * D[j] * (R1[i][0] * R0[j][0] + R1[i][1] * R0[j][1] + R1[i][2] * R0[j][2])));
+  // less the quarter turn, what's left about the horizontal: the nod
+  let best = 0, bq = -Infinity;
+  for (const sg of [-1, 1]) {
+    const Y = rot3(sg * Math.PI / 2, 0), Q = [0, 1, 2].map(i => [0, 1, 2].map(j => Y[i] * Rs[0][j] + Y[3 + i] * Rs[1][j] + Y[6 + i] * Rs[2][j]));
+    const tr = Q[0][0] + Q[1][1] + Q[2][2];
+    if (tr > bq) { bq = tr; best = Math.atan2(Q[2][1], Q[1][1]); }
+  }
+  return (h.nod = best);
+}
 /** Photo → screen (affine, while the face map shows the photo unchanged), the pivot and the rotation. */
 function stageFrame() {
   const s = S.surf, p0 = mapToScreen({ x: 0, y: 0 }), px = mapToScreen({ x: S.iw, y: 0 }), py = mapToScreen({ x: 0, y: S.ih });
+  // turned toward profile, the side photo's nod (by sin² of the turn: none from the front)
+  const R = rot3(S.rot3.yaw, S.rot3.pitch), a = stageNod() * Math.sin(S.rot3.yaw) ** 2, c = Math.cos(a), sn = Math.sin(a);
   return {
     L: [(px.x - p0.x) / S.iw, (py.x - p0.x) / S.ih, (px.y - p0.y) / S.iw, (py.y - p0.y) / S.ih], t: [p0.x, p0.y],
     c: [s.x0 + (s.gw - 1) * s.cell / 2, s.y0 + (s.gh - 1) * s.cell / 2, s.zc * s.pxcm],
-    R: rot3(S.rot3.yaw, S.rot3.pitch),
+    // R · Rx(a)
+    R: [R[0], R[1] * c + R[2] * sn, -R[1] * sn + R[2] * c, R[3], R[4] * c + R[5] * sn, -R[4] * sn + R[5] * c, R[6], R[7] * c + R[8] * sn, -R[7] * sn + R[8] * c],
   };
 }
 /** A point (photo px, depth px toward the camera) on the screen. */
@@ -2000,20 +2032,23 @@ function dotDepthRaw(i, Gs) {
   const Ci = G && G.hd && HM.correspond()[i];
   if (Ci && Ci.cand) {
     // the jaw's border as the fit has it (its candidates: the skin at the dot's height, not the jaw's
-    // underside or the neck): those drawn within ≈ 3 mm of the dot and within ≈ 1 mm of the furthest out,
-    // at their median depth. (Not the furthest one alone: where the head's side is flat — the cheek, the
-    // ramus — skin from in front to behind sits equally far out, and the dots down the jaw zigzagged in
-    // depth by a centimetre or two as each took another.)
+    // underside or the neck): of those drawn within ≈ 3 mm of the dot and within ≈ 1.5 mm of the furthest
+    // out, the one nearest in depth to where the dot is anatomically (its own place on the head: zygion
+    // ≈ 3 cm before the ear, gonion ≈ 1 cm …). On the flat side of the face — cheek, ramus — skin from the
+    // cheek's front to the ear is all equally far out: taken as the furthest one, or their median, the dots
+    // down the jaw jumped back and forth by 1–3 cm; the anatomical place moves smoothly along the line.
     const P = h.P, dz = G.hd.dz, x = m.p[2 * i], y = m.p[2 * i + 1], sc = mapScale(), r2 = (.3 * sc) ** 2, n = Ci.nrm, near = [];
+    const zp = Ci.v >= 0 ? P.z[Ci.v] + dz[Ci.v] : null;
     let bv = -Infinity, nv = -1, nd = Infinity;
     for (const v of Ci.cand) {
       const du = P.uv[2 * v] - x, dv = P.uv[2 * v + 1] - y, d = du * du + dv * dv, out = du * n[0] + dv * n[1];
       if (d < nd) { nd = d; nv = v; }
       if (d < r2) { near.push([out, v]); bv = Math.max(bv, out); }
     }
-    const zs = near.filter(([o]) => o >= bv - .1 * sc).map(([, v]) => P.z[v] + dz[v]).sort((a, b) => a - b);
-    if (zs.length) return zs[zs.length >> 1];
-    if (nv >= 0) return P.z[nv] + dz[nv];
+    let best = -1, bz = Infinity;
+    for (const [o, v] of near) { if (o < bv - .15 * sc) continue; const e = zp == null ? -o : Math.abs(P.z[v] + dz[v] - zp); if (e < bz) { bz = e; best = v; } }
+    if (best < 0) best = nv;
+    if (best >= 0) return P.z[best] + dz[best];
   }
   if (h && h.vertOf && h.key === headKey() && h.vertOf[i] >= 0 && (pt.group === 'ears' || edgeDot)) { const v = h.vertOf[i]; return h.P.z[v] + (G && G.hd ? G.hd.dz[v] : 0); }
   if (G) {
@@ -4415,6 +4450,14 @@ function syncSurfacePane() {
   setText(bb, busy ? 'Building…' : s ? 'Rebuild' : 'Build surface');
   bb.disabled = !m || !!busy;
   $('#sfFront').disabled = !s || !rotated();
+  // the dots the two photos still disagree on once the head is fitted to both (> 3 mm; click one to check it)
+  const mis = sideHead() ? (m.head.res.misfit || []).filter(o => o.mm > 3 && o.w >= .5).slice(0, 6) : [], mk = mis.map(o => `${o.q}:${o.i}:${o.mm.toFixed(0)}`).join(',');
+  $('#sfMis').hidden = !mis.length;
+  const ml = $('#sfMisList');
+  if (ml._k !== mk) {
+    ml._k = mk;
+    ml.innerHTML = mis.map(o => { const pt = FM.POINTS[o.i]; return `<button type="button" class="chip-dot look" data-mi="${o.i}" data-mq="${o.q}" title="${esc(`${pt.name} — on the ${o.q ? 'side' : 'front'} photo, ${o.mm.toFixed(1)} mm from where the other photo puts it`)}">${o.q ? 'Side' : 'Front'} · ${esc(pt.name.replace(/\s*\(.*\)/, '').split(' · ')[0])} · ${o.mm.toFixed(0)} mm</button>`; }).join('');
+  }
   // the face's anatomy: read from the light, corrected by hand (held values marked •)
   const an = $('#sfAnat'), fit = s && m && s.view === m.view ? s.fit : null;
   an.hidden = !fit;
@@ -4968,7 +5011,7 @@ function exportFaceMap() {
     points: (mm.src || mm.pts.map(fwdMap)).map(p => [r2(p.x), r2(p.y)]),
   }));
   const doc = {
-    app: 'cranimeter', kind: 'face-map', version: 1, build: BUILD, saved: new Date().toISOString(),
+    app: 'cranimeter', kind: 'face-map', version: 2, build: BUILD, saved: new Date().toISOString(),
     image: { width: S.iw, height: S.ih },
     // (mids: each detail dot's two named neighbours — its number may differ in another build)
     map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [], mids: FM.MID_KEY } : null,
@@ -6646,6 +6689,7 @@ function buildFaceMapPanel() {
         <button type="button" class="btn ghost sm" id="sfFront" title="Face the photo again (or double-click it)">Front view</button>
         <button type="button" class="btn ghost sm" id="sfSide" title="Load a saved face map file of a side (profile) photo of the same person: its profile sets the depths a front photo can't show. (Or map the side photo in the Side tab — it's used here by itself.)">Side map file…</button>
       </div>
+      <div id="sfMis" hidden><div class="to-label">Photos disagree</div><div class="chips looks" id="sfMisList"></div></div>
       <div id="sfAnat" class="sf-anat" hidden></div>
       ${sliderRow('sfTrust', 'Follow the photo', 0, 100, 1, 'How far the photo’s light and shade may change the anatomy from the average face (right) or keep it (left). Rebuild to apply.')}
       <p class="to-note">The photo is now 3D: <b>drag it to turn</b> the face, double-click to face it again. <b>Turned, drag a dot</b> to set its depth (the chin forward, a cheek back): it stays where it is on the photo and the surface bends to it. Facing you, dots move on the photo as usual.</p>
@@ -6685,6 +6729,17 @@ function buildFaceMapPanel() {
   });
   $('#sfBuild').addEventListener('click', () => buildSurface());
   $('#sfFront').addEventListener('click', () => { S.rot3 = { yaw: 0, pitch: 0 }; syncFaceMapPanel(); wake(); });
+  // a dot the photos disagree on: select it on its photo (the side one in the Side tab), facing it
+  $('#sfMisList').addEventListener('click', async e => {
+    const b = e.target.closest('[data-mi]');
+    if (!b) return;
+    const i = +b.dataset.mi;
+    if (+b.dataset.mq === 1) { goTab('side'); await new Promise(r => setTimeout(r, 60)); }
+    else { S.rot3.yaw = 0; S.rot3.pitch = 0; }
+    if (!S.map) return;
+    S.mapSel = new Set([i]); S.mapHover = i;
+    syncFaceMapPanel(); wake();
+  });
   $('#sfMode').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.surfMode = b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
   $('#mExport').addEventListener('click', exportFaceMap);
   $('#mImport').addEventListener('click', () => $('#mapFile').click());
