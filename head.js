@@ -362,7 +362,7 @@ function deform(res, views, opt = {}) {
     let cx = 0, cy = 0, k = 0;
     P.forEach((_, i) => { if (V.vis[i]) { cx += V.p[2 * i]; cy += V.p[2 * i + 1]; k++; } });
     cx /= k || 1; cy /= k || 1;
-    for (const ch of chains[q]) {
+    for (const [ci, ch] of chains[q].entries()) {
       const pts = ch.idx.map(i => ({ x: V.p[2 * i], y: V.p[2 * i + 1] })), ws = ch.idx.map(i => V.weight(i));
       const seg = i => Math.max(1, Math.round(Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y) / (.3 * s)));
       const sp = FM.spline(pts, false, seg), wq = [];
@@ -372,7 +372,7 @@ function deform(res, views, opt = {}) {
         let nx = sp[t + 1].y - sp[t - 1].y, ny = -(sp[t + 1].x - sp[t - 1].x);
         const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
         if (nx * (sp[t].x - cx) + ny * (sp[t].y - cy) < 0) { nx = -nx; ny = -ny; }
-        out.push({ x: sp[t].x, y: sp[t].y, n: [nx, ny], w: .7 * wq[t], cand: ch.cand, prof: ch.prof });
+        out.push({ x: sp[t].x, y: sp[t].y, n: [nx, ny], w: .7 * wq[t], cand: ch.cand, prof: ch.prof, ch: ci });
       }
     }
     return out;
@@ -509,7 +509,7 @@ function deform(res, views, opt = {}) {
   res.dX = dX;
   res.bendMs = performance.now() - t0;
   // (the outline's samples: where, and what's left — mm across the outline, + = the head inside it)
-  res.outline = rows.filter(r => r.at).map(r => ({ x: r.at.x, y: r.at.y, q: r.q, v: r.v, mm: 10 * (r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2])) }));
+  res.outline = rows.filter(r => r.at).map(r => ({ x: r.at.x, y: r.at.y, q: r.q, ch: r.at.ch, v: r.v, mm: 10 * (r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2])) }));
   res.misfit = [...mis].map(([k, e]) => { const [q, i] = k.split(':').map(Number); return { q, i, mm: e }; }).sort((a, b) => b.mm - a.mm);
   return res;
 }
@@ -666,5 +666,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '42' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '43' };
 })();
