@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '46';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '47';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -2425,6 +2425,9 @@ function outlineOnRim(hd, d) {
     });
   }
 }
+// (how the triangles' winding on screen reads for the stage's projection: with it, skin seen from behind —
+// the head's inside, through the nostrils — is drawn as the cavity it is)
+const BACK = -1;
 /** The measured head's mesh for the 3D view (headStage): its own shape, coloured as headSkin has it — the
     photo where the head lies on it bent through the dots — on its own (no photo plane behind: around the
     head's edge it showed the photo's face a few mm off the head's, a second outline). */
@@ -2474,7 +2477,7 @@ function headMesh(G) {
   // dark hole.)
   const ring = [];
   for (let v = 0; v < HMm.nSkin; v++) if (edge[v]) ring.push(v);
-  if (ring.length < 3) return { pos, nrm, uv, ov, uv2, w, col, fs, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines) };
+  if (ring.length < 3) return { pos, nrm, uv, ov, uv2, w, col, fs, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines), back: BACK * sg };
   let cx = 0, cz = 0;
   for (const v of ring) { cx += X[3 * v]; cz += X[3 * v + 2]; }
   cx /= ring.length; cz /= ring.length;
@@ -2494,7 +2497,7 @@ function headMesh(G) {
   ring.forEach((v, q) => put(N + q, [pos[3 * v], pos[3 * v + 1], pos[3 * v + 2]]));
   put(N + nr, c0);
   for (let q = 0; q < nr; q++) tri.push(N + nr, N + q, N + (q + 1) % nr);
-  return { pos: pos2, nrm: nrm2, uv: uv2b, ov: ov2, uv2: uv22, w: w2, col: col2, fs: fs2, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines) };
+  return { pos: pos2, nrm: nrm2, uv: uv2b, ov: ov2, uv2: uv22, w: w2, col: col2, fs: fs2, tri: Uint32Array.from(tri), lines: Uint32Array.from(lines), back: BACK * sg };
 }
 function stageMesh() {
   const s = S.surf, G = stageDepth(), { gw, gh, cell, x0, y0, h, z: Z, face } = G, n = gw * gh, k2 = s.pxcm;
@@ -2551,16 +2554,22 @@ function headSkin(h) {
   const key = `${S.imgSeq}|${sd ? sd.imgSeq : '-'}|${labF ? 1 : 0}${labS ? 1 : 0}`;
   if (h.skin && h.skin.key === key) return h.skin;
   const nS = HM.model.nSkin, T = HM.topology(), nrm = HM.normals(h.res.X);
-  // which vertices a view sees (in front, on a ≈ 2 mm grid) and how squarely (0 where it doesn't)
+  // which vertices a view sees (in front, on a ≈ ½ mm grid, the depth read where the vertex is) and how
+  // squarely (0 where it doesn't). (On a 2 mm grid, read at the nearest node, skin on a steep slope — the
+  // nose's side, the lids' folds, the eyes' inner corners — sat "behind" the node's front-most depth: those
+  // vertices took the side photo's or the carried-in colour, specks along the features.)
   const seen = (Q, pose) => {
     let ux0 = Infinity, uy0 = Infinity, ux1 = -Infinity, uy1 = -Infinity;
     for (let v = 0; v < nS; v++) { const x = Q.uv[2 * v], y = Q.uv[2 * v + 1]; ux0 = Math.min(ux0, x); uy0 = Math.min(uy0, y); ux1 = Math.max(ux1, x); uy1 = Math.max(uy1, y); }
-    const cell = Math.max(.5, .2 * Q.s), x0 = ux0 - cell, y0 = uy0 - cell, gw = Math.ceil((ux1 - x0) / cell) + 2, gh = Math.ceil((uy1 - y0) / cell) + 2;
+    const cell = Math.max(.35, .05 * Q.s), x0 = ux0 - 2 * cell, y0 = uy0 - 2 * cell, gw = Math.ceil((ux1 - x0) / cell) + 4, gh = Math.ceil((uy1 - y0) / cell) + 4;
     const Rz = HM.raster(Q, { x0, y0, cell, gw, gh }, 'skin', { smooth: 0 }), out = new Float32Array(nS), r = pose.R[2];
     out.vis = new Uint8Array(nS);
     for (let v = 0; v < nS; v++) {
-      const k = Math.round((Q.uv[2 * v + 1] - y0) / cell) * gw + Math.round((Q.uv[2 * v] - x0) / cell), f = -(r[0] * nrm[3 * v] + r[1] * nrm[3 * v + 1] + r[2] * nrm[3 * v + 2]);
-      out.vis[v] = Number.isFinite(Rz[k]) && Q.z[v] >= Rz[k] - .3 ? 1 : 0;
+      const fx = (Q.uv[2 * v] - x0) / cell, fy = (Q.uv[2 * v + 1] - y0) / cell, i = Math.floor(fx), j = Math.floor(fy), f = -(r[0] * nrm[3 * v] + r[1] * nrm[3 * v + 1] + r[2] * nrm[3 * v + 2]);
+      // (the front-most depth round the vertex: the nearest of its four nodes)
+      let zf = -Infinity, ok = false;
+      for (const k of [j * gw + i, j * gw + i + 1, (j + 1) * gw + i, (j + 1) * gw + i + 1]) if (Number.isFinite(Rz[k])) { ok = true; zf = Math.max(zf, Rz[k]); }
+      out.vis[v] = ok && Q.z[v] >= zf - .15 ? 1 : 0;
       out[v] = out.vis[v] && f > 0 ? f : 0;
     }
     return out;
@@ -2593,6 +2602,21 @@ function headSkin(h) {
     if (labS) for (let v = 0; v < nS; v++) if (s1[v] > 0) s1[v] *= smooth01(.35, .85, paintable(labS, Ps.uv[2 * v], Ps.uv[2 * v + 1]));
     side = photoPixels(sd.img, sd.iw, sd.ih);
     for (let v = 0; v < nS; v++) { const u = s1[v] > 0 ? v : s1[T.mir[v]] > 0 ? T.mir[v] : -1; if (u < 0) continue; src[v] = u; fS[v] = s1[u]; uv2[2 * v] = Ps.uv[2 * u] / sd.iw; uv2[2 * v + 1] = Ps.uv[2 * u + 1] / sd.ih; }
+    // (the skin the side photo doesn't see: its place on that photo carried in from its neighbours' — left at
+    // the photo's corner, a triangle with one such corner drew a streak across the whole photo, zigzags
+    // along the neck and under the jaw wherever the side photo counted at all)
+    const has = Uint8Array.from(src, s => s >= 0 ? 1 : 0);
+    for (let pass = 0, left = 1; pass < 60 && left; pass++) {
+      left = 0;
+      const nx = new Uint8Array(has);
+      for (let v = 0; v < nS; v++) {
+        if (has[v]) continue;
+        let x = 0, y = 0, k = 0;
+        for (let q = T.off[v]; q < T.off[v + 1]; q++) { const u = T.nb[q]; if (u < nS && has[u]) { x += uv2[2 * u]; y += uv2[2 * u + 1]; k++; } }
+        if (k) { uv2[2 * v] = x / k; uv2[2 * v + 1] = y / k; nx[v] = 1; } else left++;
+      }
+      has.set(nx);
+    }
     // (the side photo's light and white balance matched to the front's on the skin both see well)
     const a = [0, 0, 0], b = [0, 0, 0];
     let cnt = 0;
@@ -2603,13 +2627,24 @@ function headSkin(h) {
   const known = new Uint8Array(nS), mean = [0, 0, 0];
   let nk = 0;
   for (let v = 0; v < nS; v++) {
-    // (with a side photo, the front one only where it sees the skin fairly squarely: at a grazing angle its
-    // pixel is stretched over the head's side — beside the ear, the photo's ear painted on the skull)
-    const wf = side ? smooth01(.3, .6, fF[v]) : smooth01(.12, .45, fF[v]), sa = side ? smooth01(.05, .3, fS[v]) : 0;
-    w[3 * v] = wf; w[3 * v + 1] = (1 - wf) * sa; w[3 * v + 2] = (1 - wf) * (1 - sa);
+    // each photo by how squarely it sees the skin (the cosine, squared), the carried-in colour only where
+    // neither does: beside the ear the side photo takes over from the front one, stretched over the head's
+    // side there. (With a side photo the front one used to count only from ≈ 30° on: the eyes' inner corners,
+    // the nose's sides — which the side photo can't see past the nose — took the carried-in colour, a grey
+    // smudge between the eyes and the nose.)
+    // (the side photo only where the skin faces sideways — the cheek's and jaw's sides, the temples, the
+    // ears: on the face's front it lies a few mm off, and the thin strips the front photo can't see — the
+    // lids' inner edges, the nostrils' rims — took its pixels from beside them, specks along the features;
+    // those take the colours around instead)
+    const lat = Math.abs(nrm[3 * v]) / (Math.hypot(nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2]) || 1);
+    // (cubed: a photo seeing the skin at a grazing angle — under the jaw, at the head's sides — stretches its
+    // pixels into streaks and zigzags; there the colours around take over)
+    const a = fF[v] > .04 ? fF[v] ** 3 : 0, b = side && fS[v] > .04 ? fS[v] ** 3 * smooth01(.45, .75, lat) : 0, c = .003, t = a + b + c;
+    const wf = a / t;
+    w[3 * v] = wf; w[3 * v + 1] = b / t; w[3 * v + 2] = c / t;
     // (the colours carried in come from skin a photo sees squarely: near its edge the photo's pixel may
     // be the background beside the head)
-    if (!(fF[v] > .45 || (side && fS[v] > .45))) continue;
+    if (!(fF[v] > .45 || b > .2)) continue;
     const p = fF[v] > .12 ? px(front, P.uv[2 * v], P.uv[2 * v + 1]) : [0, 0, 0], q = side && fS[v] > .05 ? px(side, uv2[2 * v] * sd.iw, uv2[2 * v + 1] * sd.ih).map((x, c) => x * gain[c]) : [0, 0, 0], ws = w[3 * v + 1], tw = wf + ws;
     for (let c = 0; c < 3; c++) { col[3 * v + c] = (p[c] * wf + q[c] * ws) / tw; mean[c] += col[3 * v + c]; }
     known[v] = 1; nk++;
@@ -2622,9 +2657,37 @@ function headSkin(h) {
     if (b === a) continue;
     for (let c = 0; c < 3; c++) { let s = 0; for (let q = a; q < b; q++) s += col[3 * T.nb[q] + c]; col[3 * v + c] += 1.7 * (s / (b - a) - col[3 * v + c]); }
   }
+  // the weights smoothed over the skin (six passes): read vertex by vertex they flipped between a photo and
+  // the carried-in colour where a photo sees the skin almost edge-on — under the jaw, zigzag patches
+  for (let pass = 0; pass < 6; pass++) {
+    const nw = Float32Array.from(w);
+    for (let v = 0; v < nS; v++) {
+      const a = T.off[v], b = T.off[v + 1];
+      if (b === a) continue;
+      for (let q = 0; q < 3; q++) { let s = 0; for (let k = a; k < b; k++) s += w[3 * T.nb[k] + q]; nw[3 * v + q] = .5 * w[3 * v + q] + .5 * s / (b - a); }
+    }
+    w.set(nw.subarray(0, 3 * nS), 0);
+  }
+  // the inside of the nose — the passages up from the nostrils, seen through them from below: neither photo
+  // sees it, and carried in from the skin round it, it showed as two flat skin-coloured discs. Dark, as it
+  // is: the skin within ≈ 3.5 cm of the nostrils that neither photo sees (mostly the carried-in colour).
+  const Xh = h.res.X, CC = HM.correspond(), nose = [];
+  for (const id of ['nosL', 'nosR']) { const i = FM.INDEX[id]; if (i != null && CC[i] && CC[i].v >= 0) nose.push(CC[i].v); }
+  for (let v = 0; v < nS && nose.length; v++) {
+    let near = Infinity;
+    for (const c0 of nose) near = Math.min(near, (Xh[3 * v] - Xh[3 * c0]) ** 2 + (Xh[3 * v + 1] - Xh[3 * c0 + 1]) ** 2 + (Xh[3 * v + 2] - Xh[3 * c0 + 2]) ** 2);
+    if (near > 12.25) continue;
+    const k = smooth01(.5, .85, w[3 * v + 2]) * (1 - smooth01(9, 12.25, near));
+    if (!(k > 0)) continue;
+    for (let q = 0; q < 3; q++) col[3 * v + q] += ([.11, .06, .05][q] - col[3 * v + q]) * k;
+    const fill = w[3 * v + 2] + (1 - w[3 * v + 2]) * k * .85, f = (1 - fill) / ((w[3 * v] + w[3 * v + 1]) || 1);
+    w[3 * v] *= f; w[3 * v + 1] *= f; w[3 * v + 2] = fill;
+  }
   // (the eyeballs: the front photo; facing you, everything the front photo sees is the photo itself)
+  // (where the front photo shows this skin — seen, inside the head's outline there, and skin or hair by its
+  // labels: facing you a collar or the background no longer covers the neck's sides)
   const fs = new Uint8Array(N);
-  fs.set(fF.vis);
+  for (let v = 0; v < nS; v++) fs[v] = fF.vis[v] && fF[v] > 0 ? 1 : 0;
   for (let v = nS; v < N; v++) { w[3 * v] = 1; fs[v] = 1; }
   h.skin = { key, uv2, w, col, gain, side: !!side, fs };
   return h.skin;
@@ -5017,11 +5080,12 @@ function photoLabels(img, iw, ih) {
   })();
   return null;
 }
-/** How surely a photo shows skin or hair at (x, y) — not the background or clothes (0…1, over ≈ 5 label px). */
+/** How surely a photo shows skin or hair at (x, y) — not the background or clothes (0…1, over ≈ 1.5 % of the
+    photo's size round it: a sharper edge, read vertex by vertex, showed as a zigzag along the collar). */
 function paintable(L, x, y) {
-  const i0 = Math.round(x * L.sc), j0 = Math.round(y * L.sc);
+  const i0 = Math.round(x * L.sc), j0 = Math.round(y * L.sc), r = Math.max(3, Math.round(.008 * Math.max(L.w, L.h))), st = Math.max(1, Math.round(r / 4));
   let ok = 0, n = 0;
-  for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+  for (let dj = -r; dj <= r; dj += st) for (let di = -r; di <= r; di += st) {
     const i = Math.min(L.w - 1, Math.max(0, i0 + di)), j = Math.min(L.h - 1, Math.max(0, j0 + dj)), c = L.d[j * L.w + i];
     n++; if (c !== 0 && c !== 4) ok++;
   }
