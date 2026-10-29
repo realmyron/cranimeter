@@ -81,9 +81,12 @@ function correspond() {
   const yJaw = ax => { if (ax >= jaw[3][0]) return jaw[3][1]; for (let q = 1; q < 4; q++) if (ax <= jaw[q][0]) { const t = (ax - jaw[q - 1][0]) / ((jaw[q][0] - jaw[q - 1][0]) || 1); return jaw[q - 1][1] + t * (jaw[q][1] - jaw[q - 1][1]); } return jaw[3][1]; };
   const neck = new Uint8Array(m.N);
   for (let i = 0; i < nS; i++) if (T[3 * i + 1] > yJaw(Math.abs(T[3 * i])) + .45) neck[i] = 1;
-  // … nor an ear's (at the jaw angle the ear lobe reaches further out)
-  const earPts = P.filter(p => p.group === 'ears' && p.x > 0), ear = new Uint8Array(m.N);
-  for (let i = 0; i < nS; i++) { const x = Math.abs(T[3 * i]), y = T[3 * i + 1], z = T[3 * i + 2]; if (earPts.some(p => (p.x - x) ** 2 + (p.y - y) ** 2 + (p.z - z) ** 2 < 1.2 * 1.2)) ear[i] = 1; }
+  // … nor an ear's (at the jaw angle the ear lobe reaches further out). The auricle: within 1 cm of its dots —
+  // but only 3.5 mm round where it joins the head (otobasion above and below): that's the head's own skin, and
+  // the ramus's back edge runs up to just below the lower one (at 1.2 cm round every ear dot, the whole
+  // ramus counted as ear, and a side photo's ramus was never fitted as the jaw's edge)
+  const earPts = P.filter(p => p.group === 'ears' && p.x > 0).map(p => [p.x, p.y, p.z, /^ob[is]R$/.test(p.id) ? .35 : 1]), ear = new Uint8Array(m.N);
+  for (let i = 0; i < nS; i++) { const x = Math.abs(T[3 * i]), y = T[3 * i + 1], z = T[3 * i + 2]; if (earPts.some(([px, py, pz, r]) => (px - x) ** 2 + (py - y) ** 2 + (pz - z) ** 2 < r * r)) ear[i] = 1; }
   // … nor the jaw's underside: the jaw outline's dot is the jawline — the border where the skin turns
   // under — and below it the underside, facing down, reaches out as far in a front view
   const down = new Uint8Array(m.N), nrm = new Float32Array(nS * 3);
@@ -365,14 +368,15 @@ function deform(res, views, opt = {}) {
     for (const [ci, ch] of chains[q].entries()) {
       const pts = ch.idx.map(i => ({ x: V.p[2 * i], y: V.p[2 * i + 1] })), ws = ch.idx.map(i => V.weight(i));
       const seg = i => Math.max(1, Math.round(Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y) / (.3 * s)));
-      const sp = FM.spline(pts, false, seg), wq = [];
-      pts.slice(0, -1).forEach((_, i) => { const n = seg(i); for (let t = 0; t < n; t++) wq.push(ws[i] + (ws[i + 1] - ws[i]) * t / n); });
-      wq.push(ws[ws.length - 1]);
+      const sp = FM.spline(pts, false, seg), wq = [], at = [];
+      // (each sample's place on the template too: that far between the two dots it lies between)
+      pts.slice(0, -1).forEach((_, i) => { const n = seg(i), A = P[ch.idx[i]], B = P[ch.idx[i + 1]]; for (let t = 0; t < n; t++) { wq.push(ws[i] + (ws[i + 1] - ws[i]) * t / n); at.push([0, 1, 2].map(k => [A.x, A.y, A.z][k] + ([B.x, B.y, B.z][k] - [A.x, A.y, A.z][k]) * t / n)); } });
+      wq.push(ws[ws.length - 1]); at.push([P[ch.idx[ch.idx.length - 1]].x, P[ch.idx[ch.idx.length - 1]].y, P[ch.idx[ch.idx.length - 1]].z]);
       for (let t = 1; t < sp.length - 1; t++) {
         let nx = sp[t + 1].y - sp[t - 1].y, ny = -(sp[t + 1].x - sp[t - 1].x);
         const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
         if (nx * (sp[t].x - cx) + ny * (sp[t].y - cy) < 0) { nx = -nx; ny = -ny; }
-        out.push({ x: sp[t].x, y: sp[t].y, n: [nx, ny], w: .7 * wq[t], cand: ch.cand, prof: ch.prof, ch: ci });
+        out.push({ x: sp[t].x, y: sp[t].y, n: [nx, ny], w: .7 * wq[t], cand: ch.cand, prof: ch.prof, ch: ci, tp: at[t] });
       }
     }
     return out;
@@ -458,6 +462,12 @@ function deform(res, views, opt = {}) {
           if (Math.abs(dv * S.n[0] - du * S.n[1]) > .25 * s || Math.abs(along) > 2.5 * s) continue;
           if (along > bv) { bv = along; best = j; }
         }
+        // no edge there — the ramus's back edge up to the ear lobe isn't one (the head's side faces out
+        // smoothly): the skin at the sample's anatomical place, held to the photo's line across it
+        if (best < 0 && !S.prof && S.tp) {
+          if (S.v == null) { let bd = Infinity; S.v = -1; for (let j = 0; j < nS; j++) { if (C.ear[j] || C.neck[j]) continue; const d = (T[3 * j] - S.tp[0]) ** 2 + (T[3 * j + 1] - S.tp[1]) ** 2 + (T[3 * j + 2] - S.tp[2]) ** 2; if (d < bd) { bd = d; S.v = j; } } }
+          best = S.v;
+        }
         if (best < 0) continue;
         const [u, v] = proj(X0.subarray(3 * best, 3 * best + 3), pose);
         rows.push({ v: best, g: [0, 1, 2].map(k => S.n[0] * R[0][k] + S.n[1] * R[1][k]), e: ((S.x - u) * S.n[0] + (S.y - v) * S.n[1]) / s, w: S.w, q, at: S });
@@ -505,12 +515,13 @@ function deform(res, views, opt = {}) {
   for (let i = 0; i < 3 * N; i++) res.X[i] = X0[i] + dX[i];
   // what's left per dot (mm, worst row): where the photos and the head still disagree
   const mis = new Map();
+  const wOf = new Map(views.map((V, q) => (res.pairs[q] || []).map(o => [`${q}:${o.i}`, o.w])).flat());
   for (const r of rows) { if (r.i == null) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); }
   res.dX = dX;
   res.bendMs = performance.now() - t0;
   // (the outline's samples: where, and what's left — mm across the outline, + = the head inside it)
   res.outline = rows.filter(r => r.at).map(r => ({ x: r.at.x, y: r.at.y, q: r.q, ch: r.at.ch, v: r.v, mm: 10 * (r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2])) }));
-  res.misfit = [...mis].map(([k, e]) => { const [q, i] = k.split(':').map(Number); return { q, i, mm: e }; }).sort((a, b) => b.mm - a.mm);
+  res.misfit = [...mis].map(([k, e]) => { const [q, i] = k.split(':').map(Number); return { q, i, mm: e, w: wOf.get(k) || 0 }; }).sort((a, b) => b.mm - a.mm);
   return res;
 }
 
@@ -666,5 +677,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '43' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '44' };
 })();
