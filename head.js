@@ -688,5 +688,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '45' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '46' };
 })();
