@@ -35,7 +35,10 @@ function load(url = 'ict-head.bin') {
     const tri = new Uint16Array(buf.slice(o, o + nt * 6)); o += nt * 6 + ((nt * 6) % 4 ? 2 : 0);
     const D = new Float32Array(K * N * 3);
     for (let k = 0; k < K; k++) { const q = new Int8Array(buf, o, N * 3), sc = H.scales[k]; for (let i = 0; i < N * 3; i++) D[k * N * 3 + i] = q[i] * sc; o += N * 3; }
-    model = { N, nSkin: H.nSkin, nTri: nt, K, neu, tri, D };
+    // the expressions (ICT's blendshapes, 0…1 each), if the file has them
+    const exprNames = H.expr || [], E = new Float32Array(exprNames.length * N * 3);
+    for (let e = 0; e < exprNames.length; e++) { const q = new Int8Array(buf, o, N * 3), sc = H.escales[e]; for (let i = 0; i < N * 3; i++) E[e * N * 3 + i] = q[i] * sc; o += N * 3; }
+    model = { N, nSkin: H.nSkin, nTri: nt, K, neu, tri, D, E, exprNames };
     return model;
   }).catch(e => { loading = null; throw e; });
   return loading;
@@ -179,7 +182,6 @@ function umeyama(A, B) {
 }
 const rotSmall = (w) => { const [x, y, z] = w, th = Math.hypot(x, y, z); if (th < 1e-12) return [[1, 0, 0], [0, 1, 0], [0, 0, 1]]; const k = [x / th, y / th, z / th], c = Math.cos(th), s = Math.sin(th), v = 1 - c; return [[c + k[0] * k[0] * v, k[0] * k[1] * v - k[2] * s, k[0] * k[2] * v + k[1] * s], [k[1] * k[0] * v + k[2] * s, c + k[1] * k[1] * v, k[1] * k[2] * v - k[0] * s], [k[2] * k[0] * v - k[1] * s, k[2] * k[1] * v + k[0] * s, c + k[2] * k[2] * v]]; };
 const mul3 = (A, B) => A.map(r => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
-/** A view's outline (V.outline: its dots in order) as unit normals in its photo, out from its dots' centre: Map(dot → [x, y]). */
 /* A photo's camera (a pose): s (px per cm at the model's origin), R, t — and f, the lens's focal length (px),
    when the photo says what it was (else it's seen from afar: no perspective). With the camera at f / s cm from
    the origin, a point nearer to it by ζ cm is enlarged by k = f / (f − s ζ): ≈ 1.25 at the nose tip from 45 cm. */
@@ -193,6 +195,7 @@ function projJ(pose, P) {
   const [, , k, Y] = projK(pose, P), R = pose.R, a = pose.f ? k * pose.s / pose.f : 0;
   return [0, 1].map(r => [0, 1, 2].map(j => k * (R[r][j] - a * Y[r] * R[2][j])));
 }
+/** A view's outline (V.outline: its dots in order) as unit normals in its photo, out from its dots' centre: Map(dot → [x, y]). */
 function outlineNormals(V) {
   const out = new Map(), L = V.outline && V.outline.filter(i => V.vis[i]);
   if (!L || L.length < 3) return out;
@@ -223,6 +226,19 @@ function fit(views, opt = {}) {
   const m = model, C = correspond(), K = Math.min(opt.K || m.K, m.K), N = m.N, lam = (opt.sigma || .4) ** 2, cmax = opt.cmax || 3;
   const c = new Float64Array(K), X = Float32Array.from(m.neu);
   const shape = () => { X.set(m.neu); for (let k = 0; k < K; k++) { const w = c[k]; if (!w) continue; const off = k * N * 3; for (let i = 0; i < N * 3; i++) X[i] += w * m.D[off + i]; } };
+  // Each photo's expression (ICT's blendshapes, 0…1): the face is one, but a photo's lids, mouth corners and
+  // lips are as it caught them — fitted with the identity alone, the head took the eyes' and the mouth's
+  // set into its own shape (eyes 2 mm too tall and sunk deeper, the corners of the mouth turned down).
+  // Held near none (lamE) and left like right (lamLR); the brows' aren't fitted (their dots aren't used). The
+  // ones that part or purse the lips only for a side photo, and not tied to the front's: on the front photo
+  // (its head is the one shown) they traded the lips' thickness for a gap between them, but a side photo's
+  // lips set otherwise — 4 mm higher on a real pair — had lifted the head's lips off the front photo's.
+  const LIPS = /^mouth(LowerDown|UpperUp|Pucker|Funnel)/;
+  const EX = opt.expr === false ? [] : m.exprNames.map((nm, j) => ({ nm, j })).filter(o => (opt.exprRe || /^(eye(Blink|Wide|Squint)|cheekSquint|mouth(Smile|Frown|Stretch|Press|Dimple|LowerDown|UpperUp|Pucker|Funnel))/).test(o.nm));
+  const nE = EX.length, lamE = opt.lamE ?? .05, lamLR = opt.lamLR ?? .2, lamS = opt.lamS ?? lamLR, nV = views.length;
+  const twin = EX.map(o => EX.findIndex(p => p.nm === o.nm.replace(/_L$/, '_R')) ).map((t, a) => /_L$/.test(EX[a].nm) ? t : -1);
+  const ex = views.map(() => new Float64Array(nE)), OFF = views.map(() => new Float32Array(3 * N));
+  const exprOff = q => { const o = OFF[q]; o.fill(0); for (let a = 0; a < nE; a++) { const w = ex[q][a]; if (!w) continue; const off = EX[a].j * N * 3; for (let i = 0; i < 3 * N; i++) o[i] += w * m.E[off + i]; } };
   // observations: per view, the dots used and their vertex (silhouette dots: chosen each round, and
   // only how far out the edge is counts — a dot on the outline says where the edge is, not which point;
   // in a side photo the same for the jaw line's dots, out from the outline its map draws)
@@ -233,12 +249,20 @@ function fit(views, opt = {}) {
       if (!(w > 0 && C[i] && C[i].v >= 0)) return;
       const o = { i, w, u: V.p[2 * i], v: V.p[2 * i + 1], vert: C[i].v, n: V.view === 'front' && C[i].cand ? C[i].nrm : null };
       if (sn && C[i].scand && sn.has(i)) { o.n = sn.get(i); o.sc = C[i].scand; }
+      // (opt.profileAlong: a side photo's profile dots firmly across the profile and only that much along it —
+      // tried on a real pair whose mouths sat 4 mm apart, it changed nothing: off by default)
+      else if (sn && sn.has(i) && pt.side === 0 && opt.profileAlong != null) { o.n = sn.get(i); o.al = opt.profileAlong; }
       list.push(o);
     });
     return list;
   });
   // a dot's residual and its rows (cm): two for a dot, one (along the outline's normal) for an edge dot
-  const rows = (o, eu, ev, Ju, Jv) => o.n ? [[eu * o.n[0] + ev * o.n[1], Ju.map((a, q) => a * o.n[0] + Jv[q] * o.n[1])]] : [[eu, Ju], [ev, Jv]];
+  const rows = (o, eu, ev, Ju, Jv) => {
+    if (!o.n) return [[eu, Ju], [ev, Jv]];
+    const [a, b] = o.n, out = [[eu * a + ev * b, Ju.map((x, q) => x * a + Jv[q] * b)]];
+    if (o.al) { const r = Math.sqrt(o.al); out.push([r * (-eu * b + ev * a), Ju.map((x, q) => r * (-x * b + Jv[q] * a))]); }
+    return out;
+  };
   // starting poses: the nominal view, scale and shift from the dots
   const poses = views.map((V, q) => {
     const R0 = VIEW_R[V.view] || VIEW_R.front, L = obs[q];
@@ -251,7 +275,8 @@ function fit(views, opt = {}) {
     return { s, R: R0, t: [mu - s * mx, mv - s * my], f: V.f || (V.dist ? V.dist * s : 0) };
   });
   const proj = (P, pose) => projK(pose, P);
-  const vert = i => [X[3 * i], X[3 * i + 1], X[3 * i + 2]];
+  // (a vertex as photo q caught it: the identity's shape and that photo's expression)
+  const vert = (q, i) => [X[3 * i] + OFF[q][3 * i], X[3 * i + 1] + OFF[q][3 * i + 1], X[3 * i + 2] + OFF[q][3 * i + 2]];
   // the silhouette dots: the candidate furthest out along the outline's normal (in this view's photo); in a
   // side photo, of the jaw line's turn within ≈ 1 cm of the dot along the line
   const march = q => {
@@ -261,7 +286,7 @@ function fit(views, opt = {}) {
       if (!cs || !o.n) continue;
       let best = o.vert, bv = -Infinity;
       for (const j of cs) {
-        const [u, v] = proj(vert(j), p);
+        const [u, v] = proj(vert(q, j), p);
         if (!front && Math.abs((o.v - v) * o.n[0] - (o.u - u) * o.n[1]) > p.s) continue;
         const s = u * o.n[0] + v * o.n[1];
         if (s > bv) { bv = s; best = j; }
@@ -272,6 +297,7 @@ function fit(views, opt = {}) {
   let rms = 0;
   for (let it = 0; it < (opt.iters || 10); it++) {
     shape();
+    for (let q = 0; q < nV; q++) exprOff(q);
     // 1 · each photo's pose (Gauss–Newton on scale, rotation, shift; held near its nominal view)
     views.forEach((V, q) => {
       march(q);
@@ -282,7 +308,7 @@ function fit(views, opt = {}) {
           // where faces differ most from the scans, and fitted with the modes' guess of them they tilted the
           // whole head a few degrees to make up for a chin they couldn't reach)
           // (with a lens, the enlargement k's own change left out of the steps: they're a little short, not wrong)
-          const P = vert(o.vert), [pu, pv, k, Y] = projK(p, P);
+          const P = vert(q, o.vert), [pu, pv, k, Y] = projK(p, P);
           const eu = o.u - pu, ev = o.v - pv, w = o.w * (V.view !== 'front' && (FM.POINTS[o.i].y > .3 || SIDE_EDGE.test(FM.POINTS[o.i].id)) ? .05 : 1) / (p.s * p.s);
           const Ju = [k * Y[0], 0, p.s * k * Y[2], -p.s * k * Y[1], 1, 0], Jv = [k * Y[1], -p.s * k * Y[2], 0, p.s * k * Y[0], 0, 1];
           for (const [e, Jr] of rows(o, eu, ev, Ju, Jv)) for (let a = 0; a < 6; a++) { b[a] += w * Jr[a] * e; for (let f = 0; f < 6; f++) A[a][f] += w * Jr[a] * Jr[f]; }
@@ -296,39 +322,79 @@ function fit(views, opt = {}) {
         if (V.dist && !V.f) p.f = V.dist * p.s;
       }
     });
-    // 2 · the identity, given the poses (linear least squares with the modes' prior)
-    const A = Array.from({ length: K }, () => new Float64Array(K)), b = new Float64Array(K), J = new Float64Array(2 * K);
+    // 2 · the identity and each photo's expression, given the poses (linear least squares with their priors;
+    // the unknowns: K identity weights, then nE expression weights per photo)
+    const n = K + nV * nE, A = Array.from({ length: n }, () => new Float64Array(n)), b = new Float64Array(n), J = new Float64Array(2 * n), nz = [];
     let se = 0, sw = 0;
     views.forEach((V, q) => {
-      const p = poses[q];
+      const p = poses[q], e0 = K + q * nE;
       for (const o of obs[q]) {
-        const P = vert(o.vert), [pu, pv] = proj(P, p), [gu, gv] = projJ(p, P);
+        const P = vert(q, o.vert), [pu, pv] = proj(P, p), [gu, gv] = projJ(p, P);
         let eu = (o.u - pu) / p.s, ev = (o.v - pv) / p.s;
+        nz.length = 0;
         for (let k = 0; k < K; k++) {
           const off = k * N * 3 + 3 * o.vert, dx = m.D[off], dy = m.D[off + 1], dz = m.D[off + 2];
-          J[2 * k] = gu[0] * dx + gu[1] * dy + gu[2] * dz; J[2 * k + 1] = gv[0] * dx + gv[1] * dy + gv[2] * dz;
+          J[2 * k] = gu[0] * dx + gu[1] * dy + gu[2] * dz; J[2 * k + 1] = gv[0] * dx + gv[1] * dy + gv[2] * dz; nz.push(k);
         }
-        if (o.n) {   // (an edge dot: along the normal only)
-          eu = eu * o.n[0] + ev * o.n[1]; ev = 0;
-          for (let k = 0; k < K; k++) { J[2 * k] = J[2 * k] * o.n[0] + J[2 * k + 1] * o.n[1]; J[2 * k + 1] = 0; }
+        for (let a = 0; a < nE; a++) {
+          const off = EX[a].j * N * 3 + 3 * o.vert, dx = m.E[off], dy = m.E[off + 1], dz = m.E[off + 2];
+          if (!dx && !dy && !dz) continue;
+          const k = e0 + a; J[2 * k] = gu[0] * dx + gu[1] * dy + gu[2] * dz; J[2 * k + 1] = gv[0] * dx + gv[1] * dy + gv[2] * dz; nz.push(k);
+        }
+        if (o.n) {   // (an edge dot: along the normal only — a profile dot: and lightly along the line, o.al)
+          const [na, nb] = o.n, r = Math.sqrt(o.al || 0);
+          [eu, ev] = [eu * na + ev * nb, r * (-eu * nb + ev * na)];
+          for (const k of nz) { const ju = J[2 * k], jv = J[2 * k + 1]; J[2 * k] = ju * na + jv * nb; J[2 * k + 1] = r * (-ju * nb + jv * na); }
         }
         se += o.w * (eu * eu + ev * ev); sw += o.w;
-        for (let k = 0; k < K; k++) {
+        for (const k of nz) {
           b[k] += o.w * (J[2 * k] * eu + J[2 * k + 1] * ev);
-          for (let l = 0; l <= k; l++) A[k][l] += o.w * (J[2 * k] * J[2 * l] + J[2 * k + 1] * J[2 * l + 1]);
+          for (const l of nz) if (l <= k) A[k][l] += o.w * (J[2 * k] * J[2 * l] + J[2 * k + 1] * J[2 * l + 1]);
         }
       }
     });
     rms = Math.sqrt(se / Math.max(1e-9, sw));
-    // Gauss–Newton step on c with the prior Σ c² (in cm²: the dots' scatter λ)
-    const M = Array.from({ length: K }, (_, k) => Array.from({ length: K }, (_, l) => (l <= k ? A[k][l] : A[l][k]) + (k === l ? lam : 0)));
-    const rhs = Array.from(b, (v, k) => v - lam * c[k]);
-    const dc = solve(M, rhs);
-    for (let k = 0; k < K; k++) c[k] = Math.max(-cmax, Math.min(cmax, c[k] + dc[k]));
+    // Gauss–Newton step with the priors: Σ c² (in cm²: the dots' scatter λ); each expression λE e², its left
+    // and right alike λLR (eL − eR)²; and a side photo's like the front's (λLR too: it shows the face a moment apart)
+    const M = Array.from({ length: n }, (_, k) => Array.from({ length: n }, (_, l) => l <= k ? A[k][l] : A[l][k]));
+    const x = [...c, ...ex.flatMap(e => [...e])], rhs = Array.from(b);
+    const tie = (i, j, w) => { M[i][i] += w; M[j][j] += w; M[i][j] -= w; M[j][i] -= w; const d = x[i] - x[j]; rhs[i] -= w * d; rhs[j] += w * d; };
+    for (let k = 0; k < K; k++) { M[k][k] += lam; rhs[k] -= lam * c[k]; }
+    for (let q = 0; q < nV; q++) for (let a = 0; a < nE; a++) {
+      const k = K + q * nE + a, lips = LIPS.test(EX[a].nm), l = !q && lips ? 1e4 : lamE;
+      M[k][k] += l; rhs[k] -= l * x[k];
+      if (twin[a] >= 0) tie(k, K + q * nE + twin[a], lamLR);
+      if (q && !lips) tie(k, K + a, lamS);
+    }
+    // (an expression's weight stays within 0…1: one the step would take past a bound is held there and the
+    // rest solved again — clamped after the step instead, the others' share of it was lost: a blink that
+    // made up for a squint taken past 1 stayed, and the lids came out further off than without expressions)
+    const held = new Map();
+    let dx = null;
+    for (let round = 0; round < 8; round++) {
+      const free = [];
+      for (let k = 0; k < n; k++) if (!held.has(k)) free.push(k);
+      const r2 = free.map(k => { let v = rhs[k]; for (const [h, d] of held) v -= M[k][h] * d; return v; });
+      const sol = solve(free.map(k => free.map(l => M[k][l])), r2);
+      dx = new Float64Array(n);
+      for (const [h, d] of held) dx[h] = d;
+      free.forEach((k, i) => { dx[k] = sol[i]; });
+      let more = false;
+      for (const k of free) if (k >= K) { const v = x[k] + dx[k]; if (v < -1e-6 || v > 1 + 1e-6) { held.set(k, (v < 0 ? 0 : 1) - x[k]); more = true; } }
+      if (!more) break;
+    }
+    for (let k = 0; k < K; k++) c[k] = Math.max(-cmax, Math.min(cmax, c[k] + dx[k]));
+    for (let q = 0; q < nV; q++) for (let a = 0; a < nE; a++) ex[q][a] = Math.max(0, Math.min(1, ex[q][a] + dx[K + q * nE + a]));
   }
   shape();
+  for (let q = 0; q < nV; q++) exprOff(q);
   views.forEach((V, q) => march(q));
-  return { c: Array.from(c), poses, X: Float32Array.from(X), rms, pairs: obs.map(L => L.map(o => ({ i: o.i, vert: o.vert, u: o.u, v: o.v, w: o.w, n: o.n, sc: !!o.sc }))) };
+  // X: the head as the front photo caught it (its expression too); exOff[q]: how photo q's differs from that
+  const Xf = Float32Array.from(X, (v, i) => v + OFF[0][i]);
+  const exOff = views.map((V, q) => q && nE ? Float32Array.from(OFF[q], (v, i) => v - OFF[0][i]) : null);
+  const expr = ex.map(e => Object.fromEntries(EX.map((o, a) => [o.nm, +e[a].toFixed(3)]).filter(([, v]) => v > .01)));
+  // (a profile dot hands on no normal: the bend holds it across and along the profile itself)
+  return { c: Array.from(c), poses, X: Xf, exOff, expr, rms, pairs: obs.map(L => L.map(o => ({ i: o.i, vert: o.vert, u: o.u, v: o.v, w: o.w, n: o.al ? null : o.n, sc: !!o.sc }))) };
 }
 
 /* ---- what the modes can't reach ----
@@ -474,7 +540,7 @@ function fineFit(res, views, X0, dX, rows, opt) {
 // photo is laid onto the head through its own 2D bend anyway); not the ears (they flared out). Your depths in full.
 // Not the side photo's dots off the midline (the outer eye corner, the cheekbone: how deep they lie is a guess in
 // profile — they ridged the brow, flattened the cheeks into planes and bulged them out sideways).
-let ROW_KINDS = ['fp', 'fe', 'sp', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1 };
+let ROW_KINDS = ['fp', 'fm', 'fe', 'sp', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1, fm: .1 };
 /** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
 function deform(res, views, opt = {}) {
   // (the bend's scales: 2.5 cm half as much as 5 cm, and held back more — with the 2.5 cm one leading, the side
@@ -531,17 +597,19 @@ function deform(res, views, opt = {}) {
     }
     return out;
   });
-  const dX = new Float32Array(3 * N), cur = v => [X0[3 * v] + dX[3 * v], X0[3 * v + 1] + dX[3 * v + 1], X0[3 * v + 2] + dX[3 * v + 2]];
+  // (a vertex as photo q caught it — its expression, res.exOff[q], on the head — before the bend, and as bent so far)
+  const XO = res.exOff || [], x0q = (v, q) => { const o = XO[q]; return o ? [X0[3 * v] + o[3 * v], X0[3 * v + 1] + o[3 * v + 1], X0[3 * v + 2] + o[3 * v + 2]] : X0.subarray(3 * v, 3 * v + 3); };
+  const dX = new Float32Array(3 * N), cur = (v, q) => { const p = x0q(v, q); return [p[0] + dX[3 * v], p[1] + dX[3 * v + 1], p[2] + dX[3 * v + 2]]; };
   const proj = (p, pose) => projK(pose, p);
   // (a row's direction g for (a, b) across the photo's (u, v): how a vertex's move shows there)
   const dir = (pose, v, a, b) => { const [gu, gv] = projJ(pose, X0.subarray(3 * v, 3 * v + 3)); return [0, 1, 2].map(k => a * gu[k] + b * gv[k]); };
   // the head's own outline in a view (as bent so far): the skin seen on a ≈ 1 mm grid, and the vertices on its
   // edge — a profile sample is matched to the nearest of them (not the one furthest out along its normal:
   // at the creases — nasion, under the nose, between the lips — that one could be the nose's or a lip's)
-  const outlineVerts = pose => {
+  const outlineVerts = (pose, q) => {
     const uv = new Float32Array(2 * nS);
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (let v = 0; v < nS; v++) { const [u, w] = proj(cur(v), pose); uv[2 * v] = u; uv[2 * v + 1] = w; x0 = Math.min(x0, u); y0 = Math.min(y0, w); x1 = Math.max(x1, u); y1 = Math.max(y1, w); }
+    for (let v = 0; v < nS; v++) { const [u, w] = proj(cur(v, q), pose); uv[2 * v] = u; uv[2 * v + 1] = w; x0 = Math.min(x0, u); y0 = Math.min(y0, w); x1 = Math.max(x1, u); y1 = Math.max(y1, w); }
     const cell = .1 * pose.s, gw = Math.ceil((x1 - x0) / cell) + 3, gh = Math.ceil((y1 - y0) / cell) + 3, cov = new Uint8Array(gw * gh);
     x0 -= cell; y0 -= cell;
     for (let t = 0; t < m.nTri; t++) {
@@ -581,9 +649,9 @@ function deform(res, views, opt = {}) {
         const cs = o.n ? (front ? C[o.i].cand : C[o.i].scand) : null;
         if (cs) {
           let bv = -Infinity;
-          for (const j of cs) { const [u, v] = proj(cur(j), pose); if (!front && Math.abs((o.v - v) * o.n[0] - (o.u - u) * o.n[1]) > s) continue; const sc = u * o.n[0] + v * o.n[1]; if (sc > bv) { bv = sc; vert = j; } }
+          for (const j of cs) { const [u, v] = proj(cur(j, q), pose); if (!front && Math.abs((o.v - v) * o.n[0] - (o.u - u) * o.n[1]) > s) continue; const sc = u * o.n[0] + v * o.n[1]; if (sc > bv) { bv = sc; vert = j; } }
         }
-        const [u, v] = proj(X0.subarray(3 * vert, 3 * vert + 3), pose), eu = (o.u - u) / s, ev = (o.v - v) / s;
+        const [u, v] = proj(x0q(vert, q), pose), eu = (o.u - u) / s, ev = (o.v - v) / s;
         if (o.n) rows.push({ v: vert, g: dir(pose, vert, o.n[0], o.n[1]), e: eu * o.n[0] + ev * o.n[1], w: o.w, i: o.i, q });
         else if (!front && onChain[q].has(o.i)) {   // (a landmark on the side outline: firmly across it, lightly along)
           const L = chains[q].find(ch => ch.idx.includes(o.i)).idx, k = L.indexOf(o.i), a = L[Math.max(0, k - 1)], b = L[Math.min(L.length - 1, k + 1)];
@@ -598,7 +666,7 @@ function deform(res, views, opt = {}) {
       // the outline's samples: the head's edge there — on the profile, the nearest vertex of the head's own
       // outline (across the line counts double: ahead of the sample, not beside it); on the jaw line, of its
       // turn the one furthest out near the line across it
-      const OV = samples[q].some(S => S.prof) ? outlineVerts(pose) : null;
+      const OV = samples[q].some(S => S.prof) ? outlineVerts(pose, q) : null;
       for (const S of samples[q]) {
         let best = -1, bv = -Infinity;
         if (S.prof) {
@@ -610,7 +678,7 @@ function deform(res, views, opt = {}) {
           }
         } else for (let j = 0; j < nS; j++) {
           if (!S.cand(j)) continue;
-          const [u, v] = proj(cur(j), pose), du = u - S.x, dv = v - S.y, along = du * S.n[0] + dv * S.n[1];
+          const [u, v] = proj(cur(j, q), pose), du = u - S.x, dv = v - S.y, along = du * S.n[0] + dv * S.n[1];
           if (Math.abs(dv * S.n[0] - du * S.n[1]) > .25 * s || Math.abs(along) > 2.5 * s) continue;
           if (along > bv) { bv = along; best = j; }
         }
@@ -621,7 +689,7 @@ function deform(res, views, opt = {}) {
           best = S.v;
         }
         if (best < 0) continue;
-        const [u, v] = proj(X0.subarray(3 * best, 3 * best + 3), pose);
+        const [u, v] = proj(x0q(best, q), pose);
         rows.push({ v: best, g: dir(pose, best, S.n[0], S.n[1]), e: ((S.x - u) * S.n[0] + (S.y - v) * S.n[1]) / s, w: S.w, q, at: S });
       }
     });
@@ -638,7 +706,8 @@ function deform(res, views, opt = {}) {
     {
       const edge = new Set(res.pairs.flatMap((L, q) => L.filter(o => o.n).map(o => `${q}:${o.i}`)));
       // (a side photo's dot off the midline that isn't an edge: 'sl')
-      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && P[r.i].side !== 0 ? 'l' : 'p');
+      // (a front photo's dot of the lips: 'fm')
+      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && P[r.i].side !== 0 ? 'l' : !r.q && P[r.i].group === 'lips' ? 'm' : 'p');
       rows = rows.filter(r => { const k = kind(r); if (!only.includes(k)) return false; if (catW[k] != null) r.w *= catW[k]; r.w0 = r.w; return true; });
     }
     // (robust: a row the last bend still missed by more than 3 mm — a dot the other photo disagrees with — counts less)
@@ -706,9 +775,12 @@ function deform(res, views, opt = {}) {
 function project(res, q = 0, earDot = 'traL', opt = {}) {
   // (opt.ortho: the head's own shape, seen from afar at the face's scale — with a lens, where it is on the photo
   // is enlarged by its nearness to the camera; its shape isn't)
+  // (photo q's own expression on the head, where its colours are looked up)
   const m = model, p = opt.ortho ? { ...res.poses[q], s: faceScale(res, q), f: 0 } : res.poses[q], X = res.X, uv = new Float32Array(m.N * 2), z = new Float32Array(m.N);
+  const xo = res.exOff && res.exOff[q], at = new Float32Array(3);
   for (let i = 0; i < m.N; i++) {
-    const [u, v, , Y] = projK(p, X.subarray(3 * i, 3 * i + 3));
+    for (let k = 0; k < 3; k++) at[k] = X[3 * i + k] + (xo ? xo[3 * i + k] : 0);
+    const [u, v, , Y] = projK(p, at);
     uv[2 * i] = u; uv[2 * i + 1] = v;
     z[i] = -Y[2];   // toward the camera
   }
@@ -861,5 +933,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '50' };
+window.CraniHead = { load, fit, deform, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '51' };
 })();
