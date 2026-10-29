@@ -790,13 +790,17 @@ const FSS = `#version 300 es
 precision highp float;
 in vec3 vN; in vec2 vUv; in vec2 vOv; in vec2 vUv2; in vec3 vW; in vec3 vCol; in float vFs;
 uniform sampler2D uTex; uniform sampler2D uOv; uniform sampler2D uTex2; uniform vec3 uGain2; uniform float uFront;
-uniform int uMode; uniform float uOvA; uniform vec3 uLight; uniform vec4 uColor;
+uniform int uMode; uniform float uOvA; uniform vec3 uLight; uniform vec4 uColor; uniform float uBack;
 out vec4 o;
 void main() {
   if (uMode == 3) { o = uColor; return; }
   // (the normals point out of the surface: a fragment whose smoothed normal leans just past edge-on is
   // lit as edge-on, not as its mirror image — that flip drew bright rims along the ears)
   vec3 n = normalize(vN);
+  // (a surface seen from behind and facing away — the head's skin from inside, through the mouth's slit — is
+  // a cavity: dark. Not at the head's own edge, where a sliver of its far side seen edge-on showed as dark
+  // lines along the outline; uBack: which way round the mesh's triangles go, 0 for none)
+  if (uBack != 0.0 && (gl_FrontFacing ? uBack < 0.0 : uBack > 0.0) && n.z < -0.2) { o = vec4(0.09, 0.055, 0.045, 1.0); return; }
   float l = max(dot(n, normalize(uLight)), 0.0);
   float wf = vW.x + (1.0 - vW.x) * vFs * uFront, k = (1.0 - wf) / max(1e-4, 1.0 - vW.x);
   vec3 ph = texture(uTex, vUv).rgb * wf + (texture(uTex2, vUv2).rgb * uGain2 * vW.y + vCol * vW.z) * k;
@@ -811,7 +815,7 @@ function createStage(canvas) {
   const pr = gl.createProgram();
   gl.attachShader(pr, sh(gl.VERTEX_SHADER, VSS)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FSS)); gl.linkProgram(pr);
   const U = {};
-  ['uM', 'uR', 'uTex', 'uOv', 'uTex2', 'uGain2', 'uFront', 'uMode', 'uOvA', 'uLight', 'uColor'].forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
+  ['uM', 'uR', 'uTex', 'uOv', 'uTex2', 'uGain2', 'uFront', 'uMode', 'uOvA', 'uLight', 'uColor', 'uBack'].forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
   const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ibo = gl.createBuffer(), lbo = gl.createBuffer();
   const tex = gl.createTexture(), ovTex = gl.createTexture(), tex2 = gl.createTexture();
   const texInit = (t, src) => {
@@ -825,7 +829,7 @@ function createStage(canvas) {
   };
   texInit(ovTex, new ImageData(1, 1));
   texInit(tex2, new ImageData(1, 1));
-  let nTri = 0, nLine = 0, hasOv = false;
+  let nTri = 0, nLine = 0, hasOv = false, meshBack = 0;
   const loc = n => gl.getAttribLocation(pr, n);
   return {
     maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
@@ -854,7 +858,7 @@ function createStage(canvas) {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, M.tri, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lbo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, M.lines, gl.STATIC_DRAW);
       gl.bindVertexArray(null);
-      nTri = M.tri.length; nLine = M.lines.length;
+      nTri = M.tri.length; nLine = M.lines.length; meshBack = M.back || 0;
     },
     /** A view drawn over the face (contours, relief…), covering the surface grid; null for none. */
     setOverlay(src) { hasOv = !!src; if (src) texInit(ovTex, src); },
@@ -879,6 +883,7 @@ function createStage(canvas) {
       gl.uniform1f(U.uFront, f * f * (3 - 2 * f));
       gl.uniform1f(U.uOvA, hasOv ? p.ovA : 0);
       gl.uniform1i(U.uMode, p.mode === 'photo' ? 0 : 1);
+      gl.uniform1f(U.uBack, meshBack);
       gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
       gl.drawElements(gl.TRIANGLES, nTri, gl.UNSIGNED_INT, 0);
@@ -894,5 +899,5 @@ function createStage(canvas) {
   };
 }
 
-window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '46' };
+window.CraniSurface = { buildSurface: build, compose, analyze, topography, contours, gradient, blur, shade, lumGradient, levelSweep, pca, createStage, LABELS, build: '47' };
 })();
