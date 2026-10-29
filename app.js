@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '52';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '53';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1174,8 +1174,23 @@ async function ensureHead() {
   const zEar = ev >= 0 ? -(R2[0] * X[3 * ev] + R2[1] * X[3 * ev + 1] + R2[2] * X[3 * ev + 2]) : 0, pins = [];
   if (m.zo) FM.POINTS.forEach((_, i) => { if (Number.isFinite(m.zo[i]) && m.vis[i] && C[i] && C[i].v >= 0) pins.push({ i, v: C[i].v, depth: m.zo[i] / kz + zEar }); });
   HM.deform(res, views, { pins });
-  // … and moved in the front photo's plane through its dots: from the front, the head is the photo
+  // … each photo's camera fitted again to the head as bent, then the head moved in the front photo's plane
+  // through its dots: from the front, the head is the photo
+  // (refitPoses: on a real pair it turned the front photo's camera ½° and the side photo's 3° — the side's yaw is
+  // loosely held by its dots — and left the chin where it was: off)
+  if (cfg.refitPoses === true) HM.refitPoses(res, views);
   if (cfg.alignFront !== false) HM.alignFront(res);
+  // (cfg.shading: then its depth set by the front photo's light and shade, where the photo shows the face's skin.
+  // On a test head — one even skin colour, one known light — it came out ≈ 1 mm further off almost everywhere
+  // (the chin's front −0.7 → −2.0 mm): the light, the skin's brightness and the shape trade for each other more
+  // than the photo can tell apart. Off until it does better there.)
+  if (cfg.shading === true && HM.shading) {
+    const lf = await photoLabelsReady(S.img, S.iw, S.ih);
+    if (S.map !== m || headKey() !== key) return null;
+    views[0].px = photoPixels(S.img, S.iw, S.ih);
+    views[0].skin = lf ? (x, y) => lf.d[clamp(Math.round(y * lf.sc), 0, lf.h - 1) * lf.w + clamp(Math.round(x * lf.sc), 0, lf.w - 1)] === 3 ? 1 : 0 : null;
+    HM.shading(res, views);
+  }
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
   // against its pose's scale, and only its depth for its width in the photo is the head's.
