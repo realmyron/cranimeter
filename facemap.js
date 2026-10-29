@@ -681,6 +681,6 @@ function spline(pts, closed, steps = 8) {
 window.CraniMap = {
   POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX, MID_KEY, MID_BY_KEY,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '53',
+  mls, tpsFit, tpsEval, spline, build: '54',
 };
 })();
