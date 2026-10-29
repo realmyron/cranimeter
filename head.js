@@ -809,6 +809,78 @@ function project(res, q = 0, earDot = 'traL', opt = {}) {
   }
   return { uv, z, s: p.s };
 }
+/**
+ * The head moved in the front photo's plane through that photo's dots (changes res.X): the face's outline, the
+ * eyes, nose, lips and ears land where the face map has them, so the head seen from the front is the photo —
+ * its depth stays the fit's and the bend's. (The 3D bend counts the front photo's dots lightly — in full they
+ * sheared the face in depth — and the head's own layout showed through: the photo laid on it was pulled to
+ * the model's lids and mouth corners, a face too slim. A shift across the photo can't put lumps in depth.)
+ * Two passes: a smooth one through all of them (the face's width and outline — through every dot at once, the
+ * skin between moved unevenly and the clay showed lumps along the jaw and creases from the mouth's corners),
+ * faded over the head's whole depth (1 cm behind the ears' plane to its back) and away from the dots (3–9 cm);
+ * then a close one through the eyes', nose's and lips' own dots, fading within 1–2.5 cm of them. Each eyeball
+ * moves whole, as its lids around it do. Returns the shift's rms over the face (mm).
+ */
+function alignFront(res, opt = {}) {
+  const m = model, C = correspond(), N = m.N, nS = m.nSkin, p = res.poses[0], R = p.R, X = res.X, L = res.pairs && res.pairs[0];
+  if (!L) return 0;
+  const at = v => X.subarray(3 * v, 3 * v + 3), span = Math.max(...L.map(o => o.u)) - Math.min(...L.map(o => o.u)) || 1;
+  const ev = C[FM.INDEX.traL] ? C[FM.INDEX.traL].v : -1, zEar = ev >= 0 ? -(R[2][0] * X[3 * ev] + R[2][1] * X[3 * ev + 1] + R[2][2] * X[3 * ev + 2]) : 0;
+  const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  const Dall = new Float32Array(3 * N);
+  const pass = (fine, reg, fd) => {
+    const ctl = [], seen = new Set();
+    for (const o of L) {
+      const pt = FM.POINTS[o.i], edge = !!(C[o.i].cand && o.n);
+      if (/^(pu|irI|irO)$/.test(pt.id.replace(/[LR]$/, ''))) continue;
+      if (fine ? edge || pt.mid || !/^(eyes|nose|lips)$/.test(pt.group) : !edge && (pt.mid || !/^(eyes|nose|lips|ears)$/.test(pt.group))) continue;
+      let v = o.vert;
+      // (an edge dot: the head's edge there as it is now — the vertex furthest out along the outline's normal)
+      if (edge) { let bv = -Infinity; for (const j of C[o.i].cand) { const [u, w] = projK(p, at(j)), sc = u * o.n[0] + w * o.n[1]; if (sc > bv) { bv = sc; v = j; } } }
+      if (seen.has(v)) continue;
+      seen.add(v);
+      const [u, w] = projK(p, at(v));
+      ctl.push(u, w, o.u, o.v);
+    }
+    if (ctl.length < 24) return;
+    // (opt.keepDown, in the smooth pass: skin facing down — under the chin and the jaw — keeps its height. The front
+    // photo sees it edge on, and moved up or down with the face above it the chin's underside came out 2 mm further
+    // off on a test head; but kept, even spread over the skin round it, the real jaw came out with a boxy shelf
+    // along it: off)
+    const T = FM.tpsFit(ctl, ctl.length / 4, span, reg), D = new Float32Array(3 * N), nrm = normals(X), keepH = new Float32Array(nS);
+    if (!fine && opt.keepDown === true) {
+      for (let v = 0; v < nS; v++) keepH[v] = ss(.3, .8, R[1][0] * nrm[3 * v] + R[1][1] * nrm[3 * v + 1] + R[1][2] * nrm[3 * v + 2]);
+      const Tp = topology(), tmp = new Float32Array(nS);
+      for (let it = 0; it < 25; it++) {
+        for (let v = 0; v < nS; v++) { const a = Tp.off[v], b = Tp.off[v + 1]; let s = 0; for (let q = a; q < b; q++) s += keepH[Tp.nb[q]]; tmp[v] = b > a ? .5 * keepH[v] + .5 * s / (b - a) : keepH[v]; }
+        keepH.set(tmp);
+      }
+    }
+    for (let v = 0; v < N; v++) {
+      const [u, w, k, Y] = projK(p, at(v));
+      let dc = Infinity;
+      for (let q = 0; q < ctl.length; q += 4) dc = Math.min(dc, (ctl[q] - u) ** 2 + (ctl[q + 1] - w) ** 2);
+      const f = (fine ? 1 : ss(fd[0], fd[1], -Y[2] - zEar)) * (1 - ss(fd[2] * p.s, fd[3] * p.s, Math.sqrt(dc)));
+      if (!f) continue;
+      const [u2, w2] = FM.tpsEval(T, u, w), du = f * (u2 - u) / (p.s * k), dw = f * (1 - (v < nS ? keepH[v] : 0)) * (w2 - w) / (p.s * k);
+      for (let j = 0; j < 3; j++) D[3 * v + j] = du * R[0][j] + dw * R[1][j];
+    }
+    // (the eyeballs whole: each its vertices' mean shift)
+    for (const sg of [-1, 1]) {
+      const s = [0, 0, 0];
+      let n = 0;
+      for (let v = nS; v < N; v++) if (Math.sign(X[3 * v]) === sg) { for (let j = 0; j < 3; j++) s[j] += D[3 * v + j]; n++; }
+      if (n) for (let v = nS; v < N; v++) if (Math.sign(X[3 * v]) === sg) for (let j = 0; j < 3; j++) D[3 * v + j] = s[j] / n;
+    }
+    for (let i = 0; i < 3 * N; i++) { X[i] += D[i]; Dall[i] += D[i]; }
+  };
+  pass(false, opt.reg ?? .1, opt.fade || [-11, -1, 3, 9]);
+  if (opt.fine !== false) pass(true, opt.fineReg ?? 2e-3, [0, 0, 1, 2.5]);
+  let se = 0, sn = 0;
+  for (let v = 0; v < nS; v++) { se += Dall[3 * v] ** 2 + Dall[3 * v + 1] ** 2 + Dall[3 * v + 2] ** 2; sn++; }
+  res.alignD = Dall;
+  return (res.alignMm = 10 * Math.sqrt(se / (sn || 1)));
+}
 /** A photo's scale (px per cm) at the face's own depth: the pose's, enlarged as its lens enlarges the dots it fitted. */
 function faceScale(res, q = 0) {
   const p = res.poses[q];
@@ -933,5 +1005,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '51' };
+window.CraniHead = { load, fit, deform, alignFront, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '52' };
 })();
