@@ -11,7 +11,7 @@
      ========================================================================== */
 
   :root {
-    --cm-build: 51;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+    --cm-build: 52;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
     --font: 'Jost', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --mono: 'Jost', ui-sans-serif, system-ui, sans-serif;
     --c1: #7CCBF5;
