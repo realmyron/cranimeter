@@ -456,11 +456,16 @@ function fineFit(res, views, X0, dX, rows, opt) {
 // creased the cheeks); its landmarks very lightly (in full they sheared the face — a flat, wide mid-face, pinched
 // eyes, lumpy cheeks: the photo's eyes and mouth differ from the scans' by expression, lens and pose, and the
 // photo is laid onto the head through its own 2D bend anyway); not the ears (they flared out). Your depths in full.
-const ROW_KINDS = ['fp', 'fe', 'sp', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1 };
+// Not the side photo's dots off the midline (the outer eye corner, the cheekbone: how deep they lie is a guess in
+// profile — they ridged the brow, flattened the cheeks into planes and bulged them out sideways).
+let ROW_KINDS = ['fp', 'fe', 'sp', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1 };
 /** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
 function deform(res, views, opt = {}) {
-  const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, T = C.T, X0 = Float32Array.from(res.X), lam = opt.lambda ?? .02, P = FM.POINTS;
-  KW = opt.kw || [0, 1, .5];
+  // (the bend's scales: 2.5 cm half as much as 5 cm, and held back more — with the 2.5 cm one leading, the side
+  // photo's forehead line, a few mm off the modes' just above the brow, left a trough there and the brow a ledge;
+  // the profile still fits to ½ mm, the jaw line to 1)
+  const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, T = C.T, X0 = Float32Array.from(res.X), lam = opt.lambda ?? .05, P = FM.POINTS;
+  KW = opt.kw || [0, .5, 1];
   // each view's outline chains: the side photo's profile (glabella → neck–chin angle) and jaw line
   const chains = views.map(V => {
     if (V.view === 'front' || !V.outline) return [];
@@ -601,7 +606,8 @@ function deform(res, views, opt = {}) {
     const only = opt.only || ROW_KINDS, catW = opt.catW || ROW_W;
     {
       const edge = new Set(res.pairs.flatMap((L, q) => L.filter(o => o.n).map(o => `${q}:${o.i}`)));
-      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : 'p');
+      // (a side photo's dot off the midline that isn't an edge: 'sl')
+      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && P[r.i].side !== 0 ? 'l' : 'p');
       rows = rows.filter(r => { const k = kind(r); if (!only.includes(k)) return false; if (catW[k] != null) r.w *= catW[k]; r.w0 = r.w; return true; });
     }
     // (robust: a row the last bend still missed by more than 3 mm — a dot the other photo disagrees with — counts less)
@@ -815,5 +821,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '48' };
+window.CraniHead = { load, fit, deform, project, raster, correspond, topology, normals, get model() { return model; }, build: '49' };
 })();
