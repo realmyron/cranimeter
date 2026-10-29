@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '51';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '52';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1174,6 +1174,8 @@ async function ensureHead() {
   const zEar = ev >= 0 ? -(R2[0] * X[3 * ev] + R2[1] * X[3 * ev + 1] + R2[2] * X[3 * ev + 2]) : 0, pins = [];
   if (m.zo) FM.POINTS.forEach((_, i) => { if (Number.isFinite(m.zo[i]) && m.vis[i] && C[i] && C[i].v >= 0) pins.push({ i, v: C[i].v, depth: m.zo[i] / kz + zEar }); });
   HM.deform(res, views, { pins });
+  // … and moved in the front photo's plane through its dots: from the front, the head is the photo
+  if (cfg.alignFront !== false) HM.alignFront(res);
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
   // against its pose's scale, and only its depth for its width in the photo is the head's.
@@ -3057,9 +3059,23 @@ const mainColor = m => m.kind === 'angle' || m.kind === 'tilt' ? cfg.c3 : m.kind
 
 function mmPerPx() {
   const c = S.meas.get(S.calibId);
-  if (!c) return 0;
+  if (!c) return irisMmPerPx();
   const L = dist(c.pts[0], c.pts[1]);
   return L > 0 ? S.calibMM / L : 0;
+}
+/* Without a known length, the irises give one: about 11.7 mm across in adults (±0.5 mm — under 5 %), whatever
+   the face. Read off the front map's iris edges where they were measured (Auto-place's iris rings, or yours);
+   on the side photo, carried over through the fitted head — both photos are fitted to the same head in cm. */
+const IRIS_MM = 11.7;
+const irisPx = m => {
+  if (!m || isProfile(m)) return 0;
+  const d = ['L', 'R'].map(s => { const a = FM.INDEX['irI' + s], b = FM.INDEX['irO' + s]; return m.vis[a] && m.vis[b] && isUser(m, a) && isUser(m, b) ? Math.hypot(m.p[2 * a] - m.p[2 * b], m.p[2 * a + 1] - m.p[2 * b + 1]) : 0; }).filter(x => x > 0);
+  return d.length ? d.reduce((s, x) => s + x, 0) / d.length : 0;
+};
+function irisMmPerPx() {
+  if (curSlot === 'front') { const d = irisPx(S.map); return d ? IRIS_MM / d : 0; }
+  const f = slots.front, d = f && irisPx(f.map), h = f && f.map && f.map.head;
+  return d && h && h.side && h.res.poses[1] ? IRIS_MM / d * h.res.poses[0].s / h.res.poses[1].s : 0;
 }
 function refLen(m) {
   const ref = S.meas.get(S.refId);
@@ -3876,6 +3892,21 @@ function drawMap(ctx) {
         ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 3; ctx.stroke();
         ctx.strokeStyle = 'rgba(236,238,235,.9)'; ctx.lineWidth = 1.3; ctx.stroke();
       }
+      ctx.setLineDash([]);
+    }
+  }
+  // facing the front: the front photo's own outline (dashed) — where the photo has the face's edge, at the
+  // depth of its dots on the head: from the front it should lie on the head's edge
+  if (stageOn() && Math.abs(Math.sin(S.rot3.yaw)) < .35 && !isProfile(m)) {
+    const b = m.contours.find(c => c.boundary);
+    if (b && b.idx.every(i => m.vis[i])) {
+      const F = stageFrame(), n = b.idx.length, zs = b.idx.map(i => dotPos3(i).z), pts = FM.spline(b.idx.map(i => ({ x: m.p[2 * i], y: m.p[2 * i + 1] })), b.closed, 8);
+      const zAt = k => { const s = Math.floor(k / 8), t = (k % 8) / 8, a = zs[s % n], c = zs[(s + 1) % n]; return (Number.isFinite(a) ? a : 0) * (1 - t) + (Number.isFinite(c) ? c : 0) * t; };
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath(); pts.forEach((q, k) => { const p = proj3(F, q.x, q.y, zAt(k)); k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); });
+      if (b.closed) ctx.closePath();
+      ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 3; ctx.stroke();
+      ctx.strokeStyle = 'rgba(236,238,235,.9)'; ctx.lineWidth = 1.3; ctx.stroke();
       ctx.setLineDash([]);
     }
   }
@@ -5281,10 +5312,22 @@ async function autoPlace() {
       ids.forEach((i, k) => pos.set(i, alongAt(poly, k <= kg ? t[k] / t[kg] * fg : fg + (t[k] - t[kg]) / ((1 - t[kg]) || 1) * (1 - fg))));
     }
   }
-  // the pupils at the iris centres
+  // the pupils at the iris centres, and the irises' edges across from the finder's iris rings (468 and 473, each
+  // with four points round it): the two furthest apart across, the inner one nearer the eye's inner corner
   pos.set(ix('puL'), P(468)); pos.set(ix('puR'), P(473));
+  const iris = [];
+  for (const [s, c] of [['L', 468], ['R', 473]]) {
+    const ring = [1, 2, 3, 4].map(k => L[c + k] && P(c + k)).filter(Boolean), en = pos.get(ix('en' + s));
+    if (ring.length < 4 || !en) continue;
+    ring.sort((a, b) => a.x - b.x);
+    // (each edge where the photo shows it, near the finder's)
+    const cc = P(c), [a, b] = [irisEdge(cc, ring[0]), irisEdge(cc, ring[3])], aIn = Math.hypot(a.x - en.x, a.y - en.y) < Math.hypot(b.x - en.x, b.y - en.y);
+    pos.set(ix('irI' + s), aIn ? a : b); pos.set(ix('irO' + s), aIn ? b : a); iris.push(ix('irI' + s), ix('irO' + s));
+  }
   const pairs = [...pos].map(([i, b]) => ({ i, b }));
   fitMap('front', pairs);
+  // (measured: they set the photo's scale — see irisMmPerPx)
+  for (const i of iris) markUser(S.map, i);
   // the bone and soft-tissue lines where the measured head has them; then the nasolabial folds slid onto
   // the crease the photo shows (and both kept there)
   const nStruct = await placeStructure();
@@ -5324,6 +5367,38 @@ function refinePupil(b) {
   if (!sw) return b;
   const nx = x0 + sx / sw / sc, ny = y0 + sy / sw / sc;
   return Math.hypot(nx - b.x, ny - b.y) <= r * .8 ? { x: nx, y: ny } : b;
+}
+/**
+ * An iris's edge on the photo, out from its centre c toward a guess e (the finder's ring point): where the
+ * brightness along that line (three rows ≈ a tenth of the iris apart, averaged) first rises half way from the
+ * iris's own (its median between 0.3 and 0.6 of the guess's distance) to the white's (just beyond it) — the
+ * steepest rise caught the white's shading just past the iris. The guess if there's no clear step. (The finder's
+ * rings came out ≈ 10 % wider than the irises on a real photo: a pupil distance of 58 mm.)
+ */
+function irisEdge(c, e) {
+  const I = photoPixels(S.img, S.iw, S.ih), r0 = Math.hypot(e.x - c.x, e.y - c.y);
+  if (r0 < 3) return e;
+  const ux = (e.x - c.x) / r0, uy = (e.y - c.y) / r0, lum = (x, y) => {
+    const fx = clamp(x * I.sc, 0, I.w - 1.001), fy = clamp(y * I.sc, 0, I.h - 1.001), i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j;
+    const at = (a, b) => { const k = 4 * (b * I.w + a); return .299 * I.d[k] + .587 * I.d[k + 1] + .114 * I.d[k + 2]; };
+    return (at(i, j) * (1 - tx) + at(i + 1, j) * tx) * (1 - ty) + (at(i, j + 1) * (1 - tx) + at(i + 1, j + 1) * tx) * ty;
+  };
+  const st = .25, ts = [], L = [];
+  for (let t = .3 * r0; t <= 1.5 * r0; t += st) {
+    let s = 0;
+    for (const o of [-.1, 0, .1]) s += lum(c.x + ux * t - uy * o * r0, c.y + uy * t + ux * o * r0);
+    ts.push(t); L.push(s / 3);
+  }
+  const q = (a, f) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(f * s.length))]; };
+  // (the white just past the guess: further out, toward the eye's corner, the skin is brighter still)
+  const iris = q(L.filter((_, k) => ts[k] <= .6 * r0), .5), white = q(L.filter((_, k) => ts[k] >= r0 && ts[k] <= 1.3 * r0), .5), half = (iris + white) / 2;
+  // (a clear step: the white at least 25 levels brighter than the iris)
+  if (!(white - iris >= 25)) return e;
+  for (let k = 1; k < L.length; k++) if (ts[k] > .6 * r0 && L[k] >= half) {
+    const t = ts[k - 1] + st * (half - L[k - 1]) / ((L[k] - L[k - 1]) || 1);
+    return { x: c.x + ux * t, y: c.y + uy * t };
+  }
+  return e;
 }
 
 /* ---- export / import: the face map and the measurements as a text file (JSON) ----
@@ -7242,7 +7317,7 @@ function freeReadout() {
     <div class="ro-kicker">${S.showAll ? 'All layers' : 'Free measure'}</div>
     <div class="ro-title">${S.showAll ? 'Showing everything' : t.title}</div>
     <p class="ro-desc">${S.showAll ? 'Every measurement is overlaid. Export saves exactly what you see as an annotated image.' : t.help}</p>
-    <div class="ro-meta"><span>Scale</span><button class="link" type="button" data-act="calib">${cal ? fmtNum(S.calibMM) + ' mm reference' : 'Not calibrated'}</button></div>
+    <div class="ro-meta"><span>Scale</span><button class="link" type="button" data-act="calib">${cal ? fmtNum(S.calibMM) + ' mm reference' : irisMmPerPx() ? `≈ from the irises (${fmtNum(IRIS_MM)} mm)` : 'Not calibrated'}</button></div>
     <div class="ro-meta"><span>Measured</span><span>${done} / ${ids.length} presets · ${customs().length} custom</span></div>`;
 }
 function presetReadout(id) {
@@ -7629,7 +7704,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady,
+window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady, mmPerPx, autoPlace,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
