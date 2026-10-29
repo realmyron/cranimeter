@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '49';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '50';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1122,6 +1122,21 @@ const sideMapOf = () => { const sm = curSlot === 'front' && slots.side && slots.
 // (the depths you set in 3D are part of the fit: a new drag refits the head)
 const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}|${zoSig(m.zo)}` : ''; };
 let headIds = 0;
+/** The camera's distance (cm from the head's middle) for the photos without a lens, per pair of photos: 0 = from afar. */
+const distGuess = new Map();
+/**
+ * Fitted from 1 m, 50 cm and 33 cm and from afar (fewer rounds), then between the best and its neighbours:
+ * the distance whose fit is closest — if it's ≥ 20 % closer than from afar, else 0. (On test heads the
+ * closest fit was at the true distance, and from afar for a head photographed from afar.)
+ */
+function guessDist(views) {
+  const rms = c => HM.fit(views.map(V => V.f || !c ? V : { ...V, dist: 1 / c }), { iters: 5 }).rms;
+  const cs = [0, .01, .02, .03], r = cs.map(rms), k = r.indexOf(Math.min(...r));
+  let c = cs[k];
+  if (k === cs.length - 1) { const r4 = rms(.04); if (r4 < r[k]) c = .04; }
+  else if (k > 0) { const a = r[k - 1], b = r[k], d = r[k + 1], den = a - 2 * b + d; if (den > 0) c = clamp(cs[k] + .01 * (a - d) / (2 * den), cs[k] - .01, cs[k] + .01); }
+  return c && rms(c) < .8 * r[0] ? 1 / c : 0;
+}
 /** The head fitted to this face (cached on the map), or null (no model, a profile, or it failed). */
 async function ensureHead() {
   const m = S.map;
@@ -1131,17 +1146,31 @@ async function ensureHead() {
   try { await HM.load(`ict-head.bin?v=${BUILD}`); } catch (e) { console.warn(e); if (!ensureHead.warned) { ensureHead.warned = true; toast('The head model (ict-head.bin) didn’t load — the 3D uses the template instead', 6000); } return null; }
   if (S.map !== m || headKey() !== key) return null;
   // (with the side photo's labels: where its outline runs over hair — a fringe over the forehead — it isn't the skin's)
-  const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false) }];
+  // (and each photo's lens, if it says: its focal length in px)
+  const fpx = (rec, iw, ih) => rec && rec.lens ? rec.lens.f35 / 43.27 * Math.hypot(iw, ih) : 0;
+  const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false), f: fpx(S.imgRec, S.iw, S.ih) }];
   if (sm) {
     const sd = slots.side, labels = sd && sd.img ? await photoLabelsReady(sd.img, sd.iw, sd.ih) : null;
     if (S.map !== m || headKey() !== key) return null;
     const w = headWeight(true, sm), hair = FM.POINTS.map((pt, i) => labels && sm.vis[i] && pt.group !== 'ears' ? hairOver(labels, sm.p[2 * i], sm.p[2 * i + 1]) : 0);
-    views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
+    // (and the jaw's lower border from them, unless you placed the jaw's dots yourself: on a real profile it lay
+    // ≈ 2 mm from hand-placed ones — not better than them — and on a render it was a cm off)
+    const s = FM.nearSide(sm.yaw), mine = ['jaw2#', 'go#'].some(id => isUser(sm, FM.INDEX[id.replace('#', s)])), jl = labels && !mine && segJawLine(labels, sm);
+    views.push({ view: sm.view, p: sm.p, vis: sm.vis, f: fpx(sd.imgRec, sd.iw, sd.ih), weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, jawSeg: jl ? { pts: jl, w: .6 } : null, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
+  }
+  // the photos that don't say their lens (sent through a messenger, edited, scanned): taken from the distance
+  // that fits their dots best, when that's clearly better than from afar — a phone at arm's length enlarges the
+  // nose and draws the face's sides in, and fitted as if from afar the jaw came out ≈ 12 mm off
+  if (views.some(V => !V.f)) {
+    const ck = `${S.imgSeq}|${sm ? slots.side.imgSeq : '-'}`;
+    if (!distGuess.has(ck)) distGuess.set(ck, guessDist(views));
+    const D = distGuess.get(ck);
+    if (D) for (const V of views) if (!V.f) V.dist = D;
   }
   // the modes' fit, then bent to what the photos show beyond them (the side photo's whole profile, jaw line
   // and neck) and to the depths you set by hand in 3D
   const res = HM.fit(views), C = HM.correspond(), vertOf = new Int32Array(NMAP).map((_, i) => C[i] ? C[i].v : -1);
-  const kz = res.poses[0].s / mapFrame().scale, R2 = res.poses[0].R[2], X = res.X, ev = FM.INDEX.traL != null && C[FM.INDEX.traL] ? C[FM.INDEX.traL].v : -1;
+  const kz = HM.faceScale(res, 0) / mapFrame().scale, R2 = res.poses[0].R[2], X = res.X, ev = FM.INDEX.traL != null && C[FM.INDEX.traL] ? C[FM.INDEX.traL].v : -1;
   const zEar = ev >= 0 ? -(R2[0] * X[3 * ev] + R2[1] * X[3 * ev + 1] + R2[2] * X[3 * ev + 2]) : 0, pins = [];
   if (m.zo) FM.POINTS.forEach((_, i) => { if (Number.isFinite(m.zo[i]) && m.vis[i] && C[i] && C[i].v >= 0) pins.push({ i, v: C[i].v, depth: m.zo[i] / kz + zEar }); });
   HM.deform(res, views, { pins });
@@ -1150,10 +1179,11 @@ async function ensureHead() {
   // against its pose's scale, and only its depth for its width in the photo is the head's.
   // P: the head bent in the photo's plane through the dots — where the photo's colours lie on it (and its
   // depth on the photo, for the relief); Pg: the head itself, as the front photo sees it — its shape in 3D
-  const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true });
+  // (with a lens, P is where the photo shows the head — nearer parts enlarged — and Pg the head itself, at the face's scale)
+  const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true, ortho: true });
   for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
   Pg.z = P.z;
-  m.head = { key, id: ++headIds, res, P, Pg, vertOf, side: !!sm, n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
+  m.head = { key, id: ++headIds, res, P, Pg, vertOf, side: !!sm, dist: views.map(V => V.dist || 0), n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
   return m.head;
 }
 /** The fitted head, in numbers (for the console: cranimeter.headReport()): each photo's pose off its nominal
@@ -1163,7 +1193,7 @@ function headReport() {
   if (!h) return 'No head fitted yet — open the 3D tab first.';
   const res = h.res, deg = x => (x * 180 / Math.PI).toFixed(1), VR = { front: [[1, 0, 0], [0, -1, 0], [0, 0, -1]], left: [[0, 0, -1], [0, -1, 0], [-1, 0, 0]], right: [[0, 0, 1], [0, -1, 0], [1, 0, 0]] };
   const views = ['front', h.side ? sideMapOf().view : null].filter(Boolean), C = HM.correspond(), mm = v => res.dX ? (10 * Math.hypot(res.dX[3 * v], res.dX[3 * v + 1], res.dX[3 * v + 2])).toFixed(1) : '—';
-  const L = views.map((vw, q) => { const V = VR[vw], R = res.poses[q].R, M = R.map(r => [0, 1, 2].map(j => r[0] * V[j][0] + r[1] * V[j][1] + r[2] * V[j][2])); return `${q ? 'side ' : 'front'}  pitch ${deg(Math.atan2(M[1][2], M[2][2]))}°  yaw ${deg(Math.asin(-M[0][2]))}°  roll ${deg(Math.atan2(M[0][1], M[0][0]))}°`; });
+  const L = views.map((vw, q) => { const V = VR[vw], R = res.poses[q].R, M = R.map(r => [0, 1, 2].map(j => r[0] * V[j][0] + r[1] * V[j][1] + r[2] * V[j][2])); const p = res.poses[q]; return `${q ? 'side ' : 'front'}  pitch ${deg(Math.atan2(M[1][2], M[2][2]))}°  yaw ${deg(Math.asin(-M[0][2]))}°  roll ${deg(Math.atan2(M[0][1], M[0][0]))}°  ${p.f ? `camera ≈ ${Math.round(p.f / p.s)} cm from the head's middle${h.dist && h.dist[q] ? ' (guessed from the fit)' : ' (the photo’s lens)'}` : 'camera far'}`; });
   L.push(`fit rms ${(10 * res.rms).toFixed(1)} mm · modes ±${Math.max(...res.c.map(Math.abs)).toFixed(1)}σ · bend ${(res.bendMs || 0) | 0} ms`);
   L.push('bend at ' + ['n', 'prn', 'ls', 'li', 'pog', 'me', 'goL', 'goR'].filter(id => FM.INDEX[id] != null && C[FM.INDEX[id]]).map(id => `${id} ${mm(C[FM.INDEX[id]].v)}`).join(' · ') + ' mm');
   const bad = (res.misfit || []).filter(o => o.mm > 2).slice(0, 12);
@@ -5107,6 +5137,34 @@ function paintable(L, x, y) {
   }
   return ok / n;
 }
+/**
+ * The jaw's lower border in a profile photo, from its labels: where the face's skin meets the neck's, from the
+ * neck–chin angle to the jaw angle (photo px, 16 points, chin end first) — or null if it can't be told. (Above
+ * the jaw angle that boundary runs back to the ear lobe, not up the ramus: it isn't used there.)
+ */
+function segJawLine(L, m) {
+  const s = FM.nearSide(m.yaw), at = id => { const i = FM.INDEX[id.replace('#', s)]; return i != null && m.vis[i] ? i : null; };
+  const c0 = at('cerv') ?? at('me'), go = at('go#'), o = at('tra#') ?? at('lob#');
+  if (c0 == null || go == null || o == null) return null;
+  const ox = m.p[2 * o], oy = m.p[2 * o + 1], pol = i => [Math.atan2(m.p[2 * i + 1] - oy, m.p[2 * i] - ox), Math.hypot(m.p[2 * i] - ox, m.p[2 * i + 1] - oy)];
+  const wrap = a => a > Math.PI ? a - 2 * Math.PI : a < -Math.PI ? a + 2 * Math.PI : a;
+  const [a0, r0] = pol(c0), [a1, r1] = pol(go), D = wrap(a1 - a0), NB = 16, bins = Array.from({ length: NB }, () => []);
+  if (Math.abs(D) < .1) return null;
+  // the boundary's pixels, by their angle round the ear between the two dots' (and not far nearer or further)
+  for (let j = 1; j < L.h - 1; j++) for (let i = 1; i < L.w - 1; i++) {
+    const k = j * L.w + i;
+    if (L.d[k] !== 3 || (L.d[k - 1] !== 2 && L.d[k + 1] !== 2 && L.d[k - L.w] !== 2 && L.d[k + L.w] !== 2)) continue;
+    const x = i / L.sc, y = j / L.sc, f = wrap(Math.atan2(y - oy, x - ox) - a0) / D, r = Math.hypot(x - ox, y - oy);
+    if (f < 0 || f > 1 || r < .6 * Math.min(r0, r1) || r > 1.3 * Math.max(r0, r1)) continue;
+    bins[Math.min(NB - 1, Math.floor(f * NB))].push(r);
+  }
+  if (bins.filter(b => b.length).length < .75 * NB) return null;
+  // each bin's middle, the gaps filled from either side, then smoothed
+  let rad = bins.map(b => b.length ? b.sort((p, q) => p - q)[b.length >> 1] : NaN);
+  rad = rad.map((r, k) => { if (Number.isFinite(r)) return r; let a = k, b = k; while (a >= 0 && !Number.isFinite(rad[a])) a--; while (b < NB && !Number.isFinite(rad[b])) b++; return a < 0 ? rad[b] : b >= NB ? rad[a] : rad[a] + (rad[b] - rad[a]) * (k - a) / (b - a); });
+  rad = rad.map((r, k) => (rad[Math.max(0, k - 1)] + 2 * r + rad[Math.min(NB - 1, k + 1)]) / 4);
+  return rad.map((r, k) => { const a = a0 + D * (k + .5) / NB; return { x: ox + r * Math.cos(a), y: oy + r * Math.sin(a) }; });
+}
 /** How much of what a photo shows round (x, y) is hair, of all the head there (0…1; 0 on the background alone). */
 function hairOver(L, x, y) {
   const i0 = Math.round(x * L.sc), j0 = Math.round(y * L.sc), r = Math.max(3, Math.round(.008 * Math.max(L.w, L.h))), st = Math.max(1, Math.round(r / 4));
@@ -6059,16 +6117,38 @@ addEventListener('resize', () => { resize(); if (S.img) fitView(); });
 
 /* --------------------------------------------------------- image input -- */
 
+/**
+ * The lens a JPEG was taken with, from its EXIF: its focal length as on a 35 mm camera (mm), which phones
+ * write — or null. (Its focal length in the photo's pixels is that × the photo's diagonal / 43.3 mm.)
+ */
+async function readLens(file) {
+  if (!/jpe?g/i.test(file.type)) return null;
+  const b = new DataView(await file.slice(0, 1 << 17).arrayBuffer());
+  if (b.getUint16(0) !== 0xFFD8) return null;
+  for (let o = 2; o + 4 < b.byteLength;) {
+    const mk = b.getUint16(o), len = b.getUint16(o + 2);
+    if (mk === 0xFFE1 && b.getUint32(o + 4) === 0x45786966) {   // 'Exif'
+      const t = o + 10, le = b.getUint16(t) === 0x4949, u16 = p => b.getUint16(t + p, le), u32 = p => b.getUint32(t + p, le);
+      const tag = (ifd, id) => { const n = u16(ifd); for (let k = 0; k < n; k++) { const e = ifd + 2 + 12 * k; if (u16(e) === id) return u16(e + 2) === 3 ? u16(e + 8) : u32(e + 8); } return null; };
+      const ex = tag(u32(4), 0x8769), f35 = ex != null ? tag(ex, 0xA405) : null;
+      return f35 >= 10 && f35 <= 400 ? { f35 } : null;
+    }
+    if ((mk & 0xFF00) !== 0xFF00 || mk === 0xFFDA) break;
+    o += 2 + len;
+  }
+  return null;
+}
 function loadFile(file) {
   if (!file || !/^image\//.test(file.type)) { toast('That doesn’t look like an image'); return; }
-  const url = URL.createObjectURL(file);
+  const url = URL.createObjectURL(file), lens = readLens(file).catch(() => null);
   const img = new Image();
-  img.onload = () => {
+  img.onload = async () => {
+    const ln = await lens;
     // Swapping images is undoable (the previous image and its measurements come back),
     // but the very first image is the starting point — Ctrl+Z never takes you back to the empty page.
     if (S.img) pushUndo();
     closeNewPop();
-    setImageState({ img, url, iw: img.naturalWidth, ih: img.naturalHeight });
+    setImageState({ img, url, iw: img.naturalWidth, ih: img.naturalHeight, lens: ln });
     S.meas = new Map();
     S.refId = null; S.calibId = null;
     syncUI();
@@ -7549,7 +7629,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate,
+window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
