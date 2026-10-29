@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '53';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '54';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1120,7 +1120,7 @@ const headWeight = (side, m) => i => {
 };
 const sideMapOf = () => { const sm = curSlot === 'front' && slots.side && slots.side.map; return sm && isProfile(sm) && sm.snapped ? sm : null; };
 // (the depths you set in 3D are part of the fit: a new drag refits the head)
-const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}|${zoSig(m.zo)}` : ''; };
+const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}|${zoSig(m.zo)}|${cfg.headShading ? 'L' : ''}` : ''; };
 let headIds = 0;
 /** The camera's distance (cm from the head's middle) for the photos without a lens, per pair of photos: 0 = from afar. */
 const distGuess = new Map();
@@ -1180,15 +1180,19 @@ async function ensureHead() {
   // loosely held by its dots — and left the chin where it was: off)
   if (cfg.refitPoses === true) HM.refitPoses(res, views);
   if (cfg.alignFront !== false) HM.alignFront(res);
-  // (cfg.shading: then its depth set by the front photo's light and shade, where the photo shows the face's skin.
-  // On a test head — one even skin colour, one known light — it came out ≈ 1 mm further off almost everywhere
-  // (the chin's front −0.7 → −2.0 mm): the light, the skin's brightness and the shape trade for each other more
-  // than the photo can tell apart. Off until it does better there.)
-  if (cfg.shading === true && HM.shading) {
+  // (cfg.headShading — "Shape from light": then its depth set by both photos' light and shade, where each shows the
+  // face's skin, sampled where the head takes each photo's colours)
+  if (cfg.headShading && HM.shading) {
+    const skinOf = L => L ? (x, y) => L.d[clamp(Math.round(y * L.sc), 0, L.h - 1) * L.w + clamp(Math.round(x * L.sc), 0, L.w - 1)] === 3 ? 1 : 0 : null;
     const lf = await photoLabelsReady(S.img, S.iw, S.ih);
     if (S.map !== m || headKey() !== key) return null;
-    views[0].px = photoPixels(S.img, S.iw, S.ih);
-    views[0].skin = lf ? (x, y) => lf.d[clamp(Math.round(y * lf.sc), 0, lf.h - 1) * lf.w + clamp(Math.round(x * lf.sc), 0, lf.w - 1)] === 3 ? 1 : 0 : null;
+    views[0].px = photoPixels(S.img, S.iw, S.ih); views[0].skin = skinOf(lf); views[0].uv = HM.project(res, 0).uv;
+    const sd = slots.side;
+    if (sm && sd && sd.img) {
+      const ls = await photoLabelsReady(sd.img, sd.iw, sd.ih);
+      if (S.map !== m || headKey() !== key) return null;
+      views[1].px = photoPixels(sd.img, sd.iw, sd.ih); views[1].skin = skinOf(ls); views[1].uv = HM.project(res, 1, 'traL', { all: true }).uv;
+    }
     HM.shading(res, views);
   }
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
@@ -7150,6 +7154,7 @@ function buildFaceMapPanel() {
       <p class="to-note">The photo is now 3D: <b>drag it to turn</b> the face, double-click to face it again. <b>Turned, drag a dot</b> to set its depth (the chin forward, a cheek back): it stays where it is on the photo and the surface bends to it. Facing you, dots move on the photo as usual.</p>
       <div class="to-label">Look</div>
       <div class="seg full" id="sfMode" style="margin-bottom:10px"><button type="button" data-v="photo">Photo</button><button type="button" data-v="clay">Clay</button><button type="button" data-v="wire">Wire</button></div>
+      <label class="tg sm"><span>Shape from light<small>Both photos' shading sets the brow, cheekbones and under-eye. Best with both photos taken in the same soft light.</small></span><input type="checkbox" class="sw-toggle" id="sfShade"></label>
       ${sliderRow('sfDetail', 'Fine detail', 0, 100, 1, 'Free relief read straight from the photo’s brightness, on top of the anatomy. Off (0) by default: on real photos shine, stubble and side light come out as humps. Raise it a little for more texture. Rebuild to apply.')}
       <div class="to-label">View</div>
       <div class="chips looks" id="sfViews">${SURF_VIEWS.map(([v, n, tip]) => `<button type="button" class="chip-dot look" data-v="${v}" title="${esc(tip)}">${n}</button>`).join('')}</div>
@@ -7242,6 +7247,7 @@ function buildFaceMapPanel() {
   $('#mMirror').addEventListener('change', e => { if (!!cfg.mapMirror !== e.target.checked) toggleMirror(); });
   $('#mCopyL').addEventListener('click', () => copySide('L'));
   $('#mCopyR').addEventListener('click', () => copySide('R'));
+  $('#sfShade').addEventListener('change', e => { cfg.headShading = e.target.checked; saveCfg(); wake(); });
   $('#mAutoDet').addEventListener('change', e => {
     cfg.mapAutoDetail = e.target.checked; saveCfg();
     if (cfg.mapAutoDetail && S.map) { pushUndo(); placeDetail(null); mapTouched(true); buildMask(); syncPts(); }
@@ -7305,6 +7311,7 @@ function syncFaceMapPanel() {
   $('#mMirror').checked = !!cfg.mapMirror;
   $('#mCopyL').disabled = $('#mCopyR').disabled = !m || isProfile(m);
   $('#mAutoDet').checked = !!cfg.mapAutoDetail;
+  if ($('#sfShade')) $('#sfShade').checked = !!cfg.headShading;
   $('#mExport').disabled = !m && !S.meas.size;
   const qb = $('#mQuick');
   setText(qb, S.qfit ? `Stop quick fit (${S.qfit.step + 1}/${qfitSteps().length})` : 'Quick fit · guided');
