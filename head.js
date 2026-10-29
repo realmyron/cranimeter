@@ -533,6 +533,19 @@ function fineFit(res, views, X0, dX, rows, opt) {
   }
   res.fine = { n, rows: F.length, it, ms: Math.round(performance.now() - t0) };
 }
+/** Each vertex's mirror image across the head's midline (the skin's from topology(), the eyeballs' by nearest; −1 for none). */
+let mirr = null;
+function mirrorOf() {
+  if (mirr) return mirr;
+  const m = model, nS = m.nSkin, N = m.N, V = m.neu, out = new Int32Array(N).fill(-1);
+  out.set(topology().mir.subarray(0, nS));
+  for (let v = nS; v < N; v++) {
+    let best = -1, bd = Infinity;
+    for (let u = nS; u < N; u++) { const d = (V[3 * u] + V[3 * v]) ** 2 + (V[3 * u + 1] - V[3 * v + 1]) ** 2 + (V[3 * u + 2] - V[3 * v + 2]) ** 2; if (d < bd) { bd = d; best = u; } }
+    out[v] = bd < .01 ? best : -1;
+  }
+  return (mirr = out);
+}
 // What the bend uses (see deform), and how much — set from a real face, turning on one kind at a time: the side
 // photo's profile, dots and jaw line in full; the front photo's outline lightly (in full it widened the jaw and
 // creased the cheeks); its landmarks very lightly (in full they sheared the face — a flat, wide mid-face, pinched
@@ -711,6 +724,14 @@ function deform(res, views, opt = {}) {
       // (a front photo's dot of the lips: 'fm'; a side photo's of the eye — its pupil, its corners: 'sy')
       const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && /^(pu|en|ex)[LR]$/.test(P[r.i].id) ? 'y' : r.q && P[r.i].side !== 0 ? 'l' : !r.q && P[r.i].group === 'lips' ? 'm' : 'p');
       rows = rows.filter(r => { const k = kind(r); if (!only.includes(k)) return false; if (catW[k] != null) r.w *= catW[k]; r.w0 = r.w; return true; });
+    }
+    // (a side photo's rows on the other side of the face too, mirrored: the photo sees one side, and bent on that
+    // side alone the head came out twisted from above — the temples 6 mm, the jaw 3 mm apart in depth; the front
+    // photo, which sees both, keeps what's really uneven across the face)
+    if (opt.mirrorSide !== false) {
+      const mir = mirrorOf(), add = [];
+      for (const r of rows) { if (!r.q || r.pin) continue; const w = mir[r.v]; if (w < 0 || w === r.v || Math.abs(X0[3 * r.v]) < .3) continue; add.push({ v: w, g: [-r.g[0], r.g[1], r.g[2]], e: r.e, w: r.w, w0: r.w0, q: r.q, mirror: true }); }
+      rows.push(...add);
     }
     // (robust: a row the last bend still missed by more than 3 mm — a dot the other photo disagrees with — counts less)
     if (prev) for (const r of rows) { if (r.pin) continue; const d = prev(r.v), e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])); if (e > .3) r.w *= .3 / e; }
@@ -945,22 +966,25 @@ function alignFront(res, opt = {}) {
   return (res.alignMm = 10 * Math.sqrt(se / (sn || 1)));
 }
 /**
- * The head's depth set by the photos' light and shade (changes res.X): what the dots can't say — how deep the
- * eyes sit under the brow, the cheeks' hollows, the chin's turn — the shading can. Each photo with its pixels
- * (V.px: { d, w, h, sc }, and V.skin(x, y) → 0…1: where it shows the face's skin) gets a light (ambient and one
- * direction) and a skin brightness that changes only slowly over the face; the head is then moved along the
- * front camera's line of sight — so from the front it stays where the dots put it — by a sum of ≈ 1.2 cm bumps
- * centred ≈ 1.5 cm apart over the face, fitted (Gauss–Newton, robust, held near none) so its shading matches the
- * photos'. The eyes, brows, lips and nostrils are left out (their colour isn't the skin's light), and so is
- * anything the photo shows as hair or not skin. Returns { rms (mm moved), it, ms }.
+ * The head's depth set by the photos' light and shade (changes res.X): what the dots can't say — how the brow rolls
+ * into the eye socket, the cheekbones' and the maxilla's projection, the infraorbital hollow — the shading can, the
+ * side photo's most (it sees those forms edge on). Each photo with its pixels (V.px: { d, w, h, sc }), where it
+ * shows the face's skin (V.skin(x, y) → 0…1) and where each vertex's colour is on it (V.uv: photo px per vertex, as
+ * the head is painted) gets a light — ambient plus one direction, none past the shadow's edge — and a skin
+ * brightness that changes only slowly over the face. The head is then moved along the front camera's line of sight
+ * (from the front it stays where the dots put it) by a sum of ≈ 1.2 cm bumps ≈ 1.5 cm apart over the skin the
+ * photos see, fitted (Gauss–Newton, robust) so its shading matches theirs: held near none, alike between neighbours
+ * and between the face's two sides, and not on the midline (the profile has it exactly) nor over the eyes, brows,
+ * lips and nostrils (their colour isn't the skin's light). Returns { rms (mm moved), max, nc, it, ms, light }.
  */
 function shading(res, views, opt = {}) {
   const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, X = res.X, T = C.T, P = FM.POINTS;
-  const used = views.map((V, q) => V.px ? q : -1).filter(q => q >= 0);
+  const used = views.map((V, q) => V.px && V.uv ? q : -1).filter(q => q >= 0);
   if (!used.length) return null;
   const p0 = res.poses[0], dir = [0, 1, 2].map(j => -p0.R[2][j]);   // (toward the front camera, model frame)
+  const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
   // the skin the shading speaks for: not the neck, ears, eyes, brows, lips or nostrils
-  const feat = P.map((pt, i) => /^(eyes|brows|lips)$/.test(pt.group) || /^(sn|al|ac|sbal|prn)/.test(pt.id) ? [pt.x, pt.y, pt.z] : null).filter(Boolean);
+  const feat = P.map(pt => /^(eyes|brows|lips)$/.test(pt.group) || /^(sn|al|ac|sbal|prn)/.test(pt.id) ? [pt.x, pt.y, pt.z] : null).filter(Boolean);
   const ok = new Uint8Array(nS);
   for (let v = 0; v < nS; v++) {
     if (C.neck[v] || C.ear[v]) continue;
@@ -969,97 +993,153 @@ function shading(res, views, opt = {}) {
     ok[v] = near ? 0 : 1;
   }
   const sig = opt.sigma || 1.2, cs = opt.cell || 1.5, nrm0 = normals(X);
-  // each photo's samples: the skin it faces, its brightness there (linear light: sRGB² ²)
+  // (linear light: sRGB to the power 2.2)
   const lum = (I, x, y) => {
     const fx = Math.max(0, Math.min(I.w - 1.001, x * I.sc)), fy = Math.max(0, Math.min(I.h - 1.001, y * I.sc)), i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j;
     const at = (a2, b) => { const k = 4 * (b * I.w + a2); return Math.pow((.299 * I.d[k] + .587 * I.d[k + 1] + .114 * I.d[k + 2]) / 255, 2.2); };
     return (at(i, j) * (1 - tx) + at(i + 1, j) * tx) * (1 - ty) + (at(i, j + 1) * (1 - tx) + at(i + 1, j + 1) * tx) * ty;
   };
+  // each photo's samples: the skin it faces squarely and shows as skin — where on the photo, and how that moves as
+  // the vertex moves toward the front camera (px per cm: the side photo sees that move across it)
   const S = used.map(q => {
-    const V = views[q], p = res.poses[q], vd = [0, 1, 2].map(j => -p.R[2][j]), L = [];
+    const V = views[q], p = res.poses[q], vd = [0, 1, 2].map(j => -p.R[2][j]), v0 = [], u0 = [], du = [];
     for (let v = 0; v < nS; v++) {
       if (!ok[v] || nrm0[3 * v] * vd[0] + nrm0[3 * v + 1] * vd[1] + nrm0[3 * v + 2] * vd[2] < .35) continue;
-      const [u, w] = projK(p, X.subarray(3 * v, 3 * v + 3));
-      if (u < 1 || w < 1 || u > V.px.w / V.px.sc - 2 || w > V.px.h / V.px.sc - 2) continue;
-      const sk = V.skin ? V.skin(u, w) : 1;
-      if (sk < .5) continue;
-      L.push(v, lum(V.px, u, w));
+      const u = V.uv[2 * v], w = V.uv[2 * v + 1];
+      if (!(u > 1 && w > 1 && u < V.px.w / V.px.sc - 2 && w < V.px.h / V.px.sc - 2)) continue;
+      if ((V.skin ? V.skin(u, w) : 1) < .5) continue;
+      const [gu, gv] = projJ(p, X.subarray(3 * v, 3 * v + 3));
+      v0.push(v); u0.push(u, w); du.push(p.s * (gu[0] * dir[0] + gu[1] * dir[1] + gu[2] * dir[2]), p.s * (gv[0] * dir[0] + gv[1] * dir[1] + gv[2] * dir[2]));
     }
-    return { q, L, light: [0, 0, 0, 0], rho: null };
+    return { q, V, v: Int32Array.from(v0), u0: Float32Array.from(u0), du: Float32Array.from(du), I: new Float32Array(v0.length), light: null, rho: null };
   });
-  // the bumps: one per ≈ 1.5 cm cell where the front photo's samples are (≥ 12 of them within the bump), and
-  // only there — eased off over ≈ 1 cm round the skin it sees (a bump reaching under the chin, where nothing
-  // holds it, moved the chin 17 mm on a test head)
   const Tp = topology(), seen = new Float32Array(nS);
-  for (const s of S) for (let k = 0; k < s.L.length; k += 2) seen[s.L[k]] = 1;
+  for (const s of S) for (const v of s.v) seen[v] = 1;
   { const tmp = new Float32Array(nS); for (let pass = 0; pass < 6; pass++) { for (let v = 0; v < nS; v++) { let su = seen[v], c = 1; for (let qq = Tp.off[v]; qq < Tp.off[v + 1]; qq++) { su += seen[Tp.nb[qq]]; c++; } tmp[v] = su / c; } seen.set(tmp); } }
+  // the bumps: one per ≈ 1.5 cm cell with ≥ 12 samples, eased off over ≈ 1 cm round the skin seen (reaching under
+  // the chin, where nothing holds them, they moved it 17 mm on a test head) and within 0.6–1.6 cm of the midline
   const cells = new Map();
-  for (let k = 0; k < S[0].L.length; k += 2) { const v = S[0].L[k], key = `${Math.round(X[3 * v] / cs)},${Math.round(X[3 * v + 1] / cs)},${Math.round(X[3 * v + 2] / cs)}`; if (!cells.has(key)) cells.set(key, []); cells.get(key).push(v); }
-  const cen = [], CX = [];
+  for (const s of S) for (const v of s.v) { const key = `${Math.round(X[3 * v] / cs)},${Math.round(X[3 * v + 1] / cs)},${Math.round(X[3 * v + 2] / cs)}`; if (!cells.has(key)) cells.set(key, new Set()); cells.get(key).add(v); }
+  const CX = [];
   for (const L of cells.values()) {
-    if (L.length < 12) continue;
-    const c = [0, 1, 2].map(j => L.reduce((t, v) => t + X[3 * v + j], 0) / L.length);
-    cen.push(L[0]); CX.push(c);
+    if (L.size < 12) continue;
+    const c = [0, 1, 2].map(j => [...L].reduce((t, v) => t + X[3 * v + j], 0) / L.size);
+    if (Math.abs(c[0]) < .5) continue;
+    CX.push(c);
   }
-  const nc = cen.length, phi = new Float32Array(nc * N);   // (each bump on every vertex, cut off past 3σ)
-  for (let c = 0; c < nc; c++) for (let v = 0; v < nS; v++) { const d2 = (X[3 * v] - CX[c][0]) ** 2 + (X[3 * v + 1] - CX[c][1]) ** 2 + (X[3 * v + 2] - CX[c][2]) ** 2; if (d2 < 9 * sig * sig) phi[c * N + v] = Math.exp(-d2 / (2 * sig * sig)) * seen[v]; }
-  // (neighbouring bumps alike: their differences held too, so the depth they add is smooth over the face)
-  const nbr = [];
-  for (let c = 0; c < nc; c++) for (let d = c + 1; d < nc; d++) if ((CX[c][0] - CX[d][0]) ** 2 + (CX[c][1] - CX[d][1]) ** 2 + (CX[c][2] - CX[d][2]) ** 2 < (1.6 * cs) ** 2) nbr.push([c, d]);
-  const X0 = Float32Array.from(X), a = new Float64Array(nc);
-  const apply = () => { for (let v = 0; v < nS; v++) { let s = 0; for (let c = 0; c < nc; c++) { const f = phi[c * N + v]; if (f) s += a[c] * f; } for (let j = 0; j < 3; j++) X[3 * v + j] = X0[3 * v + j] + s * dir[j]; } };
-  const lamA = opt.lambda ?? 2, lamN = opt.lambdaN ?? 4, amax = opt.amax ?? .4;
+  const nc = CX.length;
+  if (!nc) return null;
+  const phi = new Float32Array(nc * nS);
+  for (let c = 0; c < nc; c++) for (let v = 0; v < nS; v++) { const d2 = (X[3 * v] - CX[c][0]) ** 2 + (X[3 * v + 1] - CX[c][1]) ** 2 + (X[3 * v + 2] - CX[c][2]) ** 2; if (d2 < 9 * sig * sig) phi[c * nS + v] = Math.exp(-d2 / (2 * sig * sig)) * seen[v] * ss(.6, 1.6, Math.abs(X[3 * v])); }
+  // (neighbouring bumps alike, and each like its mirror image across the face)
+  const nbr = [], mir = [];
+  for (let c = 0; c < nc; c++) {
+    let bm = -1, bd = (.6 * cs) ** 2;
+    for (let d = 0; d < nc; d++) {
+      if (d > c && (CX[c][0] - CX[d][0]) ** 2 + (CX[c][1] - CX[d][1]) ** 2 + (CX[c][2] - CX[d][2]) ** 2 < (1.6 * cs) ** 2) nbr.push([c, d]);
+      const e = (CX[c][0] + CX[d][0]) ** 2 + (CX[c][1] - CX[d][1]) ** 2 + (CX[c][2] - CX[d][2]) ** 2;
+      if (d !== c && e < bd) { bd = e; bm = d; }
+    }
+    if (bm > c) mir.push([c, bm]);
+  }
+  // (a vertex's normal from its own triangles, as normals() has it; and each bump's reach: the vertices it moves)
+  const vt = Array.from({ length: nS }, () => []);
+  for (let t = 0; t < m.nTri; t++) { const a = m.tri[3 * t], b = m.tri[3 * t + 1], c = m.tri[3 * t + 2]; if (a < nS && b < nS && c < nS) { vt[a].push(t); vt[b].push(t); vt[c].push(t); } }
+  const ip = LM68[30], sgn = (() => { let s = 0; for (const t of vt[ip]) { const a = m.tri[3 * t], b = m.tri[3 * t + 1], c = m.tri[3 * t + 2]; s += (X[3 * b] - X[3 * a]) * (X[3 * c + 1] - X[3 * a + 1]) - (X[3 * b + 1] - X[3 * a + 1]) * (X[3 * c] - X[3 * a]); } return Math.sign(s) * Math.sign(nrm0[3 * ip + 2]) || 1; })();
+  const vnorm = v => {
+    let nx = 0, ny = 0, nz = 0;
+    for (const t of vt[v]) {
+      const a = m.tri[3 * t], b = m.tri[3 * t + 1], c = m.tri[3 * t + 2];
+      const ux = X[3 * b] - X[3 * a], uy = X[3 * b + 1] - X[3 * a + 1], uz = X[3 * b + 2] - X[3 * a + 2], wx = X[3 * c] - X[3 * a], wy = X[3 * c + 1] - X[3 * a + 1], wz = X[3 * c + 2] - X[3 * a + 2];
+      nx += uy * wz - uz * wy; ny += uz * wx - ux * wz; nz += ux * wy - uy * wx;
+    }
+    const L = sgn / (Math.hypot(nx, ny, nz) || 1);
+    return [nx * L, ny * L, nz * L];
+  };
+  const SUP = [];
+  for (let c = 0; c < nc; c++) { const L = [], o = c * nS; for (let v = 0; v < nS; v++) if (phi[o + v]) L.push(v); SUP.push(Int32Array.from(L)); }
+  // (each photo's samples' neighbours among its own samples, for smoothing the skin's brightness along the skin)
+  for (const s of S) {
+    const at = new Int32Array(nS).fill(-1), off = [0], nb = [];
+    s.v.forEach((v, k) => { at[v] = k; });
+    for (const v of s.v) { for (let q = Tp.off[v]; q < Tp.off[v + 1]; q++) { const k = at[Tp.nb[q]]; if (k >= 0) nb.push(k); } off.push(nb.length); }
+    s.nOff = Int32Array.from(off); s.nb = Int32Array.from(nb);
+  }
+  const X0 = Float32Array.from(X), a = new Float64Array(nc), sh = new Float32Array(nS);
+  const apply = () => { sh.fill(0); for (let c = 0; c < nc; c++) { const ac = a[c]; if (!ac) continue; const o = c * nS; for (let v = 0; v < nS; v++) { const f = phi[o + v]; if (f) sh[v] += ac * f; } } for (let v = 0; v < nS; v++) for (let j = 0; j < 3; j++) X[3 * v + j] = X0[3 * v + j] + sh[v] * dir[j]; };
+  const lamA = opt.lambda ?? 1, lamN = opt.lambdaN ?? 3, lamM = opt.lambdaM ?? 2, amax = opt.amax ?? .5;
+  // shading at a normal: l₀ + max(0, l·n) — none past the shadow's edge (the linear light, on a test head lit from one
+  // side, pulled the shape wherever the face turned away from it)
+  const shade = (l, n0, n1, n2) => { const d = l[1] * n0 + l[2] * n1 + l[3] * n2; return l[0] + Math.max(0, d); };
   let it = 0;
-  for (; it < (opt.iters || 4); it++) {
+  for (; it < (opt.iters || 5); it++) {
     apply();
     const nrm = normals(X);
-    // 1 · each photo's light and skin brightness, given the shape: I ≈ ρ (l₀ + l·n), ρ smooth over the face
+    for (const s of S) for (let k = 0; k < s.v.length; k++) { const v = s.v[k]; s.I[k] = lum(s.V.px, s.u0[2 * k] + s.du[2 * k] * sh[v], s.u0[2 * k + 1] + s.du[2 * k + 1] * sh[v]); }
+    // 1 · each photo's light and skin brightness, given the shape: I ≈ ρ (l₀ + max(0, l·n)), ρ smooth over the face
     for (const s of S) {
-      const n = s.L.length / 2;
-      for (let r = 0; r < 3; r++) {
-        const rho = s.rho || new Float32Array(n).fill(1);
-        const A = Array.from({ length: 4 }, () => new Array(4).fill(0)), b = new Array(4).fill(0);
-        for (let k = 0; k < n; k++) { const v = s.L[2 * k], f = [1, nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2]].map(x => x * rho[k]); for (let i = 0; i < 4; i++) { b[i] += f[i] * s.L[2 * k + 1]; for (let j = 0; j < 4; j++) A[i][j] += f[i] * f[j]; } }
+      const n = s.v.length;
+      for (let r = 0; r < (it ? 2 : 4); r++) {
+        const rho = s.rho || new Float32Array(n).fill(1), A = Array.from({ length: 4 }, () => new Array(4).fill(0)), b = new Array(4).fill(0);
+        for (let k = 0; k < n; k++) {
+          const v = s.v[k], lit = !s.light || s.light[1] * nrm[3 * v] + s.light[2] * nrm[3 * v + 1] + s.light[3] * nrm[3 * v + 2] > 0;
+          const f = [rho[k], lit ? rho[k] * nrm[3 * v] : 0, lit ? rho[k] * nrm[3 * v + 1] : 0, lit ? rho[k] * nrm[3 * v + 2] : 0];
+          for (let i = 0; i < 4; i++) { b[i] += f[i] * s.I[k]; for (let j = 0; j < 4; j++) A[i][j] += f[i] * f[j]; }
+        }
         for (let i = 0; i < 4; i++) A[i][i] += 1e-6;
         s.light = solve(A, b);
-        // ρ: the ratio, smoothed over the skin (≈ 6 cm: any finer, it took up the very shading that tells the shape)
-        const val = new Float32Array(nS).fill(NaN);
-        for (let k = 0; k < n; k++) { const v = s.L[2 * k], sh = s.light[0] + s.light[1] * nrm[3 * v] + s.light[2] * nrm[3 * v + 1] + s.light[3] * nrm[3 * v + 2]; val[v] = s.L[2 * k + 1] / Math.max(.02, sh); }
-        const tmp = Float32Array.from(val);
-        for (let pass = 0; pass < (opt.rhoPasses ?? 200); pass++) { for (let v = 0; v < nS; v++) { if (!Number.isFinite(val[v])) continue; let su = val[v], c = 1; for (let qq = Tp.off[v]; qq < Tp.off[v + 1]; qq++) { const x = val[Tp.nb[qq]]; if (Number.isFinite(x)) { su += x; c++; } } tmp[v] = su / c; } val.set(tmp); }
-        s.rho = Float32Array.from({ length: n }, (_, k) => val[s.L[2 * k]]);
+        // ρ: the ratio I / shading, smoothed along the skin it samples (200 passes, ≈ 3–5 cm: any finer, it took up the
+        // very shading that tells the shape; smoothed across the face in a straight line instead — or fitted as a
+        // quadratic, or jointly with the light — it reached over the eyes and lips, and the bumps made up for it)
+        let val = Float32Array.from({ length: n }, (_, k) => { const v = s.v[k]; return s.I[k] / Math.max(.02, shade(s.light, nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2])); }), tmp = new Float32Array(n);
+        for (let pass = 0; pass < (opt.rhoPasses ?? 200); pass++) {
+          for (let k = 0; k < n; k++) { let su = val[k]; const a0 = s.nOff[k], a1 = s.nOff[k + 1]; for (let q = a0; q < a1; q++) su += val[s.nb[q]]; tmp[k] = su / (1 + a1 - a0); }
+          [val, tmp] = [tmp, val];
+        }
+        s.rho = Float32Array.from(val, x => Math.max(.05, x));
       }
     }
-    // 2 · the bumps, given the light: Gauss–Newton with the normals' change per bump (finite differences)
+    // 2 · the bumps, given the light: Gauss–Newton with the shading's change per bump (finite differences)
     const rows = [];
-    for (const s of S) for (let k = 0; k < s.L.length / 2; k++) { const v = s.L[2 * k], l = s.light, sh = l[0] + l[1] * nrm[3 * v] + l[2] * nrm[3 * v + 1] + l[3] * nrm[3 * v + 2]; rows.push({ s, k, v, r: s.L[2 * k + 1] - s.rho[k] * sh }); }
+    for (const s of S) for (let k = 0; k < s.v.length; k++) { const v = s.v[k]; rows.push({ s, k, v, r: s.I[k] - s.rho[k] * shade(s.light, nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2]) }); }
     const scale = Math.sqrt(rows.reduce((t, o) => t + o.r * o.r, 0) / (rows.length || 1)) || 1;
     for (const o of rows) o.w = Math.min(1, 2 * scale / (Math.abs(o.r) || 1e-9));   // (robust: Huber at 2× the rms)
+    const rowAt = new Map(); rows.forEach((o, i) => { if (!rowAt.has(o.v)) rowAt.set(o.v, []); rowAt.get(o.v).push(i); });
     const A = Array.from({ length: nc }, () => new Float64Array(nc)), b = new Float64Array(nc), J = rows.map(() => new Float32Array(nc)), eps = .05;
-    const rowAt = new Map(); rows.forEach((o, i) => { const key = o.v; if (!rowAt.has(key)) rowAt.set(key, []); rowAt.get(key).push(i); });
+    // (each bump's normals worked out only where it reaches: the sampled vertices it moves)
     for (let c = 0; c < nc; c++) {
-      const sup = [];
-      for (let v = 0; v < nS; v++) if (phi[c * N + v]) sup.push(v);
-      for (const v of sup) for (let j = 0; j < 3; j++) X[3 * v + j] += eps * phi[c * N + v] * dir[j];
-      const n2 = normals(X);
-      for (const v of sup) for (let j = 0; j < 3; j++) X[3 * v + j] -= eps * phi[c * N + v] * dir[j];
+      const o = c * nS, sup = SUP[c];
+      for (const v of sup) for (let j = 0; j < 3; j++) X[3 * v + j] += eps * phi[o + v] * dir[j];
+      const NF = opt.fullJ ? normals(X) : null;
       for (const v of sup) {
         const L2 = rowAt.get(v); if (!L2) continue;
-        for (const i of L2) { const o = rows[i], l = o.s.light; J[i][c] = o.s.rho[o.k] * (l[1] * (n2[3 * v] - nrm[3 * v]) + l[2] * (n2[3 * v + 1] - nrm[3 * v + 1]) + l[3] * (n2[3 * v + 2] - nrm[3 * v + 2])) / eps; }
+        const n2 = NF ? [NF[3 * v], NF[3 * v + 1], NF[3 * v + 2]] : vnorm(v);
+        for (const i of L2) { const w = rows[i], l = w.s.light; J[i][c] = w.s.rho[w.k] * (shade(l, n2[0], n2[1], n2[2]) - shade(l, nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2])) / eps; }
       }
+      for (const v of sup) for (let j = 0; j < 3; j++) X[3 * v + j] -= eps * phi[o + v] * dir[j];
     }
     const lam = lamA * scale * scale * rows.length / nc;
     rows.forEach((o, i) => { const Ji = J[i]; for (let c = 0; c < nc; c++) { if (!Ji[c]) continue; b[c] += o.w * Ji[c] * o.r; for (let d = 0; d <= c; d++) if (Ji[d]) A[c][d] += o.w * Ji[c] * Ji[d]; } });
     const M = Array.from({ length: nc }, (_, c) => Array.from({ length: nc }, (_, d) => (d <= c ? A[c][d] : A[d][c]) + (c === d ? lam : 0)));
-    const rhs = Array.from(b, (x, c) => x - lam * a[c]), lN = lamN * lam;
-    for (const [c, d] of nbr) { M[c][c] += lN; M[d][d] += lN; M[c][d] -= lN; M[d][c] -= lN; const df = a[c] - a[d]; rhs[c] -= lN * df; rhs[d] += lN * df; }
+    const rhs = Array.from(b, (x, c) => x - lam * a[c]);
+    const tie = (c, d, l) => { M[c][c] += l; M[d][d] += l; M[c][d] -= l; M[d][c] -= l; const df = a[c] - a[d]; rhs[c] -= l * df; rhs[d] += l * df; };
+    for (const [c, d] of nbr) tie(c, d, lamN * lam);
+    for (const [c, d] of mir) tie(c, d, lamM * lam);
+    // (only form, not a shift of the whole face: the bumps' mean and their tilt across the face and up it held at
+    // none — on a real face, its light not quite as modelled, they moved the face 2.5 mm back all over and left the
+    // midline, which the profile holds, standing as a keel down the forehead)
+    const lamF = (opt.lambdaF ?? 20) * lam * nc;
+    for (const f of [() => 1, c => CX[c][0] / 4, c => CX[c][1] / 4]) {
+      const g = CX.map((_, c) => f(c)), gn = Math.hypot(...g) || 1, u = g.map(x => x / gn), proj = u.reduce((t, x, c) => t + x * a[c], 0);
+      for (let c = 0; c < nc; c++) { rhs[c] -= lamF * u[c] * proj; for (let d = 0; d < nc; d++) M[c][d] += lamF * u[c] * u[d]; }
+    }
     const da = solve(M, rhs);
     for (let c = 0; c < nc; c++) a[c] = Math.max(-amax, Math.min(amax, a[c] + da[c]));
   }
   apply();
   let se = 0, sn = 0;
-  for (let v = 0; v < nS; v++) { const d = (X[3 * v] - X0[3 * v]) * dir[0] + (X[3 * v + 1] - X0[3 * v + 1]) * dir[1] + (X[3 * v + 2] - X0[3 * v + 2]) * dir[2]; if (d) { se += d * d; sn++; } }
-  return (res.shading = { rms: 10 * Math.sqrt(se / (sn || 1)), max: 10 * Math.max(...Array.from(a, Math.abs)), nc, it, ms: Math.round(performance.now() - t0), light: S.map(s => s.light) });
+  for (let v = 0; v < nS; v++) if (sh[v]) { se += sh[v] * sh[v]; sn++; }
+  return (res.shading = { rms: 10 * Math.sqrt(se / (sn || 1)), max: 10 * Math.max(...Array.from(a, Math.abs)), nc, it, ms: Math.round(performance.now() - t0), light: S.map(s => s.light.map(x => +x.toFixed(3))) });
 }
 /** A photo's scale (px per cm) at the face's own depth: the pose's, enlarged as its lens enlarges the dots it fitted. */
 function faceScale(res, q = 0) {
@@ -1185,5 +1265,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '53' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '54' };
 })();
