@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '42';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '43';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1307,6 +1307,13 @@ function surfInputs() {
    away from the camera. How much of each this face has is fitted to the light and shade first — a
    dozen numbers, so the result is always a human face — and only then is a little free detail added. */
 const FIT_OPS = ['browRidge', 'infraorbital', 'malarProj', 'midfaceProj', 'noseBridge', 'noseTip', 'chinProj', 'jawProj', 'buccal', 'underEye', 'temples', 'lips', 'fat'];
+/** Is the measured head fitted to the side photo too (its profile and jaw line measured, not guessed)? */
+const sideHead = () => { const h = S.map && S.map.head; return !!(h && h.side && h.key === headKey()); };
+// what moves the profile and the jaw: with a side photo they're the photo's, not the light's
+const PROFILE_OPS = ['browRidge', 'midfaceProj', 'noseBridge', 'noseTip', 'chinProj', 'jawProj', 'lips'];
+/** The anatomy the surface fit holds: what you set by hand — and with a side photo, the profile's at 0 (the
+    light read a shadow under the lip as a chin set back, and pulled the head's measured chin back with it). */
+const surfFixed = () => ({ ...(sideHead() ? Object.fromEntries(PROFILE_OPS.map(k => [k, 0])) : {}), ...(S.map.af || {}) });
 /**
  * Per surface grid: each face node lifted onto the 3D template (template position, depth, tissue
  * depth, normal, which features it belongs to — as for the Morph tone grid) and how far each of
@@ -1415,6 +1422,9 @@ function sideLine(sp, step) {
  * a side map.
  */
 function surfProfile() {
+  // (not when the measured head was fitted to the side photo: it's bent through that profile itself, and
+  // this — read through a separate, older alignment of the two photos — only disagreed with it)
+  if (sideHead()) return null;
   const sp = S.map && sideProfile();
   if (!sp) return null;
   const m = S.map, sc = mapFrame().scale, yOf = id => { const i = FM.INDEX[id]; return i != null && m.vis[i] ? m.p[2 * i + 1] : null; };
@@ -1490,7 +1500,7 @@ async function buildSurface(opt = {}) {
   syncFaceMapPanel();
   let res;
   try {
-    res = await SF.buildSurface({ ...I, basis: surfBasis(I), hint, ignore, pins, profile: surfProfile(), bendR: 3 * mapFrame().scale, fixed: m.af || {}, lightDir: S.lightDir, trust: cfg.surfTrust, detail: cfg.surfDetail }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
+    res = await SF.buildSurface({ ...I, basis: surfBasis(I), hint, ignore, pins, profile: surfProfile(), bendR: 3 * mapFrame().scale, fixed: surfFixed(), lightDir: S.lightDir, trust: cfg.surfTrust, detail: cfg.surfDetail }, p => { if (S.surfBusy) { S.surfBusy.p = p; syncFaceMapPanel(); } });
   } catch (err) { console.error(err); }
   S.surfBusy = null;
   const again = S.surfAgain;
@@ -1965,40 +1975,47 @@ function stageMatrix(F) {
 function dotDepth(i) {
   const m = S.map;
   if (m.zo && Number.isFinite(m.zo[i])) return m.zo[i];
-  // On the drawn head every dot's depth, eased along the lines it's on (two passes of ¼ ½ ¼): read one by
-  // one — an edge dot from the head's silhouette vertex, its neighbour from the surface in front of it —
-  // the jawline, the hairline and the lids zigzagged in depth when turned
+  // On the drawn head every dot sits on it, each by one rule for its kind, so the dots along a line agree:
+  // a dot on the face's edge at the depth of the head's own rim nearest to it, every other dot on the surface
+  // where it is in the photo. (Read from mixed sources — an edge dot from a fitted vertex, its neighbour from
+  // the surface — the lines zigzagged in depth; eased along the lines instead, the jaw's dots were pulled up
+  // to a centimetre off the head, the jaw's depth bending away between them.)
   const G = stageZ && stageZ.key === stageKeyOf() ? stageZ : null;
   if (!G || !G.hd) return dotDepthRaw(i);
   const key = `${m.pver}|${m.zoRev || 0}`;
-  if (!G.dots || G.dots.key !== key) {
-    let d = FM.POINTS.map((_, q) => m.vis[q] ? dotDepthRaw(q) : NaN);
-    const held = q => m.zo && Number.isFinite(m.zo[q]);
-    for (let pass = 0; pass < 2; pass++) {
-      const sum = new Float64Array(d.length), cnt = new Float64Array(d.length);
-      for (const c of m.contours) {
-        const L = c.idx, n = L.length;
-        if (n < 3 || L.some(q => !m.vis[q])) continue;
-        L.forEach((q, k) => {
-          const a = c.closed ? L[(k + n - 1) % n] : L[Math.max(0, k - 1)], b = c.closed ? L[(k + 1) % n] : L[Math.min(n - 1, k + 1)];
-          sum[q] += .5 * d[q] + .25 * (d[a] + d[b]); cnt[q]++;
-        });
-      }
-      d = d.map((v, q) => cnt[q] && !held(q) ? sum[q] / cnt[q] : v);
-    }
-    G.dots = { key, d };
-  }
+  if (!G.dots || G.dots.key !== key) G.dots = { key, d: FM.POINTS.map((_, q) => m.vis[q] ? dotDepthRaw(q, G) : NaN) };
   const v = G.dots.d[i];
   return Number.isFinite(v) ? v : dotDepthRaw(i);
 }
-function dotDepthRaw(i) {
+function dotDepthRaw(i, Gs) {
   const m = S.map;
   if (m.zo && Number.isFinite(m.zo[i])) return m.zo[i];
   // the face's edge (cheekbones down to the chin, the temples) and the ears: where the measured head has
   // them — on the relief they'd sit anywhere on its steep side, or off the head altogether
-  // (with the head in 3D: where it's drawn, moved in depth to meet the face)
-  const h = m.head, pt = FM.POINTS[i], G = stageZ && stageZ.key === stageKeyOf() ? stageZ : null;
-  if (h && h.vertOf && h.key === headKey() && h.vertOf[i] >= 0 && (pt.group === 'ears' || (pt.group === 'outline' && !/^(tri|hl\d)/.test(pt.id)))) { const v = h.vertOf[i]; return h.P.z[v] + (G && G.hd ? G.hd.dz[v] : 0); }
+  // (with the head in 3D: the edge at the drawn head's rim nearest the dot; the ears at their own vertices)
+  const h = m.head, pt = FM.POINTS[i], G = Gs || (stageZ && stageZ.key === stageKeyOf() ? stageZ : null);
+  const edgeDot = pt.group === 'outline' && !/^(tri|hl\d)/.test(pt.id);
+  // (the edge's dots as the fit has them — the cheekbones down to the chin, and the detail dots between:
+  // not the hairline's, whose nearest rim would be the skull's top)
+  const Ci = G && G.hd && HM.correspond()[i];
+  if (Ci && Ci.cand) {
+    // the jaw's border as the fit has it (its candidates: the skin at the dot's height, not the jaw's
+    // underside or the neck): those drawn within ≈ 3 mm of the dot and within ≈ 1 mm of the furthest out,
+    // at their median depth. (Not the furthest one alone: where the head's side is flat — the cheek, the
+    // ramus — skin from in front to behind sits equally far out, and the dots down the jaw zigzagged in
+    // depth by a centimetre or two as each took another.)
+    const P = h.P, dz = G.hd.dz, x = m.p[2 * i], y = m.p[2 * i + 1], sc = mapScale(), r2 = (.3 * sc) ** 2, n = Ci.nrm, near = [];
+    let bv = -Infinity, nv = -1, nd = Infinity;
+    for (const v of Ci.cand) {
+      const du = P.uv[2 * v] - x, dv = P.uv[2 * v + 1] - y, d = du * du + dv * dv, out = du * n[0] + dv * n[1];
+      if (d < nd) { nd = d; nv = v; }
+      if (d < r2) { near.push([out, v]); bv = Math.max(bv, out); }
+    }
+    const zs = near.filter(([o]) => o >= bv - .1 * sc).map(([, v]) => P.z[v] + dz[v]).sort((a, b) => a - b);
+    if (zs.length) return zs[zs.length >> 1];
+    if (nv >= 0) return P.z[nv] + dz[nv];
+  }
+  if (h && h.vertOf && h.key === headKey() && h.vertOf[i] >= 0 && (pt.group === 'ears' || edgeDot)) { const v = h.vertOf[i]; return h.P.z[v] + (G && G.hd ? G.hd.dz[v] : 0); }
   if (G) {
     const fx = (m.p[2 * i] - G.x0) / G.cell, fy = (m.p[2 * i + 1] - G.y0) / G.cell;
     if (fx >= 0 && fy >= 0 && fx < G.gw - 1 && fy < G.gh - 1) {
@@ -2238,6 +2255,18 @@ function headOnStage(G, R, nzR, di) {
       tmp[v] = b > a ? .5 * dz[v] + .5 * s / (b - a) : dz[v];
     }
     dz.set(tmp);
+  }
+  // With the side photo the head's shape is measured — its profile down the midline, its jaw line — and the
+  // relief, read from the front photo's light, only adds the skin's finer shape: nothing on the midline,
+  // at most ≈ 3 mm beside it; in full only round a depth you set by hand (dragged in 3D)
+  if (h.side) {
+    const pins = [];
+    if (m.zo) FM.POINTS.forEach((_, i) => { const v = h.vertOf[i]; if (Number.isFinite(m.zo[i]) && v >= 0) pins.push(X[3 * v], X[3 * v + 1], X[3 * v + 2]); });
+    for (let v = 0; v < nS; v++) {
+      let pin = 0;
+      for (let q = 0; q < pins.length; q += 3) pin = Math.max(pin, Math.exp(-((X[3 * v] - pins[q]) ** 2 + (X[3 * v + 1] - pins[q + 1]) ** 2 + (X[3 * v + 2] - pins[q + 2]) ** 2) / 2));
+      dz[v] = pin * dz[v] + (1 - pin) * smooth01(1, 2.5, Math.abs(X[3 * v])) * clamp(dz[v], -.3, .3);
+    }
   }
   // the eyeballs move with the lids around them
   for (const sg of [-1, 1]) {
@@ -3531,10 +3560,47 @@ function stageZBuffer(F) {
   zbCache = { key, cs, w, h, z };
   return zbCache;
 }
+/**
+ * The side photo's own outline — its profile line and jaw line as you traced them — in the 3D view, beside
+ * the head: each traced point where the head's matching edge is drawn, moved by what the head still misses
+ * it by. Shown once the head is turned toward profile; where the two lines part, the 3D and the side
+ * photo disagree. [[{x, y, z} …] per line] in stage coordinates (photo px, depth px), or null.
+ */
+function sideOutline3() {
+  const h = S.map.head, G = stageZ && stageZ.key === stageKeyOf() ? stageZ : null;
+  if (!sideHead() || !G || !G.hd || !h.res.outline) return null;
+  const res = h.res, X = res.X, P = h.P, p1 = res.poses[1], p0 = res.poses[0], R1 = p1.R, R0 = p0.R, kz = P.s / mapFrame().scale, k2 = S.surf.pxcm, lines = [];
+  for (const o of res.outline) {
+    if (o.q !== 1) continue;
+    const v = o.v, x = X[3 * v];
+    // the traced point back in the model's frame, at the matched vertex's distance from the midline
+    const a = R1[0][1], b = R1[0][2], c = R1[1][1], d = R1[1][2], det = a * d - b * c;
+    if (Math.abs(det) < 1e-6) continue;
+    const ru = (o.x - p1.t[0]) / p1.s - R1[0][0] * x, rv = (o.y - p1.t[1]) / p1.s - R1[1][0] * x;
+    const D = [0, (ru * d - b * rv) / det - X[3 * v + 1], (a * rv - c * ru) / det - X[3 * v + 2]];
+    const L = lines[o.ch] || (lines[o.ch] = []);
+    L.push({ x: P.uv[2 * v] + p0.s * (R0[0][1] * D[1] + R0[0][2] * D[2]), y: P.uv[2 * v + 1] + p0.s * (R0[1][1] * D[1] + R0[1][2] * D[2]), z: (P.z[v] + G.hd.dz[v] - (R0[2][1] * D[1] + R0[2][2] * D[2]) * kz) * k2 });
+  }
+  return lines.filter(L => L && L.length > 1);
+}
 function drawMap(ctx) {
   const P_ = mapScreenPts(), m = S.map, busy = !!S.mapDrag;
   ctx.save();
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  // turned toward profile: the side photo's outline beside the head (dashed)
+  if (stageOn() && Math.abs(Math.sin(S.rot3.yaw)) > .5) {
+    const SL = sideOutline3();
+    if (SL) {
+      const F = stageFrame();
+      ctx.setLineDash([5, 4]);
+      for (const L of SL) {
+        ctx.beginPath(); L.forEach((q, k) => { const p = proj3(F, q.x, q.y, q.z); k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); });
+        ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 3; ctx.stroke();
+        ctx.strokeStyle = 'rgba(236,238,235,.9)'; ctx.lineWidth = 1.3; ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+  }
   // contours
   for (const c of m.contours) {
     if (c.draw === false) continue;
@@ -4904,7 +4970,8 @@ function exportFaceMap() {
   const doc = {
     app: 'cranimeter', kind: 'face-map', version: 1, build: BUILD, saved: new Date().toISOString(),
     image: { width: S.iw, height: S.ih },
-    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [] } : null,
+    // (mids: each detail dot's two named neighbours — its number may differ in another build)
+    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [], mids: FM.MID_KEY } : null,
     measurements, reference: S.refId || null, calibration: S.calibId ? { id: S.calibId, mm: S.calibMM } : null,
     light: S.lightDir, marks: S.hints ? { gw: S.hints.gw, gh: S.hints.gh, highlight: enc8(S.hints.hl), notShape: enc8(S.hints.ig) } : null,
     surface: { trust: cfg.surfTrust, detail: cfg.surfDetail }, morph: { ...S.anat },
@@ -4926,23 +4993,45 @@ async function importFaceMap(file) {
   if (Math.abs(sx / sy - 1) > .02) toast('This photo has a different shape than the one the map was made on — check the dots', 6000);
   const before = snapshot();
   // the face map: every saved dot exactly where it was; dots this version has but the file doesn't, fitted around them.
-  // The small detail dots are numbered, and the numbers change between builds: from another build
-  // only the named dots are taken and the detail dots are placed between them again.
+  // The small detail dots are numbered, and the numbers change when the template does: they're matched by
+  // the two named dots they lie between (saved with the map since build 43). In an older file from another
+  // build, a detail dot is taken where its number still lies between the same two dots (near their
+  // midpoint); the others are placed between their neighbours again. (Every detail dot used to be re-placed
+  // from another build: dots you'd moved off the curve — and Auto-place's, on the photo's own edges — went
+  // back onto it, up to 4 cm away on the long hairline and jaw segments, and the lines zigzagged.)
   if (doc.map && doc.map.points && FM) {
-    const same = String(doc.build) === BUILD, take = id => { const i = FM.INDEX[id]; return i != null && (same || !FM.POINTS[i].mid) ? i : null; };
-    const pairs = [];
-    for (const [id, xy] of Object.entries(doc.map.points)) { const i = take(id); if (i != null && xy) pairs.push({ i, b: { x: xy[0] * sx, y: xy[1] * sy } }); }
+    const pts = doc.map.points, same = String(doc.build) === BUILD, mids = doc.map.mids;
+    const named = id => { const i = FM.INDEX[id]; return i != null && !FM.POINTS[i].mid ? i : null; };
+    const take = id => {
+      const i = FM.INDEX[id];
+      if (i == null) return null;
+      if (same || !FM.POINTS[i].mid) return i;
+      const key = FM.MID_KEY[id], [a, b] = key ? key.split('|') : [];
+      if (!key || !pts[a] || !pts[b] || !pts[id]) return null;
+      const L = Math.hypot(pts[a][0] - pts[b][0], pts[a][1] - pts[b][1]);
+      return Math.hypot(pts[id][0] - (pts[a][0] + pts[b][0]) / 2, pts[id][1] - (pts[a][1] + pts[b][1]) / 2) <= .35 * L + 1 ? i : null;
+    };
+    // (a saved dot's index here: by its neighbours when the file names them, else by its number)
+    const resolve = id => mids && mids[id] ? (FM.MID_BY_KEY[mids[id]] != null ? FM.INDEX[FM.MID_BY_KEY[mids[id]]] : null) : (mids ? named(id) : take(id));
+    const pairs = [], got = new Set();
+    for (const [id, xy] of Object.entries(pts)) {
+      if (!xy) continue;
+      const i = resolve(id);
+      if (i == null || got.has(i)) continue;
+      got.add(i); pairs.push({ i, b: { x: xy[0] * sx, y: xy[1] * sy } });
+    }
     fitMap(FM.VIEWS[doc.map.view] != null ? doc.map.view : 'front', pairs);
-    if (!same) placeDetail(null);
+    const missing = new Set(FM.POINTS.map((pt, i) => pt.mid && !got.has(i) ? i : -1).filter(i => i >= 0));
+    if (missing.size) placeDetail(null, missing);
     S.map.snapped = doc.map.snapped || pairs.length;
     S.map.af = doc.map.anatomy && typeof doc.map.anatomy === 'object' ? { ...doc.map.anatomy } : null;
     // (which dots you placed yourself; a map from before build 41 doesn't say: its landmarks count as placed)
     S.map.user = null;
-    if (Array.isArray(doc.map.user)) for (const id of doc.map.user) { const i = take(id); if (i != null) markUser(S.map, i); }
+    if (Array.isArray(doc.map.user)) for (const id of doc.map.user) { const i = resolve(id); if (i != null) markUser(S.map, i); }
     else for (const { i } of pairs) if (FM.POINTS[i].lm) markUser(S.map, i);
     if (doc.map.depth && Object.keys(doc.map.depth).length) {
       S.map.zo = new Float32Array(NMAP).fill(NaN);
-      for (const [id, z] of Object.entries(doc.map.depth)) { const i = take(id); if (i != null) S.map.zo[i] = z; }
+      for (const [id, z] of Object.entries(doc.map.depth)) { const i = resolve(id); if (i != null) S.map.zo[i] = z; }
       S.map.zoRev = (S.map.zoRev || 0) + 1;
     }
   }
@@ -5104,21 +5193,26 @@ const autoDot = i => !!cfg.mapAutoDetail && !!FM.POINTS[i].mid;
  * Re-place the detail dots (the small ones halfway between named dots) on the curve through their
  * neighbours — only those next to a moved dot, or all of them with no set given.
  */
-function placeDetail(moved) {
+function placeDetail(moved, only) {
   const m = S.map;
-  if (!m || !cfg.mapAutoDetail) return;
+  if (!m || (!cfg.mapAutoDetail && !only)) return;
   for (const c of m.contours) {
     const idx = c.idx, n = idx.length;
     for (let k = 0; k < n; k++) {
       const i = idx[k];
-      if (!FM.POINTS[i].mid || !m.vis[i]) continue;
+      if (!FM.POINTS[i].mid || !m.vis[i] || (only && !only.has(i))) continue;
       const at = d => c.closed ? idx[(k + d + n) % n] : idx[Math.min(n - 1, Math.max(0, k + d))];
       const p1 = at(-1), p2 = at(1);
       if (p1 === i || p2 === i) continue;
-      const p0 = c.closed || k - 3 >= 0 ? at(-3) : p1, p3 = c.closed || k + 3 < n ? at(3) : p2;
+      // the named dots before p1 and after p2 (next to a stretch without detail dots — the profile's jaw
+      // line — that's the very next dot, not the one after it)
+      const p0 = !c.closed && k - 2 < 0 ? p1 : FM.POINTS[at(-2)].mid ? (c.closed || k - 3 >= 0 ? at(-3) : p1) : at(-2);
+      const p3 = !c.closed && k + 2 >= n ? p2 : FM.POINTS[at(2)].mid ? (c.closed || k + 3 < n ? at(3) : p2) : at(2);
       if (moved && !moved.has(p0) && !moved.has(p1) && !moved.has(p2) && !moved.has(p3)) continue;
-      // Catmull-Rom midpoint between p1 and p2
-      for (const a of [0, 1]) m.p[2 * i + a] = (-m.p[2 * p0 + a] + 9 * m.p[2 * p1 + a] + 9 * m.p[2 * p2 + a] - m.p[2 * p3 + a]) / 16;
+      // halfway between p1 and p2 on the line as it's drawn (the centripetal spline; the uniform one's midpoint
+      // overshot where a short segment met a long one — the hairline, the jaw — and kinked the line)
+      const P4 = [p0, p1, p2, p3].map(j => ({ x: m.p[2 * j], y: m.p[2 * j + 1] })), q = FM.spline(P4, false, 2)[3];
+      m.p[2 * i] = q.x; m.p[2 * i + 1] = q.y;
     }
   }
 }
