@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '48';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '49';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1130,8 +1130,14 @@ async function ensureHead() {
   if (m.head && m.head.key === key) return m.head;
   try { await HM.load(`ict-head.bin?v=${BUILD}`); } catch (e) { console.warn(e); if (!ensureHead.warned) { ensureHead.warned = true; toast('The head model (ict-head.bin) didn’t load — the 3D uses the template instead', 6000); } return null; }
   if (S.map !== m || headKey() !== key) return null;
+  // (with the side photo's labels: where its outline runs over hair — a fringe over the forehead — it isn't the skin's)
   const sm = sideMapOf(), views = [{ view: 'front', p: m.p, vis: m.vis, weight: headWeight(false) }];
-  if (sm) views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: headWeight(true, sm), outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx });
+  if (sm) {
+    const sd = slots.side, labels = sd && sd.img ? await photoLabelsReady(sd.img, sd.iw, sd.ih) : null;
+    if (S.map !== m || headKey() !== key) return null;
+    const w = headWeight(true, sm), hair = FM.POINTS.map((pt, i) => labels && sm.vis[i] && pt.group !== 'ears' ? hairOver(labels, sm.p[2 * i], sm.p[2 * i + 1]) : 0);
+    views.push({ view: sm.view, p: sm.p, vis: sm.vis, weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
+  }
   // the modes' fit, then bent to what the photos show beyond them (the side photo's whole profile, jaw line
   // and neck) and to the depths you set by hand in 3D
   const res = HM.fit(views), C = HM.correspond(), vertOf = new Int32Array(NMAP).map((_, i) => C[i] ? C[i].v : -1);
@@ -5080,6 +5086,16 @@ function photoLabels(img, iw, ih) {
   })();
   return null;
 }
+/** The same, waited for (≈ 10 s at most; null if the segmenter can't be had). */
+async function photoLabelsReady(img, iw, ih) {
+  for (let t = 0; t < 100; t++) {
+    const L = photoLabels(img, iw, ih), s = segOf.get(img);
+    if (L) return L;
+    if (s && s.failed) return null;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return null;
+}
 /** How surely a photo shows skin or hair at (x, y) — not the background or clothes (0…1, over ≈ 1.5 % of the
     photo's size round it: a sharper edge, read vertex by vertex, showed as a zigzag along the collar). */
 function paintable(L, x, y) {
@@ -5090,6 +5106,16 @@ function paintable(L, x, y) {
     n++; if (c !== 0 && c !== 4) ok++;
   }
   return ok / n;
+}
+/** How much of what a photo shows round (x, y) is hair, of all the head there (0…1; 0 on the background alone). */
+function hairOver(L, x, y) {
+  const i0 = Math.round(x * L.sc), j0 = Math.round(y * L.sc), r = Math.max(3, Math.round(.008 * Math.max(L.w, L.h))), st = Math.max(1, Math.round(r / 4));
+  let h = 0, n = 0;
+  for (let dj = -r; dj <= r; dj += st) for (let di = -r; di <= r; di += st) {
+    const i = Math.min(L.w - 1, Math.max(0, i0 + di)), j = Math.min(L.h - 1, Math.max(0, j0 + dj)), c = L.d[j * L.w + i];
+    if (c === 1) { h++; n++; } else if (c === 2 || c === 3) n++;
+  }
+  return n ? h / n : 0;
 }
 let autoBusy = false;
 async function autoPlace() {
