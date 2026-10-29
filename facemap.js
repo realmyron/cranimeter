@@ -390,6 +390,10 @@ densify(FRONT_CONTOURS, false);
 densify(PROFILE_CONTOURS, true);
 
 const INDEX = Object.fromEntries(POINTS.map((p, i) => [p.id, i]));
+/* Each detail dot by the two named dots it lies between ('a|b', sorted) and back: their numbers change
+   when the template does, their neighbours don't (a saved map keeps its detail dots in any build). */
+const MID_KEY = {}, MID_BY_KEY = {};
+for (const [key, id] of MIDS) { MID_KEY[id] = key; MID_BY_KEY[key] = id; }
 /** Each point's mirror image across the face's midline (itself for midline points). */
 const MIRROR = POINTS.map((p, i) => {
   if (Math.abs(p.x) < 1e-6) return i;
@@ -675,8 +679,8 @@ function spline(pts, closed, steps = 8) {
 }
 
 window.CraniMap = {
-  POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX,
+  POINTS, INDEX, MIRROR, VIEWS, OPS, OP_INDEX, MID_KEY, MID_BY_KEY,
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '42',
+  mls, tpsFit, tpsEval, spline, build: '43',
 };
 })();
