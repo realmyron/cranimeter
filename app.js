@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '60';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '61';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1153,7 +1153,7 @@ async function ensureHead() {
     // (only the convexity points moved: the head as fitted, its fine bend again, seen again)
     if (m.head.cvk !== cvk && m.head.res.Xcv0) {
       const res = m.head.res, kz = HM.faceScale(res, 0) / mapFrame().scale;
-      HM.convexFit(res, convexViews(m, sideMapOf()));
+      HM.convexFit(res, convexViews(m, sideMapOf()), convexOpts(m));
       const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true, ortho: true });
       for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
       Pg.z = P.z;
@@ -1232,7 +1232,7 @@ async function ensureHead() {
     }
   }
   // … and last the convexity you set (the Convexity step): the surface's fine form between the dots
-  if (HM.convexFit) HM.convexFit(res, convexViews(m, sm), { fresh: true });
+  if (HM.convexFit) HM.convexFit(res, convexViews(m, sm), { fresh: true, ...convexOpts(m) });
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
   // against its pose's scale, and only its depth for its width in the photo is the head's.
@@ -1245,12 +1245,26 @@ async function ensureHead() {
   m.head = { key, cvk, id: ++headIds, res, P, Pg, vertOf, side: !!sm, dist: views.map(V => V.dist || 0), n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
   return m.head;
 }
-/* ---- convexity (step 3): the links' mid points, and the head they shape, shown as lit dots ---- */
+/* ---- convexity (step 3): links across the face's forms, each with its own ends and 1–3 points between ---- */
+/**
+ * A map's link ends you haven't moved: on their face-map dot (FM.ANCHOR) — the link stands alone once you move
+ * one, and follows the face map until then.
+ */
+function syncCvxEnds(m) {
+  if (!m) return;
+  for (let i = 0; i < NMAP; i++) { const a = FM.ANCHOR[i]; if (a >= 0 && !isUser(m, i)) { m.p[2 * i] = m.p[2 * a]; m.p[2 * i + 1] = m.p[2 * a + 1]; } }
+}
 /** The convexity links each map shows (every dot of it seen), for convexFit: the front map's (pose 0) and the side's (1). */
 const linksSeen = m => FM.links(m.yaw).filter(k => m.vis[k.a] && m.vis[k.b] && k.ms.every(i => m.vis[i]));
 function convexViews(fm, sm) {
-  const one = (m, q) => ({ q, p: m.p, user: i => isUser(m, i), links: linksSeen(m) });
+  const one = (m, q) => { syncCvxEnds(m); return { q, p: m.p, user: i => isUser(m, i), links: linksSeen(m) }; };
   return [fm && one(fm, 0), sm && one(sm, 1)].filter(Boolean);
+}
+/** The points set in 3D (the front map's cvh: how far out, cm), for convexFit. */
+function convexOpts(fm) {
+  const fixed = new Map();
+  if (fm && fm.cvh) fm.cvh.forEach((h, i) => { if (Number.isFinite(h)) fixed.set(i, h); });
+  return { fixed, links: FM.ALL_LINKS };
 }
 const convexStep = () => mapping() && S.mapStep === 'convex';
 /** The front map (with the head) and the side map, from either photo's tab. */
@@ -1258,78 +1272,19 @@ function convexMaps() {
   const side = curSlot === 'side', fm = side ? slots.front && slots.front.map : S.map, sm = side ? S.map : slots.side && slots.side.map;
   return { side, fm, sm: sm && isProfile(sm) && sm.snapped ? sm : null };
 }
-let cvxPrev = null, cvxRas = null, cvxScr = null, cvxTimer = 0;
+let cvxTimer = 0, cvxFollowKey = '';
 /**
- * The head's front-most skin under a grid of points on the photo, every g px (≈ 2.5 mm): per point its triangle
- * and barycentric weights — the circles of the Convexity step stay where they are on the photo, and only the
- * skin's light under them changes as the head does. Once per head and photo.
+ * The links' points you haven't placed on this photo follow the head as it is now: each is put where the head's
+ * own curve between the link's ends lies (so a point set in 3D shows on the photos too).
  */
-function convexRaster(h, q, g) {
-  const res = h.res, key = `${q}|${g.toFixed(2)}`;
-  if (cvxRas && cvxRas.X0 === res.Xcv0 && cvxRas.key === key) return cvxRas;
-  const M = HM.model, C = HM.correspond(), T = C.T, nS = M.nSkin, X0 = res.Xcv0, R = res.poses[q].R;
-  // (where the photo shows each vertex: the head's own 2D bend through the dots included)
-  const uv = (q ? HM.project(res, 1, 'traL', { all: true }) : h.P).uv;
-  const face = v => v < nS && !C.neck[v] && !C.ear[v] && T[3 * v + 1] > -11.5;
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (let v = 0; v < nS; v++) if (face(v)) { x0 = Math.min(x0, uv[2 * v]); x1 = Math.max(x1, uv[2 * v]); y0 = Math.min(y0, uv[2 * v + 1]); y1 = Math.max(y1, uv[2 * v + 1]); }
-  x0 = Math.floor(x0 / g) * g; y0 = Math.floor(y0 / g) * g;
-  const gw = Math.ceil((x1 - x0) / g) + 1, gh = Math.ceil((y1 - y0) / g) + 1, n = gw * gh;
-  const best = new Float32Array(n).fill(-Infinity), ti = new Int32Array(n).fill(-1), b1 = new Float32Array(n), b2 = new Float32Array(n);
-  const dep = v => -(R[2][0] * X0[3 * v] + R[2][1] * X0[3 * v + 1] + R[2][2] * X0[3 * v + 2]);
-  for (let t = 0; t < M.nTri; t++) {
-    const a = M.tri[3 * t], b = M.tri[3 * t + 1], c = M.tri[3 * t + 2];
-    if (!face(a) || !face(b) || !face(c)) continue;
-    const ax = (uv[2 * a] - x0) / g, ay = (uv[2 * a + 1] - y0) / g, bx = (uv[2 * b] - x0) / g, by = (uv[2 * b + 1] - y0) / g, cx = (uv[2 * c] - x0) / g, cy = (uv[2 * c + 1] - y0) / g;
-    const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-    if (Math.abs(den) < 1e-9) continue;
-    const da = dep(a), db = dep(b), dc = dep(c);
-    for (let j = Math.max(0, Math.ceil(Math.min(ay, by, cy))); j <= Math.min(gh - 1, Math.floor(Math.max(ay, by, cy))); j++) for (let i = Math.max(0, Math.ceil(Math.min(ax, bx, cx))); i <= Math.min(gw - 1, Math.floor(Math.max(ax, bx, cx))); i++) {
-      const l0 = ((by - cy) * (i - cx) + (cx - bx) * (j - cy)) / den, l1 = ((cy - ay) * (i - cx) + (ax - cx) * (j - cy)) / den, l2 = 1 - l0 - l1;
-      if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
-      const d = l0 * da + l1 * db + l2 * dc, k = j * gw + i;
-      if (d > best[k]) { best[k] = d; ti[k] = t; b1[k] = l0; b2[k] = l1; }
-    }
-  }
-  const xy = [], tri = [], w = [];
-  for (let k = 0; k < n; k++) if (ti[k] >= 0) { xy.push(x0 + (k % gw) * g, y0 + Math.floor(k / gw) * g); tri.push(ti[k]); w.push(b1[k], b2[k]); }
-  cvxRas = { X0: res.Xcv0, key, g, xy: Float32Array.from(xy), tri: Int32Array.from(tri), w: Float32Array.from(w) };
-  cvxScr = null;
-  return cvxRas;
-}
-/**
- * The head as your convexity points shape it, seen on this photo: the head as last fitted, with convexFit run
- * again on its state before them through the dots as they are now (so it follows a drag at once) — per circle of
- * the grid, how much light the skin under it catches (a crease is a row of small dark circles, a full roll large
- * bright ones) and how far your points moved it. The links' points you haven't placed follow the head: each is put
- * where the head's own curve between the link's ends lies. Null without a head (it's built on the front photo).
- */
-function convexPreview() {
-  const { side, fm, sm } = convexMaps(), h = fm && fm.head, m = S.map;
-  if (!HM || !HM.convexFit || !h || !h.res.Xcv0 || (side && (!h.side || !sm))) return null;
-  const res = h.res, q = side ? 1 : 0, pose = res.poses[q];
-  const key = `${h.id}|${fm.ver}|${sm ? sm.ver : '-'}|${cfg.cxLight ?? 105}`;
-  if (cvxPrev && cvxPrev.key === key) return cvxPrev;
-  const R = { ...res, X: Float32Array.from(res.Xcv0), Xcv0: res.Xcv0 };
-  const cv = HM.convexFit(R, convexViews(fm, h.side ? sm : null));
-  const X = R.X, X0 = res.Xcv0, M = HM.model, C = HM.correspond(), nS = M.nSkin, nrm = HM.normals(X);
-  const ras = convexRaster(h, q, .25 * mapFrame().scale), n0 = ras.n0 || (ras.n0 = HM.normals(X0)), Rm = pose.R, toCam = [-Rm[2][0], -Rm[2][1], -Rm[2][2]];
-  // (lit from above and a little to one side — Light turns it round: under a ledge the skin turns from it)
-  const a = (cfg.cxLight ?? 105) * Math.PI / 180, lc = [.75 * Math.cos(a), -.75 * Math.sin(a), .66], Ll = Math.hypot(...lc);
-  const lw = [0, 1, 2].map(j => (lc[0] * Rm[0][j] + lc[1] * Rm[1][j] - lc[2] * Rm[2][j]) / Ll);
-  const N = ras.tri.length, lit = new Float32Array(N).fill(-1), dz = new Float32Array(N);
-  for (let s = 0; s < N; s++) {
-    const t = ras.tri[s], w0 = ras.w[2 * s], w1 = ras.w[2 * s + 1], w2 = 1 - w0 - w1, a0 = M.tri[3 * t], a1 = M.tri[3 * t + 1], a2 = M.tri[3 * t + 2];
-    const nx = w0 * nrm[3 * a0] + w1 * nrm[3 * a1] + w2 * nrm[3 * a2], ny = w0 * nrm[3 * a0 + 1] + w1 * nrm[3 * a1 + 1] + w2 * nrm[3 * a2 + 1], nz = w0 * nrm[3 * a0 + 2] + w1 * nrm[3 * a1 + 2] + w2 * nrm[3 * a2 + 2];
-    const nl = Math.hypot(nx, ny, nz) || 1;
-    if ((nx * toCam[0] + ny * toCam[1] + nz * toCam[2]) / nl <= 0) continue;
-    lit[s] = Math.max(0, (nx * lw[0] + ny * lw[1] + nz * lw[2]) / nl);
-    let d = 0;
-    for (const [v, wv] of [[a0, w0], [a1, w1], [a2, w2]]) d += wv * ((X[3 * v] - X0[3 * v]) * n0[3 * v] + (X[3 * v + 1] - X0[3 * v + 1]) * n0[3 * v + 1] + (X[3 * v + 2] - X0[3 * v + 2]) * n0[3 * v + 2]);
-    dz[s] = 10 * d;
-  }
-  // the links' points you haven't placed: on the head's own curve between their link's ends
-  const vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1;
+function convexFollow() {
+  const { side, fm } = convexMaps(), h = fm && fm.head, m = S.map;
+  syncCvxEnds(m);
+  if (!HM || !h || (side && !h.side)) return;
+  const res = h.res, q = side ? 1 : 0, pose = res.poses[q], key = `${h.id}|${m.ver}|${q}`;
+  if (key === cvxFollowKey) return;
+  cvxFollowKey = key;
+  const X = res.X, X0 = res.Xcv0 || X, C = HM.correspond(), nS = HM.model.nSkin, vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1;
   for (const k of linksSeen(m)) {
     const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length;
     if (va < 0 || vb < 0 || va === vb || k.ms.every(i => isUser(m, i))) continue;
@@ -1347,56 +1302,18 @@ function convexPreview() {
       m.p[2 * i] = m.p[2 * k.a] + t * ux + d * ex; m.p[2 * i + 1] = m.p[2 * k.a + 1] + t * uy + d * ey;
     });
   }
-  // (the face's average light, for the circles' contrast: they're sized by how much more or less light a spot
-  // catches than the face does on the whole — a few mm of roll or crease then reads, not only the nose)
-  let ls = 0, ln = 0;
-  for (let s = 0; s < N; s++) if (lit[s] >= 0) { ls += lit[s]; ln++; }
-  cvxPrev = { key, ras, lit, dz, mean: ln ? ls / ln : .5, n: cv.n, h: cv.h };
-  return cvxPrev;
 }
-const CX_LIT = [214, 255, 238], CX_DARK = [96, 70, 52];
 function drawConvexStep(ctx) {
-  const pv = convexPreview(), mode = cfg.cxView || 'shape';
-  // (the photo dimmed under the circles, so they read — Photo turns it back up)
-  const veil = cfg.cxVeil ?? .6;
-  if (veil > 0 && mode !== 'off') { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = `rgba(12,9,7,${veil})`; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height); ctx.restore(); }
-  if (pv && mode !== 'off') {
-    const ras = pv.ras, N = ras.tri.length, vk = `${S.view.x}|${S.view.y}|${S.view.k}|${S.adj ? JSON.stringify(S.adj) : ''}`;
-    // (the circles' places on the screen: once per view)
-    if (!cvxScr || cvxScr.ras !== ras || cvxScr.vk !== vk) {
-      const xy = new Float32Array(2 * N);
-      for (let s = 0; s < N; s++) { const p = mapToScreen({ x: ras.xy[2 * s], y: ras.xy[2 * s + 1] }); xy[2 * s] = p.x; xy[2 * s + 1] = p.y; }
-      cvxScr = { ras, vk, xy, r: .5 * ras.g * S.view.k };
-    }
-    const xy = cvxScr.xy, R = cvxScr.r;
-    ctx.save();
-    // a circle per grid point: as big and as bright as the light the skin under it catches — a crease is a row of
-    // small dark circles, a full form large bright ones (Change: orange where your points moved it out, blue in)
-    for (let s = 0; s < N; s++) {
-      const L = pv.lit[s];
-      if (L < 0) continue;
-      const b = Math.max(0, Math.min(1, .55 + (L - pv.mean) * 2.6));
-      if (mode === 'change') {
-        const t = Math.max(-1, Math.min(1, pv.dz[s] / 3));
-        ctx.fillStyle = Math.abs(t) < .04 ? `rgba(214,255,238,${.18 + .3 * b})` : t > 0 ? `rgba(255,${Math.round(190 - 120 * t)},${Math.round(90 - 70 * t)},${.5 + .45 * t})` : `rgba(${Math.round(90 + 60 * t)},${Math.round(210 + 30 * t)},255,${.5 - .45 * t})`;
-      } else ctx.fillStyle = `rgba(${CX_LIT.map((c, j) => Math.round(CX_DARK[j] + (c - CX_DARK[j]) * b)).join(',')},${.45 + .5 * b})`;
-      ctx.beginPath(); ctx.arc(xy[2 * s], xy[2 * s + 1], R * (.18 + .8 * b), 0, TAU); ctx.fill();
-    }
-    ctx.restore();
-  }
+  convexFollow();
   drawMap(ctx);
 }
 function syncConvexPane() {
-  const { side, fm, sm } = convexMaps(), h = fm && fm.head, m = S.map, mine = m ? FM.POINTS.reduce((c, pt, i) => c + (pt.cvx && m.vis[i] && isUser(m, i) ? 1 : 0), 0) : 0;
-  const fresh = h && !side && h.key === headKey();
+  const { side, fm, sm } = convexMaps(), h = fm && fm.head, m = S.map, mine = m ? FM.POINTS.reduce((c, pt, i) => c + (pt.cvx && !pt.end && m.vis[i] && isUser(m, i) ? 1 : 0), 0) : 0;
+  const set3 = fm && fm.cvh ? fm.cvh.reduce((c, v) => c + (Number.isFinite(v) ? 1 : 0), 0) : 0;
   setText($('#cxStatus'), !h ? (side ? 'Open the front photo’s Convexity or the 3D tab once: the head is built there.' : 'Building the head…')
     : side && !(h.side && sm) ? 'The head was built without this profile — open the 3D tab to fit it again.'
-    : `${mine} of yours here${side ? ' · the 3D follows on the front photo' : fresh ? '' : ' · fitting…'}`);
-  $$('#cxView [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (cfg.cxView || 'shape')));
+    : `${mine} placed here${set3 ? ` · ${set3} set in 3D` : ''}`);
   $$('#cxRegions [data-r]').forEach(b => b.classList.toggle('off', !cxShown(b.dataset.r)));
-  setRange('cxLight', cfg.cxLight ?? 105, `${Math.round(cfg.cxLight ?? 105)}°`);
-  const ph = Math.round(100 * (1 - (cfg.cxVeil ?? .6)));
-  setRange('cxVeil', ph, ph + '%');
   $('#cxReset').disabled = !mine;
   $('#cx3d').hidden = side;
 }
@@ -2588,7 +2505,7 @@ function handOnHead() {
  * A depth you set holds (the head is fitted to it — while it's fitted again, the dot shows it).
  */
 function headDots(G) {
-  const m = S.map, hd = G.hd, key = `${m.pver}|${m.zoRev || 0}|${hd.id}`;
+  const m = S.map, hd = G.hd, key = `${m.pver}|${m.zoRev || 0}|${hd.id}|${m.cver || 0}`;
   if (hd.dots && hd.dots.key === key) return hd.dots.d;
   const h = m.head, P = h.P, M = HM.model, X = h.res.X, C = HM.correspond(), g = hd.geo, k2 = S.surf.pxcm, d = new Float32Array(3 * NMAP).fill(NaN);
   const neck = C.neck, cut = v => neck[v] && X[3 * v + 1] < hd.cutY;
@@ -2633,6 +2550,23 @@ function headDots(G) {
   });
   outlineOnRim(hd, d);
   if (m.zo) FM.POINTS.forEach((_, i) => { if (Number.isFinite(m.zo[i]) && Number.isFinite(d[3 * i])) d[3 * i + 2] = m.zo[i] * k2; });
+  // the convexity links' points: on the head where each lies on its link (both sides, the profile's too), and
+  // while one is dragged out or in, as far along the skin's normal as it's been dragged past the head as fitted
+  if (h.res.Xcv0) {
+    const X0 = h.res.Xcv0, nS = M.nSkin, vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1, R = h.res.poses[0].R, s = h.res.poses[0].s;
+    const nrm = hd.nrm || (hd.nrm = HM.normals(X)), applied = h.res.convex ? h.res.convex.h : new Map();
+    for (const k of FM.ALL_LINKS) {
+      const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length;
+      if (va < 0 || vb < 0 || va === vb) continue;
+      k.ms.forEach((i, j) => {
+        const v = HM.linkPoint(X0, va, vb, (j + 1) / (n + 1));
+        if (v < 0) return;
+        (hd.cvxV || (hd.cvxV = new Map())).set(i, v);
+        const extra = m.cvh && Number.isFinite(m.cvh[i]) ? m.cvh[i] - (applied.get(i) || 0) : 0, nv = [nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2]], dot = r => r[0] * nv[0] + r[1] * nv[1] + r[2] * nv[2];
+        d[3 * i] = g[3 * v] + extra * s * dot(R[0]); d[3 * i + 1] = g[3 * v + 1] + extra * s * dot(R[1]); d[3 * i + 2] = g[3 * v + 2] - extra * k2 * dot(R[2]);
+      });
+    }
+  }
   hd.dots = { key, d };
   return d;
 }
@@ -3050,6 +2984,34 @@ function stageDrag(sx, sy, e) {
   d.ls = { x: sx, y: sy };
   const [a, b, c, dd] = F.L, det = a * dd - b * c || 1, R = F.R, m = S.map, set = d.set;
   const ez = { x: a * R[2] + b * R[5], y: c * R[2] + dd * R[5] }, el2 = ez.x * ez.x + ez.y * ez.y;
+  // convexity points: along the skin's normal, as it lies on the screen — how far out or in the skin is there
+  // (cm, the front map's cvh: the head is given it as it is, not fitted to a photo; their places on the photos
+  // you set give way to it)
+  if ([...set.w.keys()].every(i => FM.POINTS[i].cvx)) {
+    const G = stageZ && stageZ.key === stageKeyOf() ? stageZ : null, h = m.head;
+    if (!G || !G.hd || !G.hd.cvxV || !h) return;
+    if (!d.cvhCopy) { d.cvhCopy = true; m.cvh = m.cvh ? Float32Array.from(m.cvh) : new Float32Array(NMAP).fill(NaN); }
+    const nrm = G.hd.nrm, R0 = h.res.poses[0].R, s = h.res.poses[0].s, k2 = S.surf.pxcm, applied = h.res.convex ? h.res.convex.h : new Map(), sm = slots.side && slots.side.map;
+    let flat = false;
+    const push = (i, w) => {
+      const v = G.hd.cvxV.get(i);
+      if (v == null) return;
+      const nv = [nrm[3 * v], nrm[3 * v + 1], nrm[3 * v + 2]], dot = r => r[0] * nv[0] + r[1] * nv[1] + r[2] * nv[2], q = dotPos3(i);
+      const p0 = proj3(F, q.x, q.y, q.z), p1 = proj3(F, q.x + s * dot(R0[0]), q.y + s * dot(R0[1]), q.z - k2 * dot(R0[2]));
+      const ex = p1.x - p0.x, ey = p1.y - p0.y, e2 = ex * ex + ey * ey;
+      if (e2 < 4) { flat = true; return; }   // (the normal points at you: turn the head to see out and in)
+      const h0 = Number.isFinite(m.cvh[i]) ? m.cvh[i] : applied.get(i) || 0;
+      m.cvh[i] = clamp(h0 + w * (ds.x * ex + ds.y * ey) / e2, -1, 1);
+      if (m.user) m.user[i] = 0;
+      if (sm && sm.user) sm.user[i] = 0;
+    };
+    for (const [i, w] of set.w) push(i, w);
+    for (const [j, w] of set.mirror) push(j, w);
+    if (flat && !d.flatNote) { d.flatNote = true; toast('Turn the head a little to push this point out or in'); }
+    m.cver = (m.cver || 0) + 1;
+    wake();
+    return;
+  }
   if (rotated() && el2 > .04 * Math.abs(det)) {
     if (!m.zo) m.zo = new Float32Array(NMAP).fill(NaN);
     const dzc = (ds.x * ez.x + ds.y * ez.y) / el2 / S.surf.pxcm;
@@ -3412,7 +3374,7 @@ function snapshot() {
     img: S.imgRec,
     adj: { ...S.adj, ell: S.adj.ell ? { ...S.adj.ell } : null },
     warp: S.warp,   // field arrays are copy-on-write, so sharing the reference is safe
-    map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light, zo: S.map.zo ? S.map.zo.slice() : null, af: S.map.af ? { ...S.map.af } : null } : null,
+    map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light, zo: S.map.zo ? S.map.zo.slice() : null, af: S.map.af ? { ...S.map.af } : null, user: S.map.user ? S.map.user.slice() : null, cvh: S.map.cvh ? S.map.cvh.slice() : null } : null,
     anat: { ...S.anat }, anatBase: { ...S.anatBase },
     tone: S.tone,   // paint arrays are copy-on-write too
     surf: S.surf,   // so is the face surface (and its fixes)
@@ -3456,6 +3418,13 @@ function restore(s) {
         if (sm.af) S.map.af = { ...sm.af };
         buildMask();
       } else S.mapSel.clear();
+    }
+    // (which dots you placed, and the convexity set in 3D: an undo used to drop them — the convexity points you'd
+    // placed went back to following the head)
+    if (S.map && sm && 'user' in sm) {
+      S.map.user = sm.user ? Uint8Array.from(sm.user) : null;
+      S.map.cvh = sm.cvh ? Float32Array.from(sm.cvh) : null;
+      S.map.cver = (old ? old.cver || 0 : 0) + 1;
     }
   }
   if (s.anat) { S.anat = { ...s.anat }; S.anatBase = { ...(s.anatBase || {}) }; if (S.map) mapTouched(false); }
@@ -4017,9 +3986,15 @@ const QFIT = {
 const qfitSteps = () => (S.qfit && S.qfit.steps) || QFIT[isProfile() ? 'profile' : 'front'];
 const qfitId = st => st.id.replace('#', FM.nearSide(S.map ? S.map.yaw : 0));
 /** Is this dot shown (and grabbable) in Map? */
-// (the convexity points only in the Convexity step, and only their regions shown there)
+// (the convexity points only in the Convexity step, and only their regions shown there; in the 3D their points
+// between the ends, on the head — dragged, they push the skin out or in)
 const cxShown = region => !(cfg.cxHide || []).includes(region);
-const dotShown = i => S.map.vis[i] && !S.hideGroups.has(FM.POINTS[i].group) && (!FM.POINTS[i].cvx || (convexStep() && cxShown(FM.POINTS[i].region)));
+/** The front map (the 3D's), from either photo's tab; a convexity point set in 3D (its cvh). */
+const frontMap = () => curSlot === 'front' ? S.map : slots.front && slots.front.map;
+const cvxSet3 = i => { const fm = frontMap(); return !!(fm && fm.cvh && Number.isFinite(fm.cvh[i])); };
+let CVX_MIDS = null;
+const cvx3 = i => stageOn() && !!(S.map.head && S.map.head.res.Xcv0) && (CVX_MIDS || (CVX_MIDS = new Set(FM.ALL_LINKS.flatMap(k => k.ms)))).has(i);
+const dotShown = i => { const pt = FM.POINTS[i]; if (S.hideGroups.has(pt.group)) return false; if (!pt.cvx) return !!S.map.vis[i]; if (!cxShown(pt.region)) return false; return convexStep() ? !!S.map.vis[i] : cvx3(i); };
 /** Screen positions of every scan dot (on the photo as it was). */
 const mapScreenPts = () => {
   if (stageOn()) {   // on the 3D relief; turned, dots behind it are marked hidden
@@ -4165,7 +4140,7 @@ function drawMap(ctx) {
     if (cx && !pt.cvx && !sel) ctx.globalAlpha = .45;
     ctx.beginPath(); ctx.arc(p.x, p.y, r + (pt.detail ? 1.1 : 1.5), 0, TAU); ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fill();
     // (a convexity point you haven't placed — it follows the head — is a ring)
-    if (pt.cvx && !sel && !isUser(m, i)) { ctx.beginPath(); ctx.arc(p.x, p.y, r - .4, 0, TAU); ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke(); ctx.globalAlpha = 1; return; }
+    if (pt.cvx && !sel && !isUser(m, i) && !cvxSet3(i)) { ctx.beginPath(); ctx.arc(p.x, p.y, r - .4, 0, TAU); ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke(); ctx.globalAlpha = 1; return; }
     ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fillStyle = sel ? '#FFFFFF' : col; ctx.fill();
     if (sel) { ctx.beginPath(); ctx.arc(p.x, p.y, r - 1.6, 0, TAU); ctx.fillStyle = col; ctx.fill(); }
     if (pt.lm && !sel) { ctx.beginPath(); ctx.arc(p.x, p.y, 1.1, 0, TAU); ctx.fillStyle = '#0B0E14'; ctx.fill(); }
@@ -5033,6 +5008,9 @@ function shiftDots(list) {
   // ensureHead; a full fit took seconds after every drag)
   if (list.every(([i]) => FM.POINTS[i].cvx)) { m.cver = (m.cver || 0) + 1; mapTouched(false); }
   else mapTouched(true);
+  // (a convexity point placed on a photo again: what was set for it in 3D gives way)
+  const fm = frontMap();
+  if (fm && fm.cvh && !stageOn()) { let any = false; for (const [i] of list) if (FM.POINTS[i].cvx && Number.isFinite(fm.cvh[i])) { if (!any) fm.cvh = Float32Array.from(fm.cvh); any = true; fm.cvh[i] = NaN; } if (any) fm.cver = (fm.cver || 0) + 1; }
   if (edge) {
     m.maskDirty = true;
     if (now() - (m.maskT || 0) > 120) { buildMask(); m.maskT = now(); m.maskDirty = false; }
@@ -5663,7 +5641,8 @@ function exportFaceMap() {
     app: 'cranimeter', kind: 'face-map', version: 2, build: BUILD, saved: new Date().toISOString(),
     image: { width: S.iw, height: S.ih },
     // (mids: each detail dot's two named neighbours — its number may differ in another build)
-    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [], mids: FM.MID_KEY } : null,
+    // (convexity: the points set in 3D, mm out (+) or in (−))
+    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [], mids: FM.MID_KEY, convexity: m.cvh ? Object.fromEntries(FM.POINTS.map((pt, i) => [pt.id, m.cvh[i]]).filter(([, v]) => Number.isFinite(v)).map(([id, v]) => [id, Math.round(v * 1000) / 100])) : {} } : null,
     measurements, reference: S.refId || null, calibration: S.calibId ? { id: S.calibId, mm: S.calibMM } : null,
     light: S.lightDir, marks: S.hints ? { gw: S.hints.gw, gh: S.hints.gh, highlight: enc8(S.hints.hl), notShape: enc8(S.hints.ig) } : null,
     surface: { trust: cfg.surfTrust, detail: cfg.surfDetail }, morph: { ...S.anat },
@@ -5721,6 +5700,10 @@ async function importFaceMap(file) {
     S.map.user = null;
     if (Array.isArray(doc.map.user)) for (const id of doc.map.user) { const i = resolve(id); if (i != null) markUser(S.map, i); }
     else for (const { i } of pairs) if (FM.POINTS[i].lm) markUser(S.map, i);
+    if (doc.map.convexity && Object.keys(doc.map.convexity).length) {
+      S.map.cvh = new Float32Array(NMAP).fill(NaN);
+      for (const [id, mm] of Object.entries(doc.map.convexity)) { const i = resolve(id); if (i != null && FM.POINTS[i].cvx) S.map.cvh[i] = mm / 10; }
+    }
     if (doc.map.depth && Object.keys(doc.map.depth).length) {
       S.map.zo = new Float32Array(NMAP).fill(NaN);
       for (const [id, z] of Object.entries(doc.map.depth)) { const i = resolve(id); if (i != null) S.map.zo[i] = z; }
@@ -6550,7 +6533,9 @@ function enter3D() {
   openFaceMap(true);
   S.mapStep = 'surface'; S.qfit = null; S.mapSel.clear(); S.mapHover = null;
   if (/^h[A-Z]/.test(cfg.surfBrush || '')) cfg.surfBrush = '';
-  if (!S.surf || S.surf.view !== S.map.view || S.surf.pver !== S.map.pver || S.surf.deps !== surfDeps()) buildSurface({ auto: true });
+  // (and when the head is out of date: its convexity moved since — the 3D showed the head as last built, with or
+  // without your convexity depending on the way back into it)
+  if (!S.surf || S.surf.view !== S.map.view || S.surf.pver !== S.map.pver || S.surf.deps !== surfDeps() || !(S.map.head && S.map.head.key === headKey() && S.map.head.cvk === headCvk())) buildSurface({ auto: true });
   S.rot3 = { yaw: .55, pitch: .1 };
   S.glDirty = true; syncUI();
   if (!sideProfile()) toast(slots.side && slots.side.map && slots.side.map.snapped ? 'The side map didn’t line up with the front one — check its dots' : 'Built from the front photo alone — map the side photo too for the true profile', 5000);
@@ -7357,12 +7342,8 @@ function buildFaceMapPanel() {
       <p class="to-note" id="cxStatus"></p>
       <div class="to-label">Show</div>
       <div class="chips" id="cxRegions">${[['brow', 'Brow'], ['eye', 'Eyes'], ['temple', 'Temples'], ['cheek', 'Cheeks'], ['lips', 'Lips'], ['jaw', 'Jaw']].map(([r, n]) => `<button type="button" class="chip-dot" data-r="${r}" style="--c:${MAP_COLORS.skin}"><i></i>${n}</button>`).join('')}</div>
-      <div class="to-label">Shape</div>
-      <div class="seg full" id="cxView" style="margin-bottom:8px"><button type="button" data-v="shape" title="Circles as big and bright as the light the 3D head catches there: a crease is a row of small dark ones, a full form large bright ones">Light</button><button type="button" data-v="change" title="Orange: out, blue: in — what your points change">Change</button><button type="button" data-v="off">Off</button></div>
-      ${sliderRow('cxLight', 'Light from', 0, 360, 1, 'Where the circles are lit from (90° = above)')}
-      ${sliderRow('cxVeil', 'Photo', 0, 100, 1, 'How bright the photo stays under the circles')}
       <div class="to-actions" style="margin:2px 0 6px"><button type="button" class="btn ghost sm" id="cxReset" title="Your convexity points on this photo follow the head again">Follow the head</button><button type="button" class="btn ghost sm" id="cx3d">3D →</button></div>
-      <p class="to-note">Drag a mid-point across its line: out for a roll or fullness, in for a crease or hollow. Rings follow the head, filled points are yours.</p>
+      <p class="to-note">Drag a point across its line: out for a roll or fullness, in for a crease or hollow. A link's ends are its own. Rings follow the head, filled points are yours. In 3D, drag a point to push the skin out or in.</p>
     </div>
     <div id="fmSurface" hidden>
       <p class="to-note" id="sfStatus"></p>
@@ -7403,7 +7384,7 @@ function buildFaceMapPanel() {
     if (curTab() === '3d') { S.rot3 = { yaw: 0, pitch: 0 }; back3D = null; }   // (back to the front tab, at that step)
     S.mapStep = b.dataset.v; S.qfit = null; S.mapSel.clear(); S.mapHover = null;
     // (Convexity shows the head: fitted first, on the front photo)
-    if (S.mapStep === 'convex') { cvxPrev = null; scheduleConvexHead(); }
+    if (S.mapStep === 'convex') { cvxFollowKey = ''; scheduleConvexHead(); }
     // keep the brush that belongs to the step
     if (S.mapStep === 'light' && !/^h[A-Z]/.test(cfg.surfBrush || '')) cfg.surfBrush = '';
     if (S.mapStep === 'surface' && /^h[A-Z]/.test(cfg.surfBrush || '')) cfg.surfBrush = '';
@@ -7446,9 +7427,6 @@ function buildFaceMapPanel() {
   $('#lgViews').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.lightView = b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
   $('#lgDetect').addEventListener('click', () => detectMarks(false));
   $('#lgNext').addEventListener('click', () => $('#fmStep [data-v="convex"]').click());
-  $('#cxView').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.cxView = b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
-  $('#cxLight').addEventListener('input', e => { cfg.cxLight = +e.target.value; saveCfg(); cvxPrev = null; syncFaceMapPanel(); wake(); });
-  $('#cxVeil').addEventListener('input', e => { cfg.cxVeil = 1 - e.target.value / 100; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#cxRegions').addEventListener('click', e => {
     const b = e.target.closest('[data-r]');
     if (!b) return;
@@ -7466,7 +7444,7 @@ function buildFaceMapPanel() {
     if (!mine.length) return;
     pushUndo();
     for (const i of mine) m.user[i] = 0;
-    m.cver = (m.cver || 0) + 1; mapTouched(false); cvxPrev = null; scheduleConvexHead(); syncUI(); wake();
+    m.cver = (m.cver || 0) + 1; mapTouched(false); cvxFollowKey = ''; scheduleConvexHead(); syncUI(); wake();
   });
   $('#mFeat').addEventListener('click', e => { const b = e.target.closest('[data-f]'); if (b && S.map) selectFeature(FEATURES[isProfile() ? 'profile' : 'front'][+b.dataset.f][1]); });
   const sbind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncFaceMapPanel(); wake(); });
