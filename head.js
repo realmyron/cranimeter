@@ -117,7 +117,7 @@ function correspond() {
   outline.forEach((i, q) => { const a = P[outline[(q + outline.length - 1) % outline.length]], b = P[outline[(q + 1) % outline.length]]; let nx = b.y - a.y, ny = -(b.x - a.x); const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L; if (nx * P[i].x + ny * (P[i].y + 1) < 0) { nx = -nx; ny = -ny; } on.set(i, [nx, ny]); });
   corr = P.map((pt, i) => {
     const p = [pt.x, pt.y, pt.z], base = pt.id.replace(/[LR]$/, '');
-    if (/^(pu|irI|irO|cor)$/.test(base)) return { v: near(p, nS, m.N, j => T[3 * j + 2] > pt.z - 1) };
+    if (/^(pu|irI|irO|cor1)$/.test(base)) return { v: near(p, nS, m.N, j => T[3 * j + 2] > pt.z - 1) };
     const v = Math.abs(pt.x) < 1e-6 ? near(p, 0, nS, j => Math.abs(T[3 * j]) < .12) : near(p, 0, nS);
     const out = { v };
     if (SIL.test(pt.id) || (pt.mid && on.has(i) && pt.y > -4.5)) {
@@ -1414,21 +1414,22 @@ function anatomyFromLight(res, views, opt = {}) {
  * keeps the head before them in res.Xcv0; returns res.convex = { n, ms, h: Map(mid → cm) }.
  */
 /**
- * A link's mid on the head (Y): the skin half way between its ends' vertices — the one under the point between
- * them, pushed out along their normals (on the surface between them, not through it). (The template's own
- * point for it was sometimes its end's vertex: under the jaw, on a 4 mm link above the eye beside it.)
- * Cached per head state.
+ * A point of a link on the head (Y): the skin a fraction t of the way between its ends' vertices — the one under
+ * that point of the line between them, pushed out along their normals (on the surface between them, not through
+ * it). (The template's own point for it was sometimes its end's vertex: under the jaw, on a 4 mm link above the
+ * eye beside it.) Cached per head state.
  */
 const midCache = new WeakMap();
-function linkMid(Y, va, vb) {
+const linkMid = (Y, va, vb) => linkPoint(Y, va, vb, .5);
+function linkPoint(Y, va, vb, t0) {
   let c = midCache.get(Y);
   if (!c) midCache.set(Y, c = { nrm: normals(Y), map: new Map() });
-  const key = va < vb ? va * 1e6 + vb : vb * 1e6 + va;
+  const key = `${va},${vb},${t0.toFixed(3)}`;
   if (c.map.has(key)) return c.map.get(key);
   const n = c.nrm, nS = model.nSkin, L = Math.hypot(Y[3 * va] - Y[3 * vb], Y[3 * va + 1] - Y[3 * vb + 1], Y[3 * va + 2] - Y[3 * vb + 2]);
   let nx = n[3 * va] + n[3 * vb], ny = n[3 * va + 1] + n[3 * vb + 1], nz = n[3 * va + 2] + n[3 * vb + 2];
-  const nl = Math.hypot(nx, ny, nz) || 1, k = .5 * L / nl;
-  const p = [(Y[3 * va] + Y[3 * vb]) / 2 + k * nx, (Y[3 * va + 1] + Y[3 * vb + 1]) / 2 + k * ny, (Y[3 * va + 2] + Y[3 * vb + 2]) / 2 + k * nz];
+  const nl = Math.hypot(nx, ny, nz) || 1, k = 2 * t0 * (1 - t0) * L / nl;
+  const p = [0, 1, 2].map(j => Y[3 * va + j] + t0 * (Y[3 * vb + j] - Y[3 * va + j]) + k * [nx, ny, nz][j]);
   // (between the ends along the line, near it, and facing the way they do: round the eye the nearest was the
   // lid's margin under both ends)
   const ax = Y[3 * va], ay = Y[3 * va + 1], az = Y[3 * va + 2], bx = Y[3 * vb] - ax, by = Y[3 * vb + 1] - ay, bz = Y[3 * vb + 2] - az, L2 = L * L || 1;
@@ -1438,7 +1439,7 @@ function linkMid(Y, va, vb) {
     const dx = Y[3 * v] - p[0], dy = Y[3 * v + 1] - p[1], dz = Y[3 * v + 2] - p[2], d = dx * dx + dy * dy + dz * dz;
     if (d < ad) { ad = d; any = v; }
     const t = ((Y[3 * v] - ax) * bx + (Y[3 * v + 1] - ay) * by + (Y[3 * v + 2] - az) * bz) / L2;
-    if (t < .3 || t > .7 || (n[3 * v] * nx + n[3 * v + 1] * ny + n[3 * v + 2] * nz) / nl < .3) continue;
+    if (Math.abs(t - t0) > .2 || (n[3 * v] * nx + n[3 * v + 1] * ny + n[3 * v + 2] * nz) / nl < .3) continue;
     const qx = Y[3 * v] - ax - t * bx, qy = Y[3 * v + 1] - ay - t * by, qz = Y[3 * v + 2] - az - t * bz;
     if (qx * qx + qy * qy + qz * qz > .36 * L2) continue;
     if (d < bd) { bd = d; best = v; }
@@ -1522,18 +1523,24 @@ function convexFit(res, views, opt = {}) {
   if (!res.Xcv0 || opt.fresh) res.Xcv0 = Float32Array.from(X);
   const X0 = res.Xcv0, n0 = smoothNormals(X0), mir = mirrorOf(), FMIR = FM.MIRROR;
   const vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1;
-  // the rows: one per link you placed the mid of, per photo
+  // the rows: one per link point you placed, per photo. A link's points are the head's a fraction 1/(n+1), 2/(n+1)…
+  // of the way between its ends; each bends between its neighbours on the link (the points before and after it,
+  // or its ends) — so 2 or 3 points on a link draw a curve, not one bump
   const L = [];
   views.forEach(V => {
     for (const k of V.links) {
-      if (!V.user(k.m)) continue;
-      const va = vOf(k.a), vb = vOf(k.b), vm = va >= 0 && vb >= 0 && va !== vb && vOf(k.m) >= 0 ? linkMid(X0, va, vb) : -1;
-      if (va < 0 || vm < 0 || vb < 0) continue;
-      const A = [V.p[2 * k.a], V.p[2 * k.a + 1]], B = [V.p[2 * k.b], V.p[2 * k.b + 1]], M = [V.p[2 * k.m], V.p[2 * k.m + 1]];
-      const cx = B[0] - A[0], cy = B[1] - A[1], Lu = Math.hypot(cx, cy);
+      if (!k.ms.some(i => V.user(i))) continue;
+      const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length;
+      if (va < 0 || vb < 0 || va === vb) continue;
+      const nodes = [va, ...k.ms.map((_, j) => linkPoint(X0, va, vb, (j + 1) / (n + 1))), vb];
+      if (nodes.some(v => v < 0)) continue;
+      const A = [V.p[2 * k.a], V.p[2 * k.a + 1]], B = [V.p[2 * k.b], V.p[2 * k.b + 1]], cx = B[0] - A[0], cy = B[1] - A[1], Lu = Math.hypot(cx, cy);
       if (!(Lu > 3)) continue;
-      const t = ((M[0] - A[0]) * cx + (M[1] - A[1]) * cy) / (Lu * Lu), d = ((M[0] - A[0]) * -cy + (M[1] - A[1]) * cx) / Lu;
-      L.push({ q: V.q, i: k.m, va, vm, vb, Lu, tu: t, du: d, ex: -cy / Lu, ey: cx / Lu });
+      k.ms.forEach((i, j) => {
+        if (!V.user(i)) return;
+        const d = ((V.p[2 * i] - A[0]) * -cy + (V.p[2 * i + 1] - A[1]) * cx) / Lu;
+        L.push({ q: V.q, i, va, vb, vm: nodes[j + 1], prev: nodes[j], next: nodes[j + 2], du: d, ex: -cy / Lu, ey: cx / Lu });
+      });
     }
   });
   const ids = [...new Set(L.map(r => r.i))], nk = ids.length, col = new Map(ids.map((i, c) => [i, c]));
@@ -1541,14 +1548,13 @@ function convexFit(res, views, opt = {}) {
   if (!nk) { X.set(X0); return res.convex; }
   // each bump (bumpField): from a side photo alone, its mirror on the other side too
   const bump = ids.map(i => {
-    const r = L.find(o => o.i === i), onlySide = L.every(o => o.i !== i || o.q > 0), mi = FMIR[i], ms = [r.vm, r.va, r.vb].map(v => mir[v]);
-    const F = bumpField(X0, r.vm, r.va, r.vb);
+    const r = L.find(o => o.i === i), onlySide = L.every(o => o.i !== i || o.q > 0), mi = FMIR[i], ms = [r.vm, r.prev, r.next].map(v => mir[v]);
+    const F = bumpField(X0, r.vm, r.prev, r.next);
     if (!(onlySide && !col.has(mi) && ms.every(v => v >= 0) && ms[0] !== r.vm)) return F;
     const G = bumpField(X0, ms[0], ms[1], ms[2]), idx = Int32Array.from([...F.idx, ...G.idx]), w = Float32Array.from([...F.w, ...G.w]), at = new Map(F.at);
     G.at.forEach((x, v) => at.set(v, (at.get(v) || 0) + x));
     return { idx, w, at };
   });
-  const hump = t => 4 * Math.min(.85, Math.max(.15, t)) * (1 - Math.min(.85, Math.max(.15, t)));
   const phi = (v, j) => bump[j].at.get(v) || 0;
   const h = new Float64Array(nk);
   const apply = () => {
@@ -1559,7 +1565,11 @@ function convexFit(res, views, opt = {}) {
       for (let q = 0; q < idx.length; q++) { const v = idx[q], s = h[j] * w[q]; X[3 * v] += s * n0[3 * v]; X[3 * v + 1] += s * n0[3 * v + 1]; X[3 * v + 2] += s * n0[3 * v + 2]; }
     }
   };
-  const sbar = views.reduce((s, V) => s + res.poses[V.q].s, 0) / views.length, lam = ((opt.lambda ?? .3) * sbar) ** 2, eps = .05;
+  // (held near none: at .3 a point where the skin faces the photo sideways — a cheek, the outer orbit, from the
+  // side — came out at a third of how far you moved it; at .12 at ⅔–⅘. A bump the lids' guard mostly mutes is
+  // held the harder: unseen, it swung to the cap)
+  const sbar = views.reduce((s, V) => s + res.poses[V.q].s, 0) / views.length, lam = ((opt.lambda ?? .12) * sbar) ** 2, eps = .05;
+  const lamOf = ids.map((i, j) => { const r = L.find(o => o.i === i); return lam / Math.max(.1, phi(r.vm, j)) ** 2; });
   for (let it = 0; it < (opt.iters || 3); it++) {
     // (the image's motion when a vertex moves along its normal, per cm)
     const Dn = (pose, v) => { const p = X.subarray(3 * v, 3 * v + 3), a = projK(pose, p), b = projK(pose, [p[0] + eps * n0[3 * v], p[1] + eps * n0[3 * v + 1], p[2] + eps * n0[3 * v + 2]]); return [(b[0] - a[0]) / eps, (b[1] - a[1]) / eps]; };
@@ -1571,8 +1581,7 @@ function convexFit(res, views, opt = {}) {
       // whose dots off the midline the bend before doesn't follow: across its chord the bulge pointed elsewhere)
       const ex = r.ex, ey = r.ey, th = Lh > 1 ? Math.min(1, Math.max(0, ((Mh[0] - A[0]) * cx + (Mh[1] - A[1]) * cy) / (Lh * Lh))) : .5;
       const dh = (Mh[0] - A[0] - th * cx) * ex + (Mh[1] - A[1] - th * cy) * ey;
-      // (how far off the line, at the middle — the user's mid may sit nearer one end than the head's)
-      const want = r.du / hump(r.tu) * hump(th), e = want - dh;
+      const e = r.du - dh;
       const Da = Dn(pose, r.va), Db = Dn(pose, r.vb), Dm = Dn(pose, r.vm), J = new Float64Array(nk);
       for (let j = 0; j < nk; j++) {
         const fa = phi(r.va, j), fb = phi(r.vb, j), fm = phi(r.vm, j);
@@ -1581,9 +1590,9 @@ function convexFit(res, views, opt = {}) {
       }
       for (let a = 0; a < nk; a++) { if (!J[a]) continue; rhs[a] += J[a] * e; for (let b = 0; b < nk; b++) M[a][b] += J[a] * J[b]; }
     }
-    for (let a = 0; a < nk; a++) { M[a][a] += lam; rhs[a] -= lam * h[a]; }
+    for (let a = 0; a < nk; a++) { M[a][a] += lamOf[a]; rhs[a] -= lamOf[a] * h[a]; }
     const dh = solve(M.map(r => Array.from(r)), Array.from(rhs));
-    for (let j = 0; j < nk; j++) h[j] = Math.max(-.6, Math.min(.6, h[j] + dh[j]));
+    for (let j = 0; j < nk; j++) h[j] = Math.max(-.5, Math.min(.5, h[j] + dh[j]));
     apply();
   }
   ids.forEach((i, j) => res.convex.h.set(i, h[j]));
@@ -1714,5 +1723,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '58' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, linkPoint, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '59' };
 })();
