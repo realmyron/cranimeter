@@ -234,7 +234,10 @@ function fit(views, opt = {}) {
   // (its head is the one shown) they traded the lips' thickness for a gap between them, but a side photo's
   // lips set otherwise — 4 mm higher on a real pair — had lifted the head's lips off the front photo's.
   const LIPS = /^mouth(LowerDown|UpperUp|Pucker|Funnel)/;
-  const EX = opt.expr === false ? [] : m.exprNames.map((nm, j) => ({ nm, j })).filter(o => (opt.exprRe || /^(eye(Blink|Wide|Squint)|cheekSquint|mouth(Smile|Frown|Stretch|Press|Dimple|LowerDown|UpperUp|Pucker|Funnel))/).test(o.nm));
+  // (not the eyes' — blink, wide, squint: since the head follows the front map across the photo (alignFront) the
+  // lids land on its dots anyway, and a half blink only folded the upper lid in depth, a crease under the outer
+  // brow that the face didn't have)
+  const EX = opt.expr === false ? [] : m.exprNames.map((nm, j) => ({ nm, j })).filter(o => (opt.exprRe || /^(cheekSquint|mouth(Smile|Frown|Stretch|Press|Dimple|LowerDown|UpperUp|Pucker|Funnel))/).test(o.nm));
   const nE = EX.length, lamE = opt.lamE ?? .05, lamLR = opt.lamLR ?? .2, lamS = opt.lamS ?? lamLR, nV = views.length;
   const twin = EX.map(o => EX.findIndex(p => p.nm === o.nm.replace(/_L$/, '_R')) ).map((t, a) => /_L$/.test(EX[a].nm) ? t : -1);
   const ex = views.map(() => new Float64Array(nE)), OFF = views.map(() => new Float32Array(3 * N));
@@ -606,7 +609,7 @@ function mirrorOf() {
 // they flattened the cheeks into planes and bulged them out sideways) — but its eye's ('sy': the pupil, the eye's
 // corners), the eye's front being what a profile shows plainly: without them the front photo's eyes, fitted by
 // the modes, sat 8 mm deeper under the brow than the side photo's on a real pair — a heavy brow, sunken corners.
-let ROW_KINDS = ['fp', 'fm', 'fe', 'sp', 'sy', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1, fm: .1 };
+let ROW_KINDS = ['fp', 'fm', 'fe', 'sp', 'sy', 'sa', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1, fm: .1 };
 /** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
 function deform(res, views, opt = {}) {
   // (the bend's scales: 2.5 cm half as much as 5 cm, and held back more — with the 2.5 cm one leading, the side
@@ -729,6 +732,36 @@ function deform(res, views, opt = {}) {
           rows.push({ v: vert, g: dir(pose, vert, 1, 0), e: eu, w: o.w, i: o.i, q }, { v: vert, g: dir(pose, vert, 0, 1), e: ev, w: o.w, i: o.i, q });
         }
       }
+      // a side photo's anatomy (V.anat(i) → weight: the cheekbone, the orbit's rims, the tear trough, the brow's
+      // ridge, the submalar hollow — dots you placed): how far forward each lies, which is what a profile shows
+      // of them (not how high: that's the front photo's) — 'sa'. Without them a face with well-projected
+      // cheekbones and infraorbital rims came out as the scans' average there
+      // (which point of the head: the one under the front map's dot of the same name — a profile shows how far
+      // forward a cheek point is, the front photo which one it is; taken as the scans' own place for it instead, a
+      // submalar dot came out 22 mm off its point and dug the cheek in. Within 3 cm of that place; and a dot still
+      // over 12 mm off its point is left out — the two photos don't agree what it marks)
+      if (!front && V.anat) {
+        const F = views.findIndex(W => W.view === 'front'), Vf = views[F], pf = res.poses[F];
+        for (let i = 0; i < P.length; i++) {
+          const w = V.vis[i] ? V.anat(i) : 0;
+          if (!(w > 0) || !C[i] || C[i].v < 0) continue;
+          let vert = C[i].v;
+          if (Vf && Vf.vis[i]) {
+            const t = C[i].v, fx = Vf.p[2 * i], fy = Vf.p[2 * i + 1], n0 = res.nrm0 || (res.nrm0 = normals(X0)), vd = [0, 1, 2].map(j => -pf.R[2][j]);
+            let bd = Infinity;
+            for (let j = 0; j < nS; j++) {
+              if ((X0[3 * j] - X0[3 * t]) ** 2 + (X0[3 * j + 1] - X0[3 * t + 1]) ** 2 + (X0[3 * j + 2] - X0[3 * t + 2]) ** 2 > 9) continue;
+              if (n0[3 * j] * vd[0] + n0[3 * j + 1] * vd[1] + n0[3 * j + 2] * vd[2] < .2) continue;
+              const [a2, b2] = proj(x0q(j, F), pf), d = (a2 - fx) ** 2 + (b2 - fy) ** 2;
+              if (d < bd) { bd = d; vert = j; }
+            }
+          }
+          const [u] = proj(x0q(vert, q), pose), e = (V.p[2 * i] - u) / s;
+          if (Math.abs(e) > 1.2) continue;
+          // (along the photo's across — the face's forward in a profile)
+          rows.push({ v: vert, g: dir(pose, vert, 1, 0), e, w, i, q, anat: true });
+        }
+      }
       // the outline's samples: the head's edge there — on the profile, the nearest vertex of the head's own
       // outline (across the line counts double: ahead of the sample, not beside it); on the jaw line, of its
       // turn the one furthest out near the line across it
@@ -773,7 +806,7 @@ function deform(res, views, opt = {}) {
       const edge = new Set(res.pairs.flatMap((L, q) => L.filter(o => o.n).map(o => `${q}:${o.i}`)));
       // (a side photo's dot off the midline that isn't an edge: 'sl')
       // (a front photo's dot of the lips: 'fm'; a side photo's of the eye — its pupil, its corners: 'sy')
-      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && /^(pu|en|ex)[LR]$/.test(P[r.i].id) ? 'y' : r.q && P[r.i].side !== 0 ? 'l' : !r.q && P[r.i].group === 'lips' ? 'm' : 'p');
+      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : r.anat ? 'sa' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && /^(pu|en|ex)[LR]$/.test(P[r.i].id) ? 'y' : r.q && P[r.i].side !== 0 ? 'l' : !r.q && P[r.i].group === 'lips' ? 'm' : 'p');
       rows = rows.filter(r => { const k = kind(r); if (!only.includes(k)) return false; if (catW[k] != null) r.w *= catW[k]; r.w0 = r.w; return true; });
     }
     // (a side photo's rows on the other side of the face too, mirrored: the photo sees one side, and bent on that
@@ -1345,5 +1378,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, closeLips, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '55' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, closeLips, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '56' };
 })();
