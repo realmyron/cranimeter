@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '59';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '60';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1126,6 +1126,8 @@ const headWeight = (side, m) => i => {
 const sideMapOf = () => { const sm = curSlot === 'front' && slots.side && slots.side.map; return sm && isProfile(sm) && sm.snapped ? sm : null; };
 // (the depths you set in 3D are part of the fit: a new drag refits the head)
 const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}|${zoSig(m.zo)}|${cfg.headShading ? 'L' + (cfg.headShadeK || 1) : ''}` : ''; };
+/** The convexity points' state on both photos (moved alone, they don't fit the head again — see ensureHead). */
+const headCvk = () => { const m = S.map, sm = sideMapOf(); return `${m ? m.cver || 0 : 0}|${sm ? sm.cver || 0 : '-'}`; };
 let headIds = 0;
 /** The camera's distance (cm from the head's middle) for the photos without a lens, per pair of photos: 0 = from afar. */
 const distGuess = new Map();
@@ -1146,8 +1148,19 @@ function guessDist(views) {
 async function ensureHead() {
   const m = S.map;
   if (!HM || !m || isProfile(m) || curSlot !== 'front' || !m.snapped) return null;
-  const key = headKey();
-  if (m.head && m.head.key === key) return m.head;
+  const key = headKey(), cvk = headCvk();
+  if (m.head && m.head.key === key) {
+    // (only the convexity points moved: the head as fitted, its fine bend again, seen again)
+    if (m.head.cvk !== cvk && m.head.res.Xcv0) {
+      const res = m.head.res, kz = HM.faceScale(res, 0) / mapFrame().scale;
+      HM.convexFit(res, convexViews(m, sideMapOf()));
+      const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true, ortho: true });
+      for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
+      Pg.z = P.z;
+      m.head = { ...m.head, P, Pg, cvk, id: ++headIds };
+    }
+    return m.head;
+  }
   try { await HM.load(`ict-head.bin?v=${BUILD}`); } catch (e) { console.warn(e); if (!ensureHead.warned) { ensureHead.warned = true; toast('The head model (ict-head.bin) didn’t load — the 3D uses the template instead', 6000); } return null; }
   if (S.map !== m || headKey() !== key) return null;
   // (with the side photo's labels: where its outline runs over hair — a fringe over the forehead — it isn't the skin's)
@@ -1229,7 +1242,7 @@ async function ensureHead() {
   const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true, ortho: true });
   for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
   Pg.z = P.z;
-  m.head = { key, id: ++headIds, res, P, Pg, vertOf, side: !!sm, dist: views.map(V => V.dist || 0), n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
+  m.head = { key, cvk, id: ++headIds, res, P, Pg, vertOf, side: !!sm, dist: views.map(V => V.dist || 0), n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
   return m.head;
 }
 /* ---- convexity (step 3): the links' mid points, and the head they shape, shown as lit dots ---- */
@@ -1245,98 +1258,81 @@ function convexMaps() {
   const side = curSlot === 'side', fm = side ? slots.front && slots.front.map : S.map, sm = side ? S.map : slots.side && slots.side.map;
   return { side, fm, sm: sm && isProfile(sm) && sm.snapped ? sm : null };
 }
-let cvxPrev = null, cvxGrid = null, cvxOff = null, cvxTimer = 0;
+let cvxPrev = null, cvxRas = null, cvxScr = null, cvxTimer = 0;
 /**
- * Lines over the head to show its shape by: rows every 5 mm of height and columns every 5 mm across it, each a
- * dot every 2 mm on the skin — on the scans' head as the template has it (its front, seen from the front; each
- * side, seen from that side), kept as triangle and barycentric weights so they ride on the head however it's
- * shaped. Like a scan's grid: where the head rounds, the lines bend; where it's flat, they run straight; their
- * spacing shows its proportions. Once per model. { front, R, L }: { tri, b (2 per sample) }
+ * The head's front-most skin under a grid of points on the photo, every g px (≈ 2.5 mm): per point its triangle
+ * and barycentric weights — the circles of the Convexity step stay where they are on the photo, and only the
+ * skin's light under them changes as the head does. Once per head and photo.
  */
-function convexGrid() {
-  if (cvxGrid) return cvxGrid;
-  const M = HM.model, C = HM.correspond(), T = C.T, nS = M.nSkin, cell = .1;
-  const ras = (U, V, D, u0, u1, v0, v1, keep) => {
-    const gw = Math.round((u1 - u0) / cell) + 1, gh = Math.round((v1 - v0) / cell) + 1, best = new Float32Array(gw * gh).fill(-Infinity), ti = new Int32Array(gw * gh).fill(-1), b1 = new Float32Array(gw * gh), b2 = new Float32Array(gw * gh);
-    for (let t = 0; t < M.nTri; t++) {
-      const vs = [M.tri[3 * t], M.tri[3 * t + 1], M.tri[3 * t + 2]];
-      if (vs.some(v => v >= nS || C.neck[v] || C.ear[v] || !keep(v))) continue;
-      const P = vs.map(v => [(U(v) - u0) / cell, (V(v) - v0) / cell, D(v)]);
-      const den = (P[1][1] - P[2][1]) * (P[0][0] - P[2][0]) + (P[2][0] - P[1][0]) * (P[0][1] - P[2][1]);
-      if (Math.abs(den) < 1e-9) continue;
-      for (let j = Math.max(0, Math.ceil(Math.min(P[0][1], P[1][1], P[2][1]))); j <= Math.min(gh - 1, Math.floor(Math.max(P[0][1], P[1][1], P[2][1]))); j++) for (let i = Math.max(0, Math.ceil(Math.min(P[0][0], P[1][0], P[2][0]))); i <= Math.min(gw - 1, Math.floor(Math.max(P[0][0], P[1][0], P[2][0]))); i++) {
-        const l0 = ((P[1][1] - P[2][1]) * (i - P[2][0]) + (P[2][0] - P[1][0]) * (j - P[2][1])) / den, l1 = ((P[2][1] - P[0][1]) * (i - P[2][0]) + (P[0][0] - P[2][0]) * (j - P[2][1])) / den, l2 = 1 - l0 - l1;
-        if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
-        const d = l0 * P[0][2] + l1 * P[1][2] + l2 * P[2][2], k = j * gw + i;
-        if (d > best[k]) { best[k] = d; ti[k] = t; b1[k] = l0; b2[k] = l1; }
-      }
+function convexRaster(h, q, g) {
+  const res = h.res, key = `${q}|${g.toFixed(2)}`;
+  if (cvxRas && cvxRas.X0 === res.Xcv0 && cvxRas.key === key) return cvxRas;
+  const M = HM.model, C = HM.correspond(), T = C.T, nS = M.nSkin, X0 = res.Xcv0, R = res.poses[q].R;
+  // (where the photo shows each vertex: the head's own 2D bend through the dots included)
+  const uv = (q ? HM.project(res, 1, 'traL', { all: true }) : h.P).uv;
+  const face = v => v < nS && !C.neck[v] && !C.ear[v] && T[3 * v + 1] > -11.5;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let v = 0; v < nS; v++) if (face(v)) { x0 = Math.min(x0, uv[2 * v]); x1 = Math.max(x1, uv[2 * v]); y0 = Math.min(y0, uv[2 * v + 1]); y1 = Math.max(y1, uv[2 * v + 1]); }
+  x0 = Math.floor(x0 / g) * g; y0 = Math.floor(y0 / g) * g;
+  const gw = Math.ceil((x1 - x0) / g) + 1, gh = Math.ceil((y1 - y0) / g) + 1, n = gw * gh;
+  const best = new Float32Array(n).fill(-Infinity), ti = new Int32Array(n).fill(-1), b1 = new Float32Array(n), b2 = new Float32Array(n);
+  const dep = v => -(R[2][0] * X0[3 * v] + R[2][1] * X0[3 * v + 1] + R[2][2] * X0[3 * v + 2]);
+  for (let t = 0; t < M.nTri; t++) {
+    const a = M.tri[3 * t], b = M.tri[3 * t + 1], c = M.tri[3 * t + 2];
+    if (!face(a) || !face(b) || !face(c)) continue;
+    const ax = (uv[2 * a] - x0) / g, ay = (uv[2 * a + 1] - y0) / g, bx = (uv[2 * b] - x0) / g, by = (uv[2 * b + 1] - y0) / g, cx = (uv[2 * c] - x0) / g, cy = (uv[2 * c + 1] - y0) / g;
+    const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(den) < 1e-9) continue;
+    const da = dep(a), db = dep(b), dc = dep(c);
+    for (let j = Math.max(0, Math.ceil(Math.min(ay, by, cy))); j <= Math.min(gh - 1, Math.floor(Math.max(ay, by, cy))); j++) for (let i = Math.max(0, Math.ceil(Math.min(ax, bx, cx))); i <= Math.min(gw - 1, Math.floor(Math.max(ax, bx, cx))); i++) {
+      const l0 = ((by - cy) * (i - cx) + (cx - bx) * (j - cy)) / den, l1 = ((cy - ay) * (i - cx) + (ax - cx) * (j - cy)) / den, l2 = 1 - l0 - l1;
+      if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
+      const d = l0 * da + l1 * db + l2 * dc, k = j * gw + i;
+      if (d > best[k]) { best[k] = d; ti[k] = t; b1[k] = l0; b2[k] = l1; }
     }
-    // rows every 5 cells of 1 mm… every 5 mm, a dot every 2 mm along each; and columns the same
-    const tri = [], b = [];
-    const take = k => { if (ti[k] >= 0) { tri.push(ti[k]); b.push(b1[k], b2[k]); } };
-    for (let j = 0; j < gh; j += 5) for (let i = 0; i < gw; i += 2) take(j * gw + i);
-    for (let i = 0; i < gw; i += 5) for (let j = 1; j < gh; j += 2) if (j % 5) take(j * gw + i);
-    return { tri: Int32Array.from(tri), b: Float32Array.from(b) };
-  };
-  const x = v => T[3 * v], y = v => T[3 * v + 1], z = v => T[3 * v + 2];
-  cvxGrid = {
-    front: ras(x, y, z, -8.5, 8.5, -12.5, 8, v => z(v) > -1),
-    R: ras(z, y, x, -2, 12.5, -12.5, 8, v => x(v) > .2),
-    L: ras(v => -z(v), y, v => -x(v), -12.5, 2, -12.5, 8, v => x(v) < -.2),
-  };
-  return cvxGrid;
+  }
+  const xy = [], tri = [], w = [];
+  for (let k = 0; k < n; k++) if (ti[k] >= 0) { xy.push(x0 + (k % gw) * g, y0 + Math.floor(k / gw) * g); tri.push(ti[k]); w.push(b1[k], b2[k]); }
+  cvxRas = { X0: res.Xcv0, key, g, xy: Float32Array.from(xy), tri: Int32Array.from(tri), w: Float32Array.from(w) };
+  cvxScr = null;
+  return cvxRas;
 }
 /**
- * The head as your convexity points shape it, for this photo — the head as last fitted, with convexFit run again
- * on its state before them through the dots as they are now (so it follows a drag at once): the grid's dots
- * (convexGrid) where this photo shows them (the fitted head's own 2D bend through the dots added), each with its
- * light and how far it moved. The links' points you haven't placed follow the head: each is put where the head's
- * own curve between the link's ends lies. Null without a head (it's built on the front photo).
+ * The head as your convexity points shape it, seen on this photo: the head as last fitted, with convexFit run
+ * again on its state before them through the dots as they are now (so it follows a drag at once) — per circle of
+ * the grid, how much light the skin under it catches (a crease is a row of small dark circles, a full roll large
+ * bright ones) and how far your points moved it. The links' points you haven't placed follow the head: each is put
+ * where the head's own curve between the link's ends lies. Null without a head (it's built on the front photo).
  */
 function convexPreview() {
   const { side, fm, sm } = convexMaps(), h = fm && fm.head, m = S.map;
   if (!HM || !HM.convexFit || !h || !h.res.Xcv0 || (side && (!h.side || !sm))) return null;
   const res = h.res, q = side ? 1 : 0, pose = res.poses[q];
-  const key = `${h.id}|${fm.pver}|${sm ? sm.pver : '-'}|${m.ver}|${S.view.k.toFixed(3)}`;
+  const key = `${h.id}|${fm.ver}|${sm ? sm.ver : '-'}|${cfg.cxLight ?? 105}`;
   if (cvxPrev && cvxPrev.key === key) return cvxPrev;
   const R = { ...res, X: Float32Array.from(res.Xcv0), Xcv0: res.Xcv0 };
   const cv = HM.convexFit(R, convexViews(fm, h.side ? sm : null));
-  const X = R.X, X0 = res.Xcv0, M = HM.model, C = HM.correspond(), nS = M.nSkin, nrm = HM.normals(X), n0 = HM.normals(X0);
-  // (where each photo shows the head beyond its pose: the fitted head's 2D bend through the dots, per vertex)
-  if (!cvxOff || cvxOff.id !== h.id) {
-    const off = q2 => { const P = q2 ? HM.project(res, 1, 'traL', { all: true }) : h.P, pz = res.poses[q2], o = new Float32Array(2 * nS); for (let v = 0; v < nS; v++) { const a = HM.projK(pz, res.X.subarray(3 * v, 3 * v + 3)); o[2 * v] = P.uv[2 * v] - a[0]; o[2 * v + 1] = P.uv[2 * v + 1] - a[1]; } return o; };
-    cvxOff = { id: h.id, off: [off(0), h.side ? off(1) : null] };
-  }
-  const off = cvxOff.off[q], Rm = pose.R, toCam = [-Rm[2][0], -Rm[2][1], -Rm[2][2]];
-  const a = (cfg.cxLight ?? 135) * Math.PI / 180, lc = [.62 * Math.cos(a), -.62 * Math.sin(a), .48], Ll = Math.hypot(...lc);
+  const X = R.X, X0 = res.Xcv0, M = HM.model, C = HM.correspond(), nS = M.nSkin, nrm = HM.normals(X);
+  const ras = convexRaster(h, q, .25 * mapFrame().scale), n0 = ras.n0 || (ras.n0 = HM.normals(X0)), Rm = pose.R, toCam = [-Rm[2][0], -Rm[2][1], -Rm[2][2]];
+  // (lit from above and a little to one side — Light turns it round: under a ledge the skin turns from it)
+  const a = (cfg.cxLight ?? 105) * Math.PI / 180, lc = [.75 * Math.cos(a), -.75 * Math.sin(a), .66], Ll = Math.hypot(...lc);
   const lw = [0, 1, 2].map(j => (lc[0] * Rm[0][j] + lc[1] * Rm[1][j] - lc[2] * Rm[2][j]) / Ll);
-  // (the front's grid where the skin faces forward, each side's where it faces sideways — together the lines run
-  // on round the face; either alone thinned out where the skin turned away from its own view)
-  const G = convexGrid(), pts = [], P3 = [0, 0, 0];
-  for (const [grid, fwd] of side ? [[G.front, true], [G[FM.nearSide(m.yaw)], false]] : [[G.front, true], [G.R, false], [G.L, false]]) for (let s = 0; s < grid.tri.length; s++) {
-    const t = grid.tri[s], l0 = grid.b[2 * s], l1 = grid.b[2 * s + 1], w = [l0, l1, 1 - l0 - l1], vs = [M.tri[3 * t], M.tri[3 * t + 1], M.tri[3 * t + 2]];
-    let nx = 0, ny = 0, nz = 0, dz = 0, ox = 0, oy = 0;
-    P3[0] = P3[1] = P3[2] = 0;
-    for (let k = 0; k < 3; k++) {
-      const v = vs[k], wk = w[k];
-      P3[0] += wk * X[3 * v]; P3[1] += wk * X[3 * v + 1]; P3[2] += wk * X[3 * v + 2];
-      nx += wk * nrm[3 * v]; ny += wk * nrm[3 * v + 1]; nz += wk * nrm[3 * v + 2];
-      dz += wk * ((X[3 * v] - X0[3 * v]) * n0[3 * v] + (X[3 * v + 1] - X0[3 * v + 1]) * n0[3 * v + 1] + (X[3 * v + 2] - X0[3 * v + 2]) * n0[3 * v + 2]);
-      if (off) { ox += wk * off[2 * v]; oy += wk * off[2 * v + 1]; }
-    }
-    const nl = Math.hypot(nx, ny, nz) || 1, facing = (nx * toCam[0] + ny * toCam[1] + nz * toCam[2]) / nl;
-    if (facing < .05 || (nz >= Math.abs(nx)) !== fwd) continue;
-    const pr = HM.projK(pose, P3);
-    pts.push({ x: pr[0] + ox, y: pr[1] + oy, z: -(Rm[2][0] * P3[0] + Rm[2][1] * P3[1] + Rm[2][2] * P3[2]), lit: Math.max(0, (nx * lw[0] + ny * lw[1] + nz * lw[2]) / nl), dz: 10 * dz });
+  const N = ras.tri.length, lit = new Float32Array(N).fill(-1), dz = new Float32Array(N);
+  for (let s = 0; s < N; s++) {
+    const t = ras.tri[s], w0 = ras.w[2 * s], w1 = ras.w[2 * s + 1], w2 = 1 - w0 - w1, a0 = M.tri[3 * t], a1 = M.tri[3 * t + 1], a2 = M.tri[3 * t + 2];
+    const nx = w0 * nrm[3 * a0] + w1 * nrm[3 * a1] + w2 * nrm[3 * a2], ny = w0 * nrm[3 * a0 + 1] + w1 * nrm[3 * a1 + 1] + w2 * nrm[3 * a2 + 1], nz = w0 * nrm[3 * a0 + 2] + w1 * nrm[3 * a1 + 2] + w2 * nrm[3 * a2 + 2];
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    if ((nx * toCam[0] + ny * toCam[1] + nz * toCam[2]) / nl <= 0) continue;
+    lit[s] = Math.max(0, (nx * lw[0] + ny * lw[1] + nz * lw[2]) / nl);
+    let d = 0;
+    for (const [v, wv] of [[a0, w0], [a1, w1], [a2, w2]]) d += wv * ((X[3 * v] - X0[3 * v]) * n0[3 * v] + (X[3 * v + 1] - X0[3 * v + 1]) * n0[3 * v + 1] + (X[3 * v + 2] - X0[3 * v + 2]) * n0[3 * v + 2]);
+    dz[s] = 10 * d;
   }
-  // (hidden behind the head's own nearer skin — the nose over the cheek in profile: the nearest per 2.5 px)
-  const cell = 2.5 / Math.max(.2, S.view.k), zb = new Map();
-  for (const p of pts) { const k = `${Math.floor(p.x / cell)},${Math.floor(p.y / cell)}`; const o = zb.get(k); if (!o || p.z > o.z) zb.set(k, p); }
   // the links' points you haven't placed: on the head's own curve between their link's ends
   const vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1;
   for (const k of linksSeen(m)) {
     const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length;
-    if (va < 0 || vb < 0 || va === vb) continue;
+    if (va < 0 || vb < 0 || va === vb || k.ms.every(i => isUser(m, i))) continue;
     const A = HM.projK(pose, X.subarray(3 * va, 3 * va + 3)), B = HM.projK(pose, X.subarray(3 * vb, 3 * vb + 3));
     const hx = B[0] - A[0], hy = B[1] - A[1], Lh = Math.hypot(hx, hy), ux = m.p[2 * k.b] - m.p[2 * k.a], uy = m.p[2 * k.b + 1] - m.p[2 * k.a + 1], Lu = Math.hypot(ux, uy);
     if (!(Lu > 2)) continue;
@@ -1351,33 +1347,40 @@ function convexPreview() {
       m.p[2 * i] = m.p[2 * k.a] + t * ux + d * ex; m.p[2 * i + 1] = m.p[2 * k.a + 1] + t * uy + d * ey;
     });
   }
-  cvxPrev = { key, pts: [...zb.values()], n: cv.n, h: cv.h };
+  // (the face's average light, for the circles' contrast: they're sized by how much more or less light a spot
+  // catches than the face does on the whole — a few mm of roll or crease then reads, not only the nose)
+  let ls = 0, ln = 0;
+  for (let s = 0; s < N; s++) if (lit[s] >= 0) { ls += lit[s]; ln++; }
+  cvxPrev = { key, ras, lit, dz, mean: ln ? ls / ln : .5, n: cv.n, h: cv.h };
   return cvxPrev;
 }
-const CX_LIT = [196, 255, 236], CX_DARK = [70, 52, 40];
+const CX_LIT = [214, 255, 238], CX_DARK = [96, 70, 52];
 function drawConvexStep(ctx) {
   const pv = convexPreview(), mode = cfg.cxView || 'shape';
-  // (the photo dimmed under them, so the head's lines read — Photo turns it back up)
+  // (the photo dimmed under the circles, so they read — Photo turns it back up)
   const veil = cfg.cxVeil ?? .6;
   if (veil > 0 && mode !== 'off') { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = `rgba(12,9,7,${veil})`; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height); ctx.restore(); }
   if (pv && mode !== 'off') {
-    const r = Math.max(.7, Math.min(1.8, .05 * mapFrame().scale * S.view.k));
+    const ras = pv.ras, N = ras.tri.length, vk = `${S.view.x}|${S.view.y}|${S.view.k}|${S.adj ? JSON.stringify(S.adj) : ''}`;
+    // (the circles' places on the screen: once per view)
+    if (!cvxScr || cvxScr.ras !== ras || cvxScr.vk !== vk) {
+      const xy = new Float32Array(2 * N);
+      for (let s = 0; s < N; s++) { const p = mapToScreen({ x: ras.xy[2 * s], y: ras.xy[2 * s + 1] }); xy[2 * s] = p.x; xy[2 * s + 1] = p.y; }
+      cvxScr = { ras, vk, xy, r: .5 * ras.g * S.view.k };
+    }
+    const xy = cvxScr.xy, R = cvxScr.r;
     ctx.save();
-    // (the grid's dots lit: bright where the skin faces the light, dim where it turns away — the lines' bends and
-    // the light together show the form)
-    for (const p of pv.pts) {
-      const s = mapToScreen(p);
-      let rr = r;
+    // a circle per grid point: as big and as bright as the light the skin under it catches — a crease is a row of
+    // small dark circles, a full form large bright ones (Change: orange where your points moved it out, blue in)
+    for (let s = 0; s < N; s++) {
+      const L = pv.lit[s];
+      if (L < 0) continue;
+      const b = Math.max(0, Math.min(1, .55 + (L - pv.mean) * 2.6));
       if (mode === 'change') {
-        const t = Math.max(-1, Math.min(1, p.dz / 3));
-        if (Math.abs(t) < .04) { ctx.fillStyle = 'rgba(196,255,236,.22)'; rr = .7 * r; }
-        else { ctx.fillStyle = t > 0 ? `rgba(255,${Math.round(190 - 120 * t)},${Math.round(90 - 70 * t)},${.45 + .5 * t})` : `rgba(${Math.round(90 + 60 * t)},${Math.round(210 + 30 * t)},255,${.45 - .5 * t})`; rr = r * (.8 + .5 * Math.abs(t)); }
-      } else {
-        const b = Math.pow(p.lit, .9);
-        ctx.fillStyle = `rgba(${CX_LIT.map((c, j) => Math.round(CX_DARK[j] + (c - CX_DARK[j]) * b)).join(',')},${.35 + .6 * b})`;
-        rr = r * (.6 + .6 * b);
-      }
-      ctx.fillRect(s.x - rr, s.y - rr, 2 * rr, 2 * rr);
+        const t = Math.max(-1, Math.min(1, pv.dz[s] / 3));
+        ctx.fillStyle = Math.abs(t) < .04 ? `rgba(214,255,238,${.18 + .3 * b})` : t > 0 ? `rgba(255,${Math.round(190 - 120 * t)},${Math.round(90 - 70 * t)},${.5 + .45 * t})` : `rgba(${Math.round(90 + 60 * t)},${Math.round(210 + 30 * t)},255,${.5 - .45 * t})`;
+      } else ctx.fillStyle = `rgba(${CX_LIT.map((c, j) => Math.round(CX_DARK[j] + (c - CX_DARK[j]) * b)).join(',')},${.45 + .5 * b})`;
+      ctx.beginPath(); ctx.arc(xy[2 * s], xy[2 * s + 1], R * (.18 + .8 * b), 0, TAU); ctx.fill();
     }
     ctx.restore();
   }
@@ -1391,7 +1394,7 @@ function syncConvexPane() {
     : `${mine} of yours here${side ? ' · the 3D follows on the front photo' : fresh ? '' : ' · fitting…'}`);
   $$('#cxView [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (cfg.cxView || 'shape')));
   $$('#cxRegions [data-r]').forEach(b => b.classList.toggle('off', !cxShown(b.dataset.r)));
-  setRange('cxLight', cfg.cxLight ?? 135, `${Math.round(cfg.cxLight ?? 135)}°`);
+  setRange('cxLight', cfg.cxLight ?? 105, `${Math.round(cfg.cxLight ?? 105)}°`);
   const ph = Math.round(100 * (1 - (cfg.cxVeil ?? .6)));
   setRange('cxVeil', ph, ph + '%');
   $('#cxReset').disabled = !mine;
@@ -1773,7 +1776,7 @@ async function buildSurface(opt = {}) {
   if (!SF || !S.map) return;
   if (S.surfBusy) { S.surfAgain = opt; return; }   // build again once this one is done
   // the measured head first (loaded the first time, then fitted to the dots): the surface starts from it
-  if (HM && !isProfile(S.map) && !(S.map.head && S.map.head.key === headKey())) {
+  if (HM && !isProfile(S.map) && !(S.map.head && S.map.head.key === headKey() && S.map.head.cvk === headCvk())) {
     S.surfBusy = { p: 0, head: true }; syncFaceMapPanel();
     await ensureHead();
     S.surfBusy = null;
@@ -2200,7 +2203,7 @@ const FEATURES = {
   front: [['Eye ◀', ['eyeL', 'irisL', 'creaseL', 'lowerCreaseL']], ['Eye ▶', ['eyeR', 'irisR', 'creaseR', 'lowerCreaseR']],
     ['Brow ◀', ['browShapeL', 'browL']], ['Brow ▶', ['browShapeR', 'browR']], ['Orbit ◀', ['orbitL']], ['Orbit ▶', ['orbitR']], ['Nose', ['ridge', 'nostrilL', 'nostrilR', 'noseEdgeL', 'noseEdgeR', 'dorsumL', 'dorsumR', 'lobule']],
     ['Lips', ['lips', 'mouth', 'philtrumL', 'philtrumR', 'philMid', 'lipMid']], ['Cheek ◀', ['cheekRingL', 'hollowL', 'nasolabialL']], ['Cheek ▶', ['cheekRingR', 'hollowR', 'nasolabialR']], ['Face edge', ['outline']], ['Ear ◀', ['earL', 'antihelixL', 'lowerCrusL', 'conchaL']], ['Ear ▶', ['earR', 'antihelixR', 'lowerCrusR', 'conchaR']]],
-  profile: [['Eye', ['eye', 'crease', 'lowerCrease']], ['Orbit', ['orbit']], ['Brow', ['browShape', 'brow']], ['Nose', ['nostril', 'ala', 'lobule', 'noseBase', 'noseEdge']], ['Lips', ['lip', 'mouthLine']], ['Cheek', ['cheekRing', 'hollow', 'nasolabial']], ['Under jaw', ['hyoid']],
+  profile: [['Eye', ['eye', 'crease', 'lowerCrease']], ['Orbit', ['orbit']], ['Brow', ['browShape', 'brow']], ['Nose', ['nostril', 'alarGroove', 'alarRim', 'noseBase', 'noseEdge']], ['Lips', ['lip', 'mouthLine']], ['Cheek', ['cheekRing', 'hollow', 'nasolabial']], ['Under jaw', ['hyoid']],
     ['Profile', ['face']], ['Ear', ['ear', 'antihelix', 'lowerCrus', 'concha']]],
 };
 function selectFeature(ids) {
@@ -5026,7 +5029,10 @@ function shiftDots(list) {
   let edge = false;
   for (const [i, dx, dy] of list) { m.p[2 * i] += dx; m.p[2 * i + 1] += dy; if (bound.has(i)) edge = true; }
   if (cfg.mapAutoDetail) placeDetail(new Set(list.map(l => l[0])));
-  mapTouched(true);
+  // (convexity points alone: the dots the head is fitted to haven't moved — only its fine bend is redone, see
+  // ensureHead; a full fit took seconds after every drag)
+  if (list.every(([i]) => FM.POINTS[i].cvx)) { m.cver = (m.cver || 0) + 1; mapTouched(false); }
+  else mapTouched(true);
   if (edge) {
     m.maskDirty = true;
     if (now() - (m.maskT || 0) > 120) { buildMask(); m.maskT = now(); m.maskDirty = false; }
@@ -7351,10 +7357,10 @@ function buildFaceMapPanel() {
       <p class="to-note" id="cxStatus"></p>
       <div class="to-label">Show</div>
       <div class="chips" id="cxRegions">${[['brow', 'Brow'], ['eye', 'Eyes'], ['temple', 'Temples'], ['cheek', 'Cheeks'], ['lips', 'Lips'], ['jaw', 'Jaw']].map(([r, n]) => `<button type="button" class="chip-dot" data-r="${r}" style="--c:${MAP_COLORS.skin}"><i></i>${n}</button>`).join('')}</div>
-      <div class="to-label">Head lines</div>
-      <div class="seg full" id="cxView" style="margin-bottom:8px"><button type="button" data-v="shape" title="Lines over the head every 5 mm, lit — they bend where it rounds">Shape</button><button type="button" data-v="change" title="Orange: out, blue: in — what your points change">Change</button><button type="button" data-v="off">Off</button></div>
-      ${sliderRow('cxLight', 'Light', 0, 360, 1, 'Where the head lines are lit from')}
-      ${sliderRow('cxVeil', 'Photo', 0, 100, 1, 'How bright the photo stays under the lines')}
+      <div class="to-label">Shape</div>
+      <div class="seg full" id="cxView" style="margin-bottom:8px"><button type="button" data-v="shape" title="Circles as big and bright as the light the 3D head catches there: a crease is a row of small dark ones, a full form large bright ones">Light</button><button type="button" data-v="change" title="Orange: out, blue: in — what your points change">Change</button><button type="button" data-v="off">Off</button></div>
+      ${sliderRow('cxLight', 'Light from', 0, 360, 1, 'Where the circles are lit from (90° = above)')}
+      ${sliderRow('cxVeil', 'Photo', 0, 100, 1, 'How bright the photo stays under the circles')}
       <div class="to-actions" style="margin:2px 0 6px"><button type="button" class="btn ghost sm" id="cxReset" title="Your convexity points on this photo follow the head again">Follow the head</button><button type="button" class="btn ghost sm" id="cx3d">3D →</button></div>
       <p class="to-note">Drag a mid-point across its line: out for a roll or fullness, in for a crease or hollow. Rings follow the head, filled points are yours.</p>
     </div>
@@ -7460,7 +7466,7 @@ function buildFaceMapPanel() {
     if (!mine.length) return;
     pushUndo();
     for (const i of mine) m.user[i] = 0;
-    mapTouched(true); cvxPrev = null; scheduleConvexHead(); syncUI(); wake();
+    m.cver = (m.cver || 0) + 1; mapTouched(false); cvxPrev = null; scheduleConvexHead(); syncUI(); wake();
   });
   $('#mFeat').addEventListener('click', e => { const b = e.target.closest('[data-f]'); if (b && S.map) selectFeature(FEATURES[isProfile() ? 'profile' : 'front'][+b.dataset.f][1]); });
   const sbind = (id, key, f) => $('#' + id).addEventListener('input', e => { cfg[key] = f(+e.target.value); saveCfg(); syncFaceMapPanel(); wake(); });
