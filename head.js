@@ -1543,12 +1543,26 @@ function convexFit(res, views, opt = {}) {
       });
     }
   });
-  const ids = [...new Set(L.map(r => r.i))], nk = ids.length, col = new Map(ids.map((i, c) => [i, c]));
+  // … and the points set by hand in 3D (opt.fixed: point → how far out, cm), each where it lies on its link
+  // (opt.links: every link): those aren't fitted, the head just has them — and the photos' points there give way
+  const fixed = opt.fixed || new Map(), geo = new Map();
+  for (const [i] of fixed) {
+    const k = (opt.links || []).find(l => l.ms.includes(i));
+    if (!k) continue;
+    const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length, j = k.ms.indexOf(i);
+    if (va < 0 || vb < 0 || va === vb) continue;
+    const nodes = [va, ...k.ms.map((_, q) => linkPoint(X0, va, vb, (q + 1) / (n + 1))), vb];
+    if (nodes.some(v => v < 0)) continue;
+    geo.set(i, { vm: nodes[j + 1], prev: nodes[j], next: nodes[j + 2] });
+  }
+  for (let q = L.length - 1; q >= 0; q--) if (geo.has(L[q].i)) L.splice(q, 1);
+  const ids = [...new Set(L.map(r => r.i)), ...geo.keys()], nk = ids.length, col = new Map(ids.map((i, c) => [i, c]));
+  const isFixed = ids.map(i => geo.has(i));
   res.convex = { n: nk, ms: 0, h: new Map() };
   if (!nk) { X.set(X0); return res.convex; }
-  // each bump (bumpField): from a side photo alone, its mirror on the other side too
+  // each bump (bumpField): set on one photo or side alone, its mirror on the other side too
   const bump = ids.map(i => {
-    const r = L.find(o => o.i === i), onlySide = L.every(o => o.i !== i || o.q > 0), mi = FMIR[i], ms = [r.vm, r.prev, r.next].map(v => mir[v]);
+    const r = geo.get(i) || L.find(o => o.i === i), onlySide = geo.has(i) || L.every(o => o.i !== i || o.q > 0), mi = FMIR[i], ms = [r.vm, r.prev, r.next].map(v => mir[v]);
     const F = bumpField(X0, r.vm, r.prev, r.next);
     if (!(onlySide && !col.has(mi) && ms.every(v => v >= 0) && ms[0] !== r.vm)) return F;
     const G = bumpField(X0, ms[0], ms[1], ms[2]), idx = Int32Array.from([...F.idx, ...G.idx]), w = Float32Array.from([...F.w, ...G.w]), at = new Map(F.at);
@@ -1556,7 +1570,7 @@ function convexFit(res, views, opt = {}) {
     return { idx, w, at };
   });
   const phi = (v, j) => bump[j].at.get(v) || 0;
-  const h = new Float64Array(nk);
+  const h = Float64Array.from(ids, i => geo.has(i) ? Math.max(-1, Math.min(1, fixed.get(i))) : 0);
   const apply = () => {
     X.set(X0);
     for (let j = 0; j < nk; j++) {
@@ -1566,10 +1580,13 @@ function convexFit(res, views, opt = {}) {
     }
   };
   // (held near none: at .3 a point where the skin faces the photo sideways — a cheek, the outer orbit, from the
-  // side — came out at a third of how far you moved it; at .12 at ⅔–⅘. A bump the lids' guard mostly mutes is
-  // held the harder: unseen, it swung to the cap)
-  const sbar = views.reduce((s, V) => s + res.poses[V.q].s, 0) / views.length, lam = ((opt.lambda ?? .12) * sbar) ** 2, eps = .05;
-  const lamOf = ids.map((i, j) => { const r = L.find(o => o.i === i); return lam / Math.max(.1, phi(r.vm, j)) ** 2; });
+  // side — came out at a third of how far you moved it; at .12 at ⅔–⅘, but where the photo barely sees the
+  // bulge — skin facing it — 1 mm off on the photo became 4 mm of bump: the head came out humped. At .25, at most
+  // 2×, and ⅘ where the photo sees it well. A bump the lids' guard mostly mutes is held the harder: unseen, it
+  // swung to the cap)
+  const sbar = views.length ? views.reduce((s, V) => s + res.poses[V.q].s, 0) / views.length : res.poses[0].s, lam = ((opt.lambda ?? .25) * sbar) ** 2, eps = .05;
+  const lamOf = ids.map((i, j) => { const r = geo.get(i) || L.find(o => o.i === i); return lam / Math.max(.1, phi(r.vm, j)) ** 2; });
+  if (!L.length) { apply(); ids.forEach((i, j) => res.convex.h.set(i, h[j])); res.convex.ms = Math.round(performance.now() - t0); return res.convex; }
   for (let it = 0; it < (opt.iters || 3); it++) {
     // (the image's motion when a vertex moves along its normal, per cm)
     const Dn = (pose, v) => { const p = X.subarray(3 * v, 3 * v + 3), a = projK(pose, p), b = projK(pose, [p[0] + eps * n0[3 * v], p[1] + eps * n0[3 * v + 1], p[2] + eps * n0[3 * v + 2]]); return [(b[0] - a[0]) / eps, (b[1] - a[1]) / eps]; };
@@ -1584,15 +1601,16 @@ function convexFit(res, views, opt = {}) {
       const e = r.du - dh;
       const Da = Dn(pose, r.va), Db = Dn(pose, r.vb), Dm = Dn(pose, r.vm), J = new Float64Array(nk);
       for (let j = 0; j < nk; j++) {
+        if (isFixed[j]) continue;
         const fa = phi(r.va, j), fb = phi(r.vb, j), fm = phi(r.vm, j);
         if (!fa && !fb && !fm) continue;
         J[j] = ex * (fm * Dm[0] - (1 - th) * fa * Da[0] - th * fb * Db[0]) + ey * (fm * Dm[1] - (1 - th) * fa * Da[1] - th * fb * Db[1]);
       }
       for (let a = 0; a < nk; a++) { if (!J[a]) continue; rhs[a] += J[a] * e; for (let b = 0; b < nk; b++) M[a][b] += J[a] * J[b]; }
     }
-    for (let a = 0; a < nk; a++) { M[a][a] += lamOf[a]; rhs[a] -= lamOf[a] * h[a]; }
+    for (let a = 0; a < nk; a++) { if (isFixed[a]) { M[a][a] = 1; rhs[a] = 0; continue; } M[a][a] += lamOf[a]; rhs[a] -= lamOf[a] * h[a]; }
     const dh = solve(M.map(r => Array.from(r)), Array.from(rhs));
-    for (let j = 0; j < nk; j++) h[j] = Math.max(-.5, Math.min(.5, h[j] + dh[j]));
+    for (let j = 0; j < nk; j++) if (!isFixed[j]) h[j] = Math.max(-.5, Math.min(.5, h[j] + dh[j]));
     apply();
   }
   ids.forEach((i, j) => res.convex.h.set(i, h[j]));
@@ -1723,5 +1741,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, linkPoint, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '60' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, linkPoint, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '61' };
 })();
