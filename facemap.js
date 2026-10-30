@@ -279,10 +279,6 @@ pair('nr2', 'Nostril · top inner', 0.6, -0.98, 10.8, 'nose', 'face', 4, null, O
 pair('nr3', 'Nostril · top outer', 1.05, -0.95, 10.3, 'nose', 'face', 4, null, OWN);
 pair('nr4', 'Nostril · outer', 1.3, -0.75, 9.95, 'nose', 'face', 6, null, OWN);
 pair('nb1', 'Nose base · side', 0.85, -0.52, 9.95, 'nose', 'face', 10, null, OWN);
-// (profile) the nostril's wing ringed: the alar groove over it (from the alar crease up to the wing's top, ar1,
-// and on to its front) and its rim under it (the soft triangle, and back by alare to the crease)
-pair('ag2', 'Alar groove · front', 1.3, -1.45, 10.45, 'nose', 'face', 4, null, { ...OWN, views: 'profile' });
-pair('sft', 'Soft triangle (the wing’s rim, at the front)', 1.0, -1.15, 10.9, 'nose', 'face', 3, null, { ...OWN, views: 'profile' });
 // the lip line between the mouth corner and the stomion: under the upper lip's and over the lower lip's dots
 pair('lm1', 'Lip line', 1.25, 1.98, 9.64, 'lips', 'face', 12, null, OWN);
 pair('lm2', 'Lip line · outer', 1.9, 1.95, 9.22, 'lips', 'face', 12, null, OWN);
@@ -306,37 +302,35 @@ const LINKS = [
   ['bxc', 'so3', 'ss3', null, 'brow', 'Brow ridge · outer', 2],
   ['bxd', 'so4', 'tc1', null, 'brow', 'Brow ridge · lateral', 2],
   // round each eye: above, the rim → the upper lid's crease (a smooth roll ) or a ledge and a hollow ( ); below,
-  // the orbit's lower rim → the lower crease (support or a hollow); beside, the lateral rim → the outer corner
-  // (a deep or a flat outer orbit) and the medial rim → the inner corner
+  // the orbit's lower rim → the lower crease (support or a hollow)
   ['uoa', 'so2', 'cr1', null, 'eye', 'Under the brow · inner', 2],
   ['uob', 'supra', 'cr2', null, 'eye', 'Under the brow · centre', 2],
   ['uoc', 'so3', 'cr4', null, 'eye', 'Under the brow · outer', 2],
   ['uea', 'tt1', 'lc1', null, 'eye', 'Under the eye · inner', 2],
   ['ueb', 'tt2', 'lc2', null, 'eye', 'Under the eye · centre', 2],
   ['uec', 'ior', 'lc4', null, 'eye', 'Under the eye · outer', 2],
-  ['lox', 'lor', 'ex', null, 'eye', 'Lateral orbit', 2],
-  ['mox', 'mo1', 'en', null, 'eye', 'Medial orbit', 1],
-  // (profile) the lids: crease → lid margin, and the cornea's front between the lids
-  ['ulx', 'cr2', 'eu2', 'profile', 'eye', 'Upper lid', 1],
-  ['llx', 'lc2', 'el2', 'profile', 'eye', 'Lower lid', 1],
+  // (profile) the lateral rim → the outer corner (a deep or a flat outer orbit), the medial rim → the inner corner;
+  // the lids (crease → lid margin, above and below) and the cornea's front between them
+  ['lox', 'lor', 'ex', 'profile', 'eye', 'Lateral orbit', 2],
+  ['mox', 'mo1', 'en', 'profile', 'eye', 'Medial orbit', 2],
+  ['ula', 'cr1', 'eu1', 'profile', 'eye', 'Upper lid · inner', 1],
+  ['ulb', 'cr2', 'eu2', 'profile', 'eye', 'Upper lid · centre', 1],
+  ['ulc', 'cr4', 'eu3', 'profile', 'eye', 'Upper lid · outer', 1],
+  ['lla', 'lc1', 'el1', 'profile', 'eye', 'Lower lid · inner', 1],
+  ['llb', 'lc2', 'el2', 'profile', 'eye', 'Lower lid · centre', 1],
+  ['llc', 'lc4', 'el4', 'profile', 'eye', 'Lower lid · outer', 1],
   ['cor', 'eu2', 'el2', 'profile', 'eye', 'Cornea (front of the eye)', 1],
-  // the temple: across its hollow, from the forehead's edge out to the hairline, and lower down from the orbit's
-  // rim back to the ear
-  ['tma', 'tc1', 'tem', null, 'temple', 'Temple · upper', 2],
-  ['tmb', 'lo1', 'obs', null, 'temple', 'Temple · lower', 3],
-  // across the cheekbone, its upper border to its lower: how far it stands out
-  ['zxa', 'zc2', 'zc6', null, 'cheek', 'Across the cheekbone · front', 2],
-  ['zxb', 'zc3', 'zc5', null, 'cheek', 'Across the cheekbone · centre', 2],
-  ['zxc', 'zc4', 'sm3', null, 'cheek', 'Across the cheekbone · back', 2],
-  // the cheek, front: from the hollow's line out to the face's edge at the jaw (in profile those ends lie at the
-  // jaw's back edge); in profile: from the cheekbone's lower border down to the jaw's lower border
+  // the temple's hollow: from the forehead's edge out to the hairline
+  ['tma', 'tc1', 'tem', null, 'temple', 'Temple', 2],
+  // (profile) across the cheekbone ring, its upper border to its lower: how far it stands out
+  ['zxa', 'zc2', 'zc6', 'profile', 'cheek', 'Across the cheekbone · front', 2],
+  ['zxb', 'zc3', 'zc5', 'profile', 'cheek', 'Across the cheekbone · centre', 2],
+  ['zxc', 'zc4', 'sm3', 'profile', 'cheek', 'Across the cheekbone · back', 2],
+  // (front) the cheek, from the hollow's line out to the face's edge at the jaw: hollow and sharp, or full
   ['cka', 'sm3', 'chk', 'front', 'cheek', 'Cheek · upper', 3],
   ['ckb', 'sm2', 'jaw1', 'front', 'cheek', 'Cheek', 3],
   ['ckc', 'hcm', 'go', 'front', 'cheek', 'Cheek · lower', 3],
   ['ckd', 'mar', 'jaw2', 'front', 'cheek', 'Jowl', 3],
-  ['csa', 'zc6', 'pjs', 'profile', 'cheek', 'Cheek · front', 3],
-  ['csb', 'zc5', 'jaw2', 'profile', 'cheek', 'Cheek · side', 3],
-  ['csc', 'sm3', 'go', 'profile', 'cheek', 'Cheek · back', 3],
   // (profile) the lips: from the lip line up to the upper lip's border and down to the lower's — flat or full —
   // in the middle and toward the corner
   ['ufa', 'lm1', 'ul', 'profile', 'lips', 'Upper lip', 2],
@@ -437,13 +431,14 @@ const PROFILE_CONTOURS = [
   { id: 'profile', snap: true, draw: false, ids: ['tri', 'fhC', 'sg', 'gl', 'rx', 'n', 'rhi', 'dor', 'stp', 'prn', 'itl', 'col', 'sn', 'phil', 'phL', 'ls', 'ulf', 'sto', 'llf', 'li', 'bpt', 'pog', 'gn', 'me', 'cerv', 'thy', 'neckF'] },
   { id: 'brow', line: true, draw: false, ids: ['bi#', 'bm#', 'ba#', 'bt#'] },
   { id: 'eye', closed: true, snapFine: true, ids: ['en#', 'eu1#', 'eu2#', 'eu3#', 'ex#', 'el4#', 'el3#', 'el2#', 'el1#', 'el0#'] },
-  // the nose: its profile (the face's line), its back edge from the orbit down to the wing (noseEdge), the wing
-  // ringed — the alar groove over it from the crease to the wing's top and front, its rim under it from the soft
-  // triangle back by alare — the tip lobule's side from the groove's front to the tip, the nostril ringed, and the
-  // base from the alar crease to the subnasale
+  // the nose: its profile (the face's line), its back edge from the orbit down to the wing (noseEdge), the alar
+  // groove over the wing from the alar crease by the wing's top on to the tip, the wing's rim under it from the
+  // crease by alare to the nostril, the nostril ringed, and the base from the alar crease to the subnasale — each
+  // through the nose's own dots (a wing ring with a groove's front and a soft triangle of its own lay on top of the
+  // nostril and the lobule)
   { id: 'nostril', closed: true, line: true, ids: ['nr1#', 'nr2#', 'nr3#', 'nr4#', 'nos#'] },
-  { id: 'ala', closed: true, line: true, ids: ['ac#', 'ar1#', 'ag2#', 'sft#', 'al#'] },
-  { id: 'lobule', line: true, ids: ['ag2#', 'tl#', 'tdp#', 'prn'] },
+  { id: 'alarGroove', line: true, ids: ['ac#', 'ar1#', 'tl#', 'tdp#', 'prn'] },
+  { id: 'alarRim', line: true, ids: ['ac#', 'al#', 'nr3#'] },
   { id: 'noseBase', line: true, ids: ['ac#', 'nb1#', 'sn'] },
   { id: 'lip', ids: ['ls', 'cph#', 'ul#', 'ulo#', 'ch#', 'llo#', 'll#', 'li'] },
   { id: 'mouthLine', line: true, ids: ['ch#', 'lm2#', 'lm1#', 'sto'] },
@@ -826,6 +821,6 @@ window.CraniMap = {
   links: yaw => contours(yaw).filter(c => c.cvx).map(c => ({ id: c.id, a: c.idx[0], b: c.idx[c.idx.length - 1], ms: c.idx.slice(1, -1), region: c.region })),
   REGIONS: ['brow', 'eye', 'temple', 'cheek', 'lips', 'jaw'],
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '59',
+  mls, tpsFit, tpsEval, spline, build: '60',
 };
 })();
