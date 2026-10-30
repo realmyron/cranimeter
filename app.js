@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '55';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '56';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1156,7 +1156,10 @@ async function ensureHead() {
     // (and the jaw's lower border from them, unless you placed the jaw's dots yourself: on a real profile it lay
     // ≈ 2 mm from hand-placed ones — not better than them — and on a render it was a cm off)
     const s = FM.nearSide(sm.yaw), mine = ['jaw2#', 'go#'].some(id => isUser(sm, FM.INDEX[id.replace('#', s)])), jl = labels && !mine && segJawLine(labels, sm);
-    views.push({ view: sm.view, p: sm.p, vis: sm.vis, f: fpx(sd.imgRec, sd.iw, sd.ih), weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, jawSeg: jl ? { pts: jl, w: .6 } : null, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
+    // (its anatomy you placed — the cheekbone, the orbit's rims, the tear trough, the brow's ridge, the submalar
+    // hollow: how far forward each lies, see deform)
+    const ANAT = /^(so[134]|supra|ss\d|lor|ior|mor|tt\d|malar|zr\d|sm\d|hcm)[LR]$/, anat = i => ANAT.test(FM.POINTS[i].id) && isUser(sm, i) ? (cfg.sideAnat ?? 1.2) : 0;
+    views.push({ view: sm.view, p: sm.p, vis: sm.vis, anat, f: fpx(sd.imgRec, sd.iw, sd.ih), weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, jawSeg: jl ? { pts: jl, w: .6 } : null, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
   }
   // the photos that don't say their lens (sent through a messenger, edited, scanned): taken from the distance
   // that fits their dots best, when that's clearly better than from afar — a phone at arm's length enlarges the
