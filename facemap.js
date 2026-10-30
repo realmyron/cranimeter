@@ -297,18 +297,18 @@ pair('hy3', 'Under the jaw · back', 4.82, 4.92, 0.92, 'skin', 'face', 12, null,
    together in the step) */
 const LINKS = [
   // the brow ridge: from the rim under the brow up to above it — its roll and its crest
-  ['bxa', 'so1', 'ss1', null, 'brow', 'Brow ridge · inner', 2],
-  ['bxb', 'supra', 'ss2', null, 'brow', 'Brow ridge · centre', 2],
-  ['bxc', 'so3', 'ss3', null, 'brow', 'Brow ridge · outer', 2],
-  ['bxd', 'so4', 'tc1', null, 'brow', 'Brow ridge · lateral', 2],
+  ['bxa', 'so1', 'ss1', 'profile', 'brow', 'Brow ridge · inner', 2],
+  ['bxb', 'supra', 'ss2', 'profile', 'brow', 'Brow ridge · centre', 2],
+  ['bxc', 'so3', 'ss3', 'profile', 'brow', 'Brow ridge · outer', 2],
+  ['bxd', 'so4', 'tc1', 'profile', 'brow', 'Brow ridge · lateral', 2],
   // round each eye: above, the rim → the upper lid's crease (a smooth roll ) or a ledge and a hollow ( ); below,
   // the orbit's lower rim → the lower crease (support or a hollow)
-  ['uoa', 'so2', 'cr1', null, 'eye', 'Under the brow · inner', 2],
-  ['uob', 'supra', 'cr2', null, 'eye', 'Under the brow · centre', 2],
-  ['uoc', 'so3', 'cr4', null, 'eye', 'Under the brow · outer', 2],
-  ['uea', 'tt1', 'lc1', null, 'eye', 'Under the eye · inner', 2],
-  ['ueb', 'tt2', 'lc2', null, 'eye', 'Under the eye · centre', 2],
-  ['uec', 'ior', 'lc4', null, 'eye', 'Under the eye · outer', 2],
+  ['uoa', 'so2', 'cr1', 'profile', 'eye', 'Under the brow · inner', 2],
+  ['uob', 'supra', 'cr2', 'profile', 'eye', 'Under the brow · centre', 2],
+  ['uoc', 'so3', 'cr4', 'profile', 'eye', 'Under the brow · outer', 2],
+  ['uea', 'tt1', 'lc1', 'profile', 'eye', 'Under the eye · inner', 2],
+  ['ueb', 'tt2', 'lc2', 'profile', 'eye', 'Under the eye · centre', 2],
+  ['uec', 'ior', 'lc4', 'profile', 'eye', 'Under the eye · outer', 2],
   // (profile) the lateral rim → the outer corner (a deep or a flat outer orbit), the medial rim → the inner corner;
   // the lids (crease → lid margin, above and below) and the cornea's front between them
   ['lox', 'lor', 'ex', 'profile', 'eye', 'Lateral orbit', 2],
@@ -343,15 +343,17 @@ const LINKS = [
   ['hjc', 'go', 'hy3', 'profile', 'jaw', 'Under the jaw · back', 2],
 ];
 {
-  // (each link's points on the straight line between its ends, a little out from it — they're placed on the
-  // head's own curve in the Convexity step)
+  // each link's own ends (id0 and id(n+1)): on its face-map dot (anchor) until you move one, then where you put
+  // it — the link stands alone (moving a link's end used to mean moving the face map's dot). Its points between, on
+  // the straight line between them, a little out from it — they're placed on the head's own curve in the step.
   const at = id => POINTS.find(p => p.id === id + 'R') || POINTS.find(p => p.id === id);
   for (const [id, a, b, views, region, name, n] of LINKS) {
     const A = at(a), B = at(b);
-    for (let k = 1; k <= n; k++) {
+    for (let k = 0; k <= n + 1; k++) {
       const t = k / (n + 1), x = Math.abs(A.x + t * (B.x - A.x)), y = A.y + t * (B.y - A.y), z = A.z + t * (B.z - A.z) + .3 * t * (1 - t);
-      const group = region === 'lips' ? 'lips' : 'skin', tissue = (A.t + t * (B.t - A.t));
-      pair(id + k, n > 1 ? `${name} · ${k}` : name, x, y, z, a === 'eu2' ? 'eyes' : group, 'face', tissue, null, { cvx: true, detail: true, region, ...(views ? { views } : {}) });
+      const group = region === 'lips' ? 'lips' : 'skin', tissue = (A.t + t * (B.t - A.t)), end = k === 0 || k === n + 1;
+      const label = end ? `${name} · ${k ? 'end' : 'start'}` : n > 1 ? `${name} · ${k}` : name;
+      pair(id + k, label, x, y, z, a === 'eu2' ? 'eyes' : group, 'face', tissue, null, { cvx: true, detail: true, region, ...(end ? { end: true, anchor: k ? b : a } : {}), ...(views ? { views } : {}) });
     }
   }
 }
@@ -461,14 +463,11 @@ const PROFILE_CONTOURS = [
   { id: 'lowerCrus', line: true, ids: ['crI#', 'ah1#'] },
   { id: 'concha', line: true, ids: ['cru#', 'cym#', 'con#', 'itn#'] },
 ];
-// the convexity links: end → its points → end (cvx: drawn and edited in the Convexity step)
-{
-  const end = (id, s) => INDEX0[id + 'R'] ? id + s : id;
-  for (const [m, a, b, views, region, , n] of LINKS) {
-    const pts = s => Array.from({ length: n }, (_, k) => m + (k + 1) + s);
-    if (views !== 'profile') for (const s of ['L', 'R']) FRONT_CONTOURS.push({ id: 'cx_' + m + s, line: true, cvx: true, region, ids: [end(a, s), ...pts(s), end(b, s)] });
-    if (views !== 'front') PROFILE_CONTOURS.push({ id: 'cx_' + m, line: true, cvx: true, region, ids: [end(a, '#'), ...pts('#'), end(b, '#')] });
-  }
+// the convexity links: its own start → its points → its own end (cvx: drawn and edited in the Convexity step)
+for (const [m, , , views, region, , n] of LINKS) {
+  const pts = s => Array.from({ length: n + 2 }, (_, k) => m + k + s);
+  if (views !== 'profile') for (const s of ['L', 'R']) FRONT_CONTOURS.push({ id: 'cx_' + m + s, line: true, cvx: true, region, ids: pts(s) });
+  if (views !== 'front') PROFILE_CONTOURS.push({ id: 'cx_' + m, line: true, cvx: true, region, ids: pts('#') });
 }
 
 /* Denser contours: a dot halfway along every segment of the main contours, so the outline, eyes,
@@ -819,8 +818,12 @@ window.CraniMap = {
   // (each convexity link as indices: { a, b, ms: its points in order, region } per side, for a view — front:
   // both sides, a profile: its near one)
   links: yaw => contours(yaw).filter(c => c.cvx).map(c => ({ id: c.id, a: c.idx[0], b: c.idx[c.idx.length - 1], ms: c.idx.slice(1, -1), region: c.region })),
+  // (every link on both sides, front's and profile's: for the head, whichever photo it was set on)
+  ALL_LINKS: (() => { const seen = new Set(), L = []; for (const yaw of [0, 90, -90]) for (const c of contours(yaw)) if (c.cvx && !seen.has(c.idx[1])) { seen.add(c.idx[1]); L.push({ id: c.id, a: c.idx[0], b: c.idx[c.idx.length - 1], ms: c.idx.slice(1, -1), region: c.region }); } return L; })(),
+  // (a link end's face-map dot, by index: -1 for the rest)
+  ANCHOR: POINTS.map(p => { if (!p.anchor) return -1; const s = p.id.slice(-1), j = INDEX[p.anchor + s] ?? INDEX[p.anchor]; return j ?? -1; }),
   REGIONS: ['brow', 'eye', 'temple', 'cheek', 'lips', 'jaw'],
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '60',
+  mls, tpsFit, tpsEval, spline, build: '61',
 };
 })();
