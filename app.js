@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '54';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '55';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1120,7 +1120,7 @@ const headWeight = (side, m) => i => {
 };
 const sideMapOf = () => { const sm = curSlot === 'front' && slots.side && slots.side.map; return sm && isProfile(sm) && sm.snapped ? sm : null; };
 // (the depths you set in 3D are part of the fit: a new drag refits the head)
-const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}|${zoSig(m.zo)}|${cfg.headShading ? 'L' : ''}` : ''; };
+const headKey = () => { const m = S.map, sm = sideMapOf(); return m ? `${S.imgSeq}|${m.pver}|${m.view}|${sm ? `${slots.side.imgSeq}:${sm.pver}:${sm.view}` : '-'}|${zoSig(m.zo)}|${cfg.headShading ? 'L' + (cfg.headShadeK || 1) : ''}` : ''; };
 let headIds = 0;
 /** The camera's distance (cm from the head's middle) for the photos without a lens, per pair of photos: 0 = from afar. */
 const distGuess = new Map();
@@ -1193,7 +1193,17 @@ async function ensureHead() {
       if (S.map !== m || headKey() !== key) return null;
       views[1].px = photoPixels(sd.img, sd.iw, sd.ih); views[1].skin = skinOf(ls); views[1].uv = HM.project(res, 1, 'traL', { all: true }).uv;
     }
-    HM.shading(res, views);
+    HM.shading(res, views, { strength: cfg.headShadeK || 1 });
+  }
+  // … and the lips closed where the front map has them closed (its lips' inner edges no further apart than the
+  // scans' closed mouth's, × 1.3): fitted, they stood ≈ 1.5 mm apart — a parted mouth
+  {
+    const a = FM.INDEX.ulf, b = FM.INDEX.llf, Cc = HM.correspond();
+    if (a != null && b != null && m.vis[a] && m.vis[b] && Cc[a] && Cc[b]) {
+      const N0 = HM.model.neu, va = Cc[a].v, vb = Cc[b].v, g0 = Math.hypot(N0[3 * va] - N0[3 * vb], N0[3 * va + 1] - N0[3 * vb + 1], N0[3 * va + 2] - N0[3 * vb + 2]);
+      const gm = Math.hypot(m.p[2 * a] - m.p[2 * b], m.p[2 * a + 1] - m.p[2 * b + 1]) / res.poses[0].s;
+      if (gm <= 1.3 * g0) HM.closeLips(res);
+    }
   }
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
@@ -4789,6 +4799,8 @@ function syncSurfacePane() {
   if (lg._h !== html) { lg._h = html; lg.innerHTML = html; }
   $$('#sfBrush [data-v]').forEach(b => { b.classList.toggle('on', b.dataset.v === (fixBrush() || '')); b.disabled = !s && !!b.dataset.v; });
   setRange('sfDetail', Math.round(cfg.surfDetail * 100), Math.round(cfg.surfDetail * 100) + '%');
+  setRange('sfShadeK', Math.round((cfg.headShadeK || 1) * 100), Math.round((cfg.headShadeK || 1) * 100) + '%');
+  $('#sfShadeK').closest('.srow').hidden = !cfg.headShading;
   setRange('sfSize', +(cfg.mSize * 100).toFixed(1), Math.round(brushV()) + ' px');
   setRange('sfStrength', Math.round(cfg.mStrength * 100), Math.round(cfg.mStrength * 100) + '%');
   $('#sfClear').disabled = !(s && s.edit);
@@ -7154,7 +7166,8 @@ function buildFaceMapPanel() {
       <p class="to-note">The photo is now 3D: <b>drag it to turn</b> the face, double-click to face it again. <b>Turned, drag a dot</b> to set its depth (the chin forward, a cheek back): it stays where it is on the photo and the surface bends to it. Facing you, dots move on the photo as usual.</p>
       <div class="to-label">Look</div>
       <div class="seg full" id="sfMode" style="margin-bottom:10px"><button type="button" data-v="photo">Photo</button><button type="button" data-v="clay">Clay</button><button type="button" data-v="wire">Wire</button></div>
-      <label class="tg sm"><span>Shape from light<small>Both photos' shading sets the brow, cheekbones and under-eye. Best with both photos taken in the same soft light.</small></span><input type="checkbox" class="sw-toggle" id="sfShade"></label>
+      <label class="tg sm"><span>Side shading<small>The photos' light and shade — the side photo's most — shape the brow, cheekbones and under-eye. Best with both photos in the same soft light.</small></span><input type="checkbox" class="sw-toggle" id="sfShade"></label>
+      ${sliderRow('sfShadeK', 'Strength', 25, 400, 25, 'How far the light may move the head. Applies when you let go.')}
       ${sliderRow('sfDetail', 'Fine detail', 0, 100, 1, 'Free relief read straight from the photo’s brightness, on top of the anatomy. Off (0) by default: on real photos shine, stubble and side light come out as humps. Raise it a little for more texture. Rebuild to apply.')}
       <div class="to-label">View</div>
       <div class="chips looks" id="sfViews">${SURF_VIEWS.map(([v, n, tip]) => `<button type="button" class="chip-dot look" data-v="${v}" title="${esc(tip)}">${n}</button>`).join('')}</div>
@@ -7247,7 +7260,10 @@ function buildFaceMapPanel() {
   $('#mMirror').addEventListener('change', e => { if (!!cfg.mapMirror !== e.target.checked) toggleMirror(); });
   $('#mCopyL').addEventListener('click', () => copySide('L'));
   $('#mCopyR').addEventListener('click', () => copySide('R'));
-  $('#sfShade').addEventListener('change', e => { cfg.headShading = e.target.checked; saveCfg(); wake(); });
+  $('#sfShade').addEventListener('change', e => { cfg.headShading = e.target.checked; saveCfg(); syncFaceMapPanel(); wake(); });
+  // (the strength: shown as it moves, the head fitted again when it's let go — each fit takes a few seconds)
+  $('#sfShadeK').addEventListener('input', e => setRange('sfShadeK', +e.target.value, e.target.value + '%'));
+  $('#sfShadeK').addEventListener('change', e => { cfg.headShadeK = +e.target.value / 100; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#mAutoDet').addEventListener('change', e => {
     cfg.mapAutoDetail = e.target.checked; saveCfg();
     if (cfg.mapAutoDetail && S.map) { pushUndo(); placeDetail(null); mapTouched(true); buildMask(); syncPts(); }
