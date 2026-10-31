@@ -10,7 +10,7 @@
      ========================================================================== */
 
   :root {
-    --cm-build: 70;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+    --cm-build: 71;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
     --font: 'Jost', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --mono: 'Jost', ui-sans-serif, system-ui, sans-serif;
     --c1: #7CCBF5;
@@ -232,7 +232,7 @@
     border-bottom: 1px solid var(--line);
     margin-bottom: 8px;
   }
-  .rail-brand .logo { width: 34px; height: 36px; color: var(--text); }
+  .rail-brand .logo { width: 26px; height: 28px; color: var(--text); }
   .rail-group { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 100%; }
   /* separators are a scale's graduations */
   .rail-sep {
@@ -767,14 +767,14 @@
     padding: 24px;
     text-align: center;
     cursor: pointer;
-    border: 1px solid var(--line-strong);
-    background: color-mix(in srgb, var(--accent) 6%, var(--panel));
+    border: 1px solid var(--line);
+    background: color-mix(in srgb, var(--accent) 3%, var(--bg));
     transition: background .15s;
   }
   /* as the photo's frame: its corners, and a ruler's ticks along the top and the left */
   .drop-zone::before {
     content: ''; position: absolute; inset: -1px; pointer-events: none;
-    --cm: var(--muted);
+    --cm: var(--faint);
     background:
       linear-gradient(var(--cm), var(--cm)) 0 0 / 14px 1.5px, linear-gradient(var(--cm), var(--cm)) 0 0 / 1.5px 14px,
       linear-gradient(var(--cm), var(--cm)) 100% 0 / 14px 1.5px, linear-gradient(var(--cm), var(--cm)) 100% 0 / 1.5px 14px,
@@ -786,10 +786,10 @@
   .drop-zone::after {
     content: ''; position: absolute; inset: 0; pointer-events: none;
     background:
-      repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), var(--line-strong) calc(10% - 1px) 10%) 0 0 / 100% 4px no-repeat,
-      repeating-linear-gradient(180deg, transparent 0 calc(10% - 1px), var(--line-strong) calc(10% - 1px) 10%) 0 0 / 4px 100% no-repeat;
+      repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), var(--line) calc(10% - 1px) 10%) 0 0 / 100% 4px no-repeat,
+      repeating-linear-gradient(180deg, transparent 0 calc(10% - 1px), var(--line) calc(10% - 1px) 10%) 0 0 / 4px 100% no-repeat;
   }
-  .drop-zone:hover, .drop-zone:focus-visible { background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+  .drop-zone:hover, .drop-zone:focus-visible { background: color-mix(in srgb, var(--accent) 8%, var(--bg)); }
   .drop-zone:hover::before { inset: -6px; --cm: var(--accent); }
   .drop h1 { margin: 0 0 22px; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
   .to-note:empty { display: none; }
