@@ -195,6 +195,28 @@ function projJ(pose, P) {
   const [, , k, Y] = projK(pose, P), R = pose.R, a = pose.f ? k * pose.s / pose.f : 0;
   return [0, 1].map(r => [0, 1, 2].map(j => k * (R[r][j] - a * Y[r] * R[2][j])));
 }
+/**
+ * The skin a photo shows at a point (X: the head, pose: the photo's): of the vertices facing it (not the neck's or
+ * ears'), the one in front among those within 1 mm of the nearest — the nearest alone could be skin the nose hides.
+ * Returns (x, y) → vertex (or −1).
+ */
+function skinUnder(X, pose) {
+  const m = model, nS = m.nSkin, C = correspond(), nrm = normals(X), R = pose.R, uv = new Float32Array(2 * nS), z = new Float32Array(nS), ok = new Uint8Array(nS);
+  for (let v = 0; v < nS; v++) {
+    const [u, w, , Y] = projK(pose, X.subarray(3 * v, 3 * v + 3));
+    uv[2 * v] = u; uv[2 * v + 1] = w; z[v] = -Y[2];
+    ok[v] = !C.neck[v] && !C.ear[v] && -(R[2][0] * nrm[3 * v] + R[2][1] * nrm[3 * v + 1] + R[2][2] * nrm[3 * v + 2]) > .15 ? 1 : 0;
+  }
+  const mm = .1 * pose.s;
+  return (x, y) => {
+    let bd = Infinity;
+    for (let v = 0; v < nS; v++) if (ok[v]) { const d = (uv[2 * v] - x) ** 2 + (uv[2 * v + 1] - y) ** 2; if (d < bd) bd = d; }
+    const r2 = (Math.sqrt(bd) + mm) ** 2;
+    let best = -1, bz = -Infinity;
+    for (let v = 0; v < nS; v++) if (ok[v] && (uv[2 * v] - x) ** 2 + (uv[2 * v + 1] - y) ** 2 <= r2 && z[v] > bz) { bz = z[v]; best = v; }
+    return best;
+  };
+}
 /** A view's outline (V.outline: its dots in order) as unit normals in its photo, out from its dots' centre: Map(dot → [x, y]). */
 function outlineNormals(V) {
   const out = new Map(), L = V.outline && V.outline.filter(i => V.vis[i]);
@@ -587,6 +609,52 @@ function closeLips(res, opt = {}) {
   for (let v = 0; v < nS; v++) for (let j = 0; j < 3; j++) X[3 * v + j] += D[3 * v + j];
   return (res.lipsClosed = mid);
 }
+/**
+ * The skin's folds undone (changes res.X): where the mesh is tiny — the mouth's corners, the eyes' inner corners — the
+ * scans' modes at 2–3σ turn triangles inside out (36 on a real fit, from the modes alone: none on the scans' own head).
+ * Round each one, how the head differs from the scans' head (scaled to it) is smoothed over the skin a ring or two
+ * away, until every triangle faces as the scans' does — elsewhere the head is untouched. Returns { before, after }.
+ */
+function unfold(res, opt = {}) {
+  const m = model, nS = m.nSkin, X = res.X, N0 = m.neu, Tp = topology();
+  let sx = 0, sn = 0;
+  for (let v = 0; v < nS; v += 7) { sx += Math.hypot(X[3 * v], X[3 * v + 1], X[3 * v + 2]); sn += Math.hypot(N0[3 * v], N0[3 * v + 1], N0[3 * v + 2]); }
+  const k = sx / sn, D = new Float32Array(3 * nS);
+  for (let i = 0; i < 3 * nS; i++) D[i] = X[i] - k * N0[i];
+  const cross = (Y, a, b, c, kk) => { const u = [0, 1, 2].map(j => kk * (Y[3 * b + j] - Y[3 * a + j])), v = [0, 1, 2].map(j => kk * (Y[3 * c + j] - Y[3 * a + j])); return [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]; };
+  const cur = new Float32Array(3 * nS), flipped = () => {
+    for (let i = 0; i < 3 * nS; i++) cur[i] = k * N0[i] + D[i];
+    const out = [];
+    for (let t = 0; t < m.nTri; t++) {
+      const a = m.tri[3 * t], b = m.tri[3 * t + 1], c = m.tri[3 * t + 2];
+      if (a >= nS || b >= nS || c >= nS) continue;
+      const p = cross(cur, a, b, c, 1), q = cross(N0, a, b, c, 1);
+      if (p[0] * q[0] + p[1] * q[1] + p[2] * q[2] <= 0) out.push(a, b, c);
+    }
+    return out;
+  };
+  let F = flipped();
+  const before = F.length / 3, tmp = new Float32Array(3 * nS);
+  for (let round = 0; round < (opt.rounds || 40) && F.length; round++) {
+    // (the flipped triangles' corners and a ring or two round them — wider every 10 rounds)
+    let reg = new Set(F);
+    for (let r = 0; r < 1 + Math.floor(round / 10); r++) { const g = new Set(reg); for (const v of reg) for (let q = Tp.off[v]; q < Tp.off[v + 1]; q++) if (Tp.nb[q] < nS) g.add(Tp.nb[q]); reg = g; }
+    for (let it = 0; it < 3; it++) {
+      tmp.set(D);
+      for (const v of reg) {
+        let s0 = 0, s1 = 0, s2 = 0, n = 0;
+        for (let q = Tp.off[v]; q < Tp.off[v + 1]; q++) { const u = Tp.nb[q]; if (u >= nS) continue; s0 += D[3 * u]; s1 += D[3 * u + 1]; s2 += D[3 * u + 2]; n++; }
+        if (n) { tmp[3 * v] = .5 * D[3 * v] + .5 * s0 / n; tmp[3 * v + 1] = .5 * D[3 * v + 1] + .5 * s1 / n; tmp[3 * v + 2] = .5 * D[3 * v + 2] + .5 * s2 / n; }
+      }
+      D.set(tmp);
+    }
+    F = flipped();
+  }
+  let moved = 0;
+  for (let v = 0; v < nS; v++) { const d = Math.hypot(cur[3 * v] - X[3 * v], cur[3 * v + 1] - X[3 * v + 1], cur[3 * v + 2] - X[3 * v + 2]); if (d > moved) moved = d; }
+  X.set(cur.subarray(0, 3 * nS));
+  return (res.unfold = { before, after: F.length / 3, maxMm: +(10 * moved).toFixed(2) });
+}
 /** Each vertex's mirror image across the head's midline (the skin's from topology(), the eyeballs' by nearest; −1 for none). */
 let mirr = null;
 function mirrorOf() {
@@ -609,7 +677,7 @@ function mirrorOf() {
 // they flattened the cheeks into planes and bulged them out sideways) — but its eye's ('sy': the pupil, the eye's
 // corners), the eye's front being what a profile shows plainly: without them the front photo's eyes, fitted by
 // the modes, sat 8 mm deeper under the brow than the side photo's on a real pair — a heavy brow, sunken corners.
-let ROW_KINDS = ['fp', 'fm', 'fe', 'sp', 'sy', 'sa', 'se', 'ss', 'pin'], ROW_W = { fe: .3, fp: .1, fm: .1 };
+let ROW_KINDS = ['fp', 'fm', 'fe', 'sp', 'sy', 'sa', 'se', 'ss', 'tr', 'pin'], ROW_W = { fe: .3, fp: .1, fm: .1 };
 /** Bend res.X to the views (as given to fit). Changes res.X; leaves res.dX (the bend) and res.misfit. */
 function deform(res, views, opt = {}) {
   // (the bend's scales: 2.5 cm half as much as 5 cm, and held back more — with the 2.5 cm one leading, the side
@@ -617,6 +685,7 @@ function deform(res, views, opt = {}) {
   // the profile still fits to ½ mm, the jaw line to 1)
   const t0 = performance.now(), m = model, C = correspond(), N = m.N, nS = m.nSkin, T = C.T, X0 = Float32Array.from(res.X), lam = opt.lambda ?? .05, P = FM.POINTS;
   KW = opt.kw || [0, .5, 1];
+  res.underF = null; res.pairOff = null;
   // each view's outline chains: the side photo's profile (glabella → neck–chin angle) and jaw line
   const chains = views.map((V, q) => {
     if (V.view === 'front' || !V.outline) return [];
@@ -762,6 +831,34 @@ function deform(res, views, opt = {}) {
           rows.push({ v: vert, g: dir(pose, vert, 1, 0), e, w, i, q, anat: true });
         }
       }
+      // the dots placed on both photos ('tr', V.pair(i) → weight): a 3D point measured, not guessed — the front photo
+      // says which skin it is (the skin it shows under its dot) and the side photo how deep that lies (across a
+      // profile) and how high. A dot whose two placements put it over 15 mm off the head is left out (res.pairOff:
+      // the photos don't agree what it marks)
+      if (!front && V.pair) {
+        const F = views.findIndex(W => W.view === 'front'), Vf = views[F], pf = res.poses[F];
+        if (Vf) {
+          const under = res.underF || (res.underF = skinUnder(X0, pf));
+          for (let i = 0; i < P.length; i++) {
+            const w = V.vis[i] && Vf.vis[i] ? V.pair(i) : 0;
+            if (!(w > 0)) continue;
+            const vert = under(Vf.p[2 * i], Vf.p[2 * i + 1]);
+            if (vert < 0) continue;
+            const [u, v] = proj(x0q(vert, q), pose), eu = (V.p[2 * i] - u) / s, ev = (V.p[2 * i + 1] - v) / s;
+            if (Math.hypot(eu, ev) > 1.5) { (res.pairOff || (res.pairOff = new Map())).set(i, 10 * Math.hypot(eu, ev)); continue; }
+            const [fu, fv] = proj(x0q(vert, F), pf);
+            rows.push({ v: vert, g: dir(pose, vert, 1, 0), e: eu, w, i, q, pair: true }, { v: vert, g: dir(pose, vert, 0, 1), e: ev, w: .3 * w, i, q, pair: true });
+            rows.push({ v: vert, g: dir(pf, vert, 1, 0), e: (Vf.p[2 * i] - fu) / pf.s, w, i, q: F, pair: true }, { v: vert, g: dir(pf, vert, 0, 1), e: (Vf.p[2 * i + 1] - fv) / pf.s, w, i, q: F, pair: true });
+          }
+          // (V.hold(i) → weight: dots whose depth stays the fit's — the lids and the lips: pulled along by the orbit's and
+          // the cheeks' dots round them, the lids folded over at the eyes' inner corners; the fit has them within 1 mm)
+          if (V.hold) for (let i = 0; i < P.length; i++) {
+            const w = Vf.vis[i] ? V.hold(i) : 0;
+            if (!(w > 0) || !C[i] || C[i].v < 0 || C[i].v >= nS) continue;
+            rows.push({ v: C[i].v, g: pf.R[2].slice(), e: 0, w, i, q: F, pair: true, hold: true });
+          }
+        }
+      }
       // the outline's samples: the head's edge there — on the profile, the nearest vertex of the head's own
       // outline (across the line counts double: ahead of the sample, not beside it); on the jaw line, of its
       // turn the one furthest out near the line across it
@@ -806,7 +903,7 @@ function deform(res, views, opt = {}) {
       const edge = new Set(res.pairs.flatMap((L, q) => L.filter(o => o.n).map(o => `${q}:${o.i}`)));
       // (a side photo's dot off the midline that isn't an edge: 'sl')
       // (a front photo's dot of the lips: 'fm'; a side photo's of the eye — its pupil, its corners: 'sy')
-      const kind = r => r.pin ? 'pin' : r.at ? 'ss' : r.anat ? 'sa' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && /^(pu|en|ex)[LR]$/.test(P[r.i].id) ? 'y' : r.q && P[r.i].side !== 0 ? 'l' : !r.q && P[r.i].group === 'lips' ? 'm' : 'p');
+      const kind = r => r.pin ? 'pin' : r.pair ? 'tr' : r.at ? 'ss' : r.anat ? 'sa' : P[r.i].group === 'ears' ? 'ear' : (r.q ? 's' : 'f') + (edge.has(`${r.q}:${r.i}`) ? 'e' : r.q && /^(pu|en|ex)[LR]$/.test(P[r.i].id) ? 'y' : r.q && P[r.i].side !== 0 ? 'l' : !r.q && P[r.i].group === 'lips' ? 'm' : 'p');
       rows = rows.filter(r => { const k = kind(r); if (!only.includes(k)) return false; if (catW[k] != null) r.w *= catW[k]; r.w0 = r.w; return true; });
     }
     // (a side photo's rows on the other side of the face too, mirrored: the photo sees one side, and bent on that
@@ -866,11 +963,14 @@ function deform(res, views, opt = {}) {
   // (with each dot's weight in the bend: the front photo's landmarks count little in it — they aren't a
   // disagreement between the photos when the head passes them by)
   const wOf = new Map();
-  for (const r of rows) { if (r.i == null) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); wOf.set(key, Math.max(wOf.get(key) || 0, r.w0 ?? r.w)); }
+  for (const r of rows) { if (r.i == null || r.hold) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); wOf.set(key, Math.max(wOf.get(key) || 0, r.w0 ?? r.w)); }
   res.dX = dX;
   res.bendMs = performance.now() - t0;
   // (the outline's samples: where, and what's left — mm across the outline, + = the head inside it)
   res.outline = rows.filter(r => r.at).map(r => ({ x: r.at.x, y: r.at.y, q: r.q, ch: r.at.ch, v: r.v, mm: 10 * (r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2])) }));
+  // (and the dots on both photos left out, over 15 mm apart: on the side photo, where its placement disagrees)
+  const sq = views.findIndex(V => V.view !== 'front');
+  if (res.pairOff && sq >= 0) for (const [i, mm] of res.pairOff) { const k = `${sq}:${i}`; if (!(mis.get(k) >= mm)) { mis.set(k, mm); wOf.set(k, 1); } }
   res.misfit = [...mis].map(([k, e]) => { const [q, i] = k.split(':').map(Number); return { q, i, mm: e, w: wOf.get(k) || 0 }; }).sort((a, b) => b.mm - a.mm);
   return res;
 }
@@ -1639,6 +1739,12 @@ function convexFit(res, views, opt = {}) {
     for (let j = 0; j < nk; j++) if (!isFixed[j]) h[j] = Math.max(-.4, Math.min(.4, h[j] + dh[j]));
     apply();
   }
+  // what's left per point (mm across its link, on its photo): res.convex.left
+  res.convex.left = new Map(L.map(r => {
+    const pose = res.poses[r.q], at = v => { const a = projK(pose, X.subarray(3 * v, 3 * v + 3)); return r.off ? [a[0] + r.off[2 * v], a[1] + r.off[2 * v + 1]] : a; };
+    const A = at(r.va), B = at(r.vb), Mh = at(r.vm), cx = B[0] - A[0], cy = B[1] - A[1], Lh = Math.hypot(cx, cy), th = Lh > 1 ? Math.min(1, Math.max(0, ((Mh[0] - A[0]) * cx + (Mh[1] - A[1]) * cy) / (Lh * Lh))) : .5;
+    return [r.i, 10 * (r.du - ((Mh[0] - A[0] - th * cx) * r.ex + (Mh[1] - A[1] - th * cy) * r.ey)) / pose.s];
+  }));
   return out();
 }
 /** A photo's scale (px per cm) at the face's own depth: the pose's, enlarged as its lens enlarges the dots it fitted. */
@@ -1765,5 +1871,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, linkPoint, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '64' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, linkMid, linkPoint, skinUnder, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '65' };
 })();
