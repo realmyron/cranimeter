@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '64';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '65';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1179,7 +1179,14 @@ async function ensureHead() {
     // pulled forward and the orbital rim's back, the under-eye and the cheekbone came out unchanged on average
     // and the lateral brow 4 mm forward — the form is read from the photos' light instead, see anatomyFromLight)
     const ANAT = /^(so[134]|supra|ss\d|lor|ior|mor|tt\d|malar|zr\d|sm\d|hcm)[LR]$/, anat = i => ANAT.test(FM.POINTS[i].id) && isUser(sm, i) ? (cfg.sideAnat ?? 0) : 0;
-    views.push({ view: sm.view, p: sm.p, vis: sm.vis, anat, f: fpx(sd.imgRec, sd.iw, sd.ih), weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, jawSeg: jl ? { pts: jl, w: .6 } : null, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
+    // (the dots you placed on the side photo that the front photo has too — not the midline's, which the profile has,
+    // nor the outline, hair, ears or neck: the head passes through each as a 3D point, see deform 'tr'. The brows'
+    // half: they're hair over the skin. Not the lids' and lips' either: the skin under a lid's or a mouth corner's dot
+    // is a thin fold, and pulled to the side photo's depth the lids and the corners folded over — 26 triangles inside
+    // out at each corner of a real mouth; the fit has them within 1 mm already)
+    const pair = i => { const pt = FM.POINTS[i]; return cfg.pairs === false || pt.cvx || pt.mid || pt.side === 0 || !isUser(sm, i) || /^(ears|hair|neck|outline|eyes|lips)$/.test(pt.group) || pt.field === 'back' || /^(tri|hl|pu|irI|irO)/.test(pt.id) ? 0 : (cfg.pairW ?? 1) * (pt.group === 'brows' ? .5 : 1) * (1 - .95 * smooth01(.3, .7, hair[i])); };
+    const hold = i => { const pt = FM.POINTS[i]; return cfg.pairs === false || cfg.pairHold === false || pt.mid || pt.cvx || !/^(eyes|lips)$/.test(pt.group) || /^(pu|irI|irO)/.test(pt.id) ? 0 : 1; };
+    views.push({ view: sm.view, p: sm.p, vis: sm.vis, anat, pair, hold, f: fpx(sd.imgRec, sd.iw, sd.ih), weight: i => w(i) * (1 - .95 * smooth01(.3, .7, hair[i])), hair, jawSeg: jl ? { pts: jl, w: .6 } : null, outline: (sm.contours.find(c => c.boundary) || {}).idx, neck: (sm.contours.find(c => c.id === 'neckFront') || {}).idx, labels });
   }
   // the photos that don't say their lens (sent through a messenger, edited, scanned): taken from the distance
   // that fits their dots best, when that's clearly better than from afar — a phone at arm's length enlarges the
@@ -1196,7 +1203,7 @@ async function ensureHead() {
   const kz = HM.faceScale(res, 0) / mapFrame().scale, R2 = res.poses[0].R[2], X = res.X, ev = FM.INDEX.traL != null && C[FM.INDEX.traL] ? C[FM.INDEX.traL].v : -1;
   const zEar = ev >= 0 ? -(R2[0] * X[3 * ev] + R2[1] * X[3 * ev + 1] + R2[2] * X[3 * ev + 2]) : 0, pins = [];
   if (m.zo) FM.POINTS.forEach((_, i) => { if (Number.isFinite(m.zo[i]) && m.vis[i] && C[i] && C[i].v >= 0) pins.push({ i, v: C[i].v, depth: m.zo[i] / kz + zEar }); });
-  HM.deform(res, views, { pins });
+  HM.deform(res, views, { pins, fine: cfg.headFine === true, fineGroups: /^$/, kw: cfg.headKw, fineAlpha: cfg.headFineAlpha });
   // … each photo's camera fitted again to the head as bent, then the head moved in the front photo's plane
   // through its dots: from the front, the head is the photo
   // (refitPoses: on a real pair it turned the front photo's camera ½° and the side photo's 3° — the side's yaw is
@@ -1231,6 +1238,8 @@ async function ensureHead() {
       if (gm <= 1.3 * g0) HM.closeLips(res);
     }
   }
+  // … the skin's folds undone (the mouth's and the eyes' corners)
+  if (cfg.unfold !== false && HM.unfold) HM.unfold(res);
   // … and last the convexity you set (the Convexity step): the surface's fine form between the dots
   if (HM.convexFit) { res.cvGeo = null; convexGeo(res); HM.convexFit(res, convexViews(m, sm, res), { fresh: true, ...convexOpts(m) }); }
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
@@ -1287,8 +1296,14 @@ function convexViews(fm, sm, res) {
   const one = (m, q) => {
     syncCvxEnds(m);
     const g = G[q], memo = new Map();
-    // (a link's ends on the head: the skin under your end dots, as this photo shows the head)
-    const vert = g ? i => { if (!memo.has(i)) memo.set(i, vertUnder(g, m.p[2 * i], m.p[2 * i + 1])); return memo.get(i); } : null;
+    // (a link's ends on the head: the skin under your end dots, as this photo shows the head. On the side photo, which
+    // skin across the face is the front photo's to say — a profile shows how deep and how high, not how far out from
+    // the midline: the skin whose place on the side photo is the end dot's and on the front photo is as far across as
+    // the face-map dot the end sits on there)
+    const g0 = G[0], s0 = res && res.poses[0].s, s1 = res && res.poses[q] && res.poses[q].s;
+    const both = (i, x, y) => { const a = FM.ANCHOR[i]; if (!(a >= 0) || !fm.vis[a] || !g0) return vertUnder(g, x, y); const fx = fm.p[2 * a];
+      let best = -1, bd = Infinity; for (let v = 0; v < g.ok.length; v++) { if (!g.ok[v] && !g0.ok[v]) continue; const d = ((g.uv[2 * v] - x) ** 2 + (g.uv[2 * v + 1] - y) ** 2) / (s1 * s1) + (g0.uv[2 * v] - fx) ** 2 / (s0 * s0); if (d < bd) { bd = d; best = v; } } return best; };
+    const vert = g ? i => { if (!memo.has(i)) memo.set(i, q && cfg.cvxBoth !== false ? both(i, m.p[2 * i], m.p[2 * i + 1]) : vertUnder(g, m.p[2 * i], m.p[2 * i + 1])); return memo.get(i); } : null;
     return { q, p: m.p, user: i => isUser(m, i), links: linksSeen(m), off: g ? g.off : null, vert };
   };
   // (the side photo's only: the front photo sees the cheeks' and temples' sides nearly edge on, and points placed on it
@@ -8017,7 +8032,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady, mmPerPx, autoPlace,
+window.cranimeter = { loadFile, state: S, build: BUILD, cfg: o => (o && Object.assign(cfg, o), cfg), goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady, mmPerPx, autoPlace,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
