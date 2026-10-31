@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Cranimeter</title>
 <meta name="description" content="Cranimeter — measure facial proportions, ratios and angles on your own photos. Runs entirely in your browser.">
-<meta name="theme-color" content="#070606">
+<meta name="theme-color" content="#0B0C0E">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600&display=swap">
 <!-- dark until the stylesheet arrives (and if it never does, at least not a blank white page) -->
-<style>:where(html:not([data-theme="light"])) body { background: #070606; color: #e2e3e1; }</style>
-<link rel="stylesheet" href="style.css?v=65">
+<style>:where(html:not([data-theme="light"])) body { background: #0B0C0E; color: #e3e5ea; }</style>
+<link rel="stylesheet" href="style.css?v=69">
 <script>
   // Set the theme before first paint so there is no flash.
   (function () {
@@ -27,6 +27,28 @@
 </head>
 <body>
 
+<!-- the logo: half a skull (magenta) beside a ruler -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="skull" viewBox="0 0 427 497">
+<rect x="206" width="221" height="497" fill="#1A1A19"/>
+<rect width="95" height="461" transform="matrix(-1 0 0 1 325 12)" fill="#CB1895"/>
+<path d="M326.082 9V473.574" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M230.75 9V473.574" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326 9.1626L231 9.16261" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326 472.988L236 472.988" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326.375 423.144H282.375" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326 363.889H282" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326.375 308.72H282.375" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326.375 248.443H282.375" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326.375 182.842H282.375" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326.375 122.565H282.375" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M326.375 62.2881H282.375" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" stroke="#1A1A19"/>
+<path d="M189.956 11.1309L189.965 8.99902L190.189 9.00098L190.41 9.04199L203.91 11.542L205.955 11.9209V307.927L204.728 308.652L204.726 308.653C204.724 308.655 204.72 308.657 204.715 308.66C204.705 308.666 204.689 308.674 204.669 308.687C204.628 308.711 204.565 308.749 204.482 308.799C204.317 308.899 204.07 309.049 203.751 309.245C203.112 309.638 202.185 310.218 201.042 310.958C198.754 312.438 195.608 314.553 192.179 317.091C185.252 322.216 177.423 328.882 173.027 335.398C167.868 343.047 164.657 347.047 163.428 355.365L163.401 355.545V355.546C162.381 362.449 161.841 366.438 164.67 371.84C167.543 377.326 171.143 379.346 177.487 382.224C179.347 383.067 182.005 383.773 184.321 384.276C185.455 384.523 186.463 384.712 187.186 384.839C187.546 384.902 187.835 384.95 188.031 384.981C188.075 384.988 188.114 384.995 188.148 385H204.455V472.729L201.736 472.49L144.736 467.49L142.455 467.291V427.891C142.4 427.722 142.323 427.495 142.226 427.223C141.996 426.583 141.658 425.706 141.224 424.762C140.301 422.756 139.143 420.885 137.965 419.996C136.295 418.736 134.828 417.978 133.404 417.638C132.014 417.305 130.508 417.333 128.687 417.891C127.358 418.297 125.765 419.746 124.322 421.548C123.652 422.385 123.097 423.191 122.71 423.79C122.613 423.94 122.529 424.078 122.455 424.197V462.969L119.164 461.872L91.7568 452.736L91.9688 450.736V450.732C91.9691 450.729 91.97 450.724 91.9707 450.717C91.9722 450.702 91.9745 450.68 91.9775 450.65C91.9837 450.59 91.9938 450.497 92.0059 450.375C92.03 450.13 92.0646 449.761 92.1084 449.277C92.196 448.308 92.3185 446.872 92.4541 445.021C92.7253 441.316 93.051 435.944 93.2686 429.294C93.7037 415.99 93.7034 397.591 91.9639 377.213C91.8492 375.87 91.2378 375.058 89.9521 374.205C89.2565 373.744 88.4284 373.319 87.4209 372.823C86.456 372.348 85.3161 371.804 84.209 371.168C79.9776 368.735 73.3347 368.617 67.25 369.33C64.297 369.676 61.6357 370.196 59.7109 370.631C58.7505 370.848 57.9781 371.043 57.4502 371.183C57.1865 371.252 56.9836 371.307 56.8496 371.345C56.7828 371.363 56.733 371.378 56.7012 371.387C56.6854 371.391 56.6738 371.395 56.667 371.396C56.6644 371.397 56.6624 371.398 56.6611 371.398L55.9844 371.598L55.3037 371.414L55.9551 369L55.3027 371.414L55.3018 371.413C55.301 371.413 55.2991 371.412 55.2979 371.412C55.2953 371.411 55.2913 371.41 55.2871 371.409C55.2781 371.407 55.265 371.404 55.249 371.399C55.216 371.39 55.1678 371.376 55.1064 371.359C54.9833 371.325 54.8039 371.275 54.5752 371.209C54.1173 371.077 53.4581 370.882 52.6455 370.63C51.0213 370.125 48.772 369.384 46.2695 368.443C41.3365 366.588 35.1453 363.852 30.8936 360.453C26.3806 356.846 23.0226 353.435 20.2959 349.504C17.5747 345.58 15.5513 341.237 13.6035 335.851C10.2998 326.714 9.02795 320.51 10.4814 310.636C11.4266 304.216 12.7452 300.515 15.7441 294.833C17.3687 291.755 20.0123 288.338 22.1582 285.772C23.2473 284.47 24.2402 283.35 24.9609 282.556C24.9729 282.543 24.9843 282.529 24.9961 282.516C24.9356 282.38 24.8704 282.235 24.8027 282.082C24.2441 280.821 23.4431 278.99 22.4727 276.701C20.5318 272.123 17.9077 265.705 15.1729 258.346C9.72307 243.68 3.75698 225.07 1.97168 209.79C-1.30362 181.757 -0.958924 164.694 6.54395 137.339C14.2575 109.216 22.3217 93.3046 41.0361 70.8975C56.6931 52.1512 67.9128 42.7579 89.2334 30.8193C99.8184 24.8923 106.187 22.0887 117.64 18.1367C131.262 13.436 149.406 11.1696 163.992 10.0645C171.316 9.50952 177.801 9.24357 182.456 9.11621C184.784 9.05253 186.656 9.02387 187.948 9.01074C188.594 9.00418 189.096 8.99996 189.438 8.99902H189.964C189.964 8.99932 189.964 9.02537 189.956 11.1309ZM47.6914 209L46.9424 210.017L48.5586 211.208C47.0222 210.076 46.9457 210.021 46.9414 210.019L46.9395 210.021C46.9384 210.022 46.9369 210.024 46.9355 210.025C46.9324 210.03 46.9288 210.036 46.9238 210.043C46.9137 210.057 46.8992 210.076 46.8818 210.1C46.8469 210.148 46.7972 210.218 46.7344 210.307C46.6085 210.485 46.4292 210.744 46.2041 211.079C45.7537 211.749 45.1203 212.725 44.3721 213.972C42.8768 216.464 40.9147 220.049 39.0293 224.453C35.2691 233.236 31.7505 245.421 32.9863 258.731C33.8804 268.359 39.6439 280.155 44.9316 289.276C47.6102 293.897 50.233 297.941 52.1855 300.83C53.1625 302.275 53.9735 303.435 54.542 304.234C54.8261 304.634 55.0494 304.945 55.2031 305.156C55.2797 305.262 55.3392 305.343 55.3799 305.398C55.4002 305.426 55.4159 305.448 55.4268 305.463C55.432 305.47 55.4365 305.475 55.4395 305.479C55.4408 305.481 55.4425 305.483 55.4434 305.484L55.4443 305.486L57.4551 304L55.4453 305.487L56.1943 306.5H156.596L157.343 305.639L155.455 304L157.344 305.638L157.346 305.636C157.347 305.635 157.348 305.633 157.35 305.631C157.353 305.626 157.36 305.62 157.366 305.612C157.38 305.597 157.399 305.573 157.424 305.544C157.474 305.485 157.548 305.4 157.643 305.288C157.831 305.065 158.105 304.738 158.451 304.316C159.144 303.473 160.13 302.249 161.309 300.714C163.664 297.646 166.805 293.32 169.939 288.292C176.128 278.366 182.617 265.204 182.455 253.466C182.324 244.005 177.833 233.064 173.591 224.73C171.443 220.512 169.306 216.86 167.705 214.263C166.904 212.963 166.236 211.925 165.766 211.208C165.531 210.85 165.345 210.571 165.217 210.381C165.153 210.286 165.103 210.212 165.068 210.162C165.052 210.137 165.039 210.118 165.029 210.104C165.025 210.098 165.021 210.092 165.019 210.088C165.017 210.086 165.016 210.085 165.015 210.084L165.014 210.082C165.011 210.083 164.936 210.134 162.955 211.5L165.014 210.081L164.268 209H47.6914Z" fill="#CB1895"/>
+    </symbol>
+  </defs>
+</svg>
+
 <canvas id="bg" aria-hidden="true"></canvas>
 <div id="stage">
   <canvas id="imgcv" aria-hidden="true"></canvas>
@@ -37,12 +59,7 @@
 <!-- Left rail: brand · tools · view · settings -->
 <nav class="rail glass" id="rail" aria-label="Tools">
   <div class="rail-brand" data-tip="cranimeter">
-    <!-- the face's oval cut into its classical thirds, a landmark lit at its centre -->
-    <svg class="logo" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <ellipse cx="12" cy="12" rx="7" ry="9.5" stroke="currentColor" stroke-width="1.4"/>
-      <path d="M3 8.8h18M3 15.2h18" stroke="currentColor" stroke-width="1" opacity=".5"/>
-      <circle cx="12" cy="12" r="2" style="fill:var(--accent)"/>
-    </svg>
+    <svg class="logo" viewBox="0 0 427 497" aria-hidden="true"><use href="#skull"/></svg>
   </div>
 
   <div class="rail-sep needs-img"></div>
@@ -172,14 +189,9 @@
 
 <!-- Landing -->
 <section id="drop" class="drop">
-  <div class="drop-card glass">
-    <div class="drop-brand"><span>Cranimeter</span><small>Runs in your browser</small></div>
+  <div class="drop-card">
     <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Add image">
-      <div class="drop-icon">
-        <svg class="ic" viewBox="0 0 20 20"><ellipse cx="10" cy="10" rx="5.8" ry="7.9"/><path d="M2.5 7.3h15M2.5 12.7h15" opacity=".5"/><circle cx="10" cy="10" r="1.4" fill="currentColor" stroke="none"/></svg>
-      </div>
       <h1>Add image</h1>
-      <p>Drop a photo here, paste it, or browse your files.</p>
       <div class="drop-actions">
         <button class="btn" id="btnBrowse" type="button">Browse files</button>
         <button class="btn ghost" id="btnPaste" type="button">Paste</button>
@@ -274,11 +286,11 @@
 
 <!-- Bump the ?v= tags (and BUILD in app.js, presets.js, warp.js, facemap.js, surface.js and head.js) on every release.
      If a browser still has an old copy of a file, app.js fetches it again by itself. -->
-<script src="presets.js?v=65"></script>
-<script src="warp.js?v=65"></script>
-<script src="facemap.js?v=65"></script>
-<script src="head.js?v=65"></script>
-<script src="surface.js?v=65"></script>
-<script src="app.js?v=65"></script>
+<script src="presets.js?v=69"></script>
+<script src="warp.js?v=69"></script>
+<script src="facemap.js?v=69"></script>
+<script src="head.js?v=69"></script>
+<script src="surface.js?v=69"></script>
+<script src="app.js?v=69"></script>
 </body>
 </html>
