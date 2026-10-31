@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '65';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '69';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1311,11 +1311,14 @@ function convexViews(fm, sm, res) {
   // photo convexity is set in 3D)
   return [sm && one(sm, 1)].filter(Boolean);
 }
+/** The links the 3D has: not the front photo's own (the cheek's) — it no longer sets convexity, so they're gone from the 3D too. */
+let LINKS3 = null;
+const links3 = () => LINKS3 || (LINKS3 = FM.ALL_LINKS.filter(k => FM.POINTS[k.ms[0]].views !== 'front'));
 /** The points set in 3D (the front map's cvh: how far out, cm), for convexFit. */
 function convexOpts(fm) {
-  const fixed = new Map();
-  if (fm && fm.cvh) fm.cvh.forEach((h, i) => { if (Number.isFinite(h)) fixed.set(i, h); });
-  return { fixed, links: FM.ALL_LINKS };
+  const fixed = new Map(), on = new Set(links3().flatMap(k => k.ms));
+  if (fm && fm.cvh) fm.cvh.forEach((h, i) => { if (Number.isFinite(h) && on.has(i)) fixed.set(i, h); });
+  return { fixed, links: links3() };
 }
 const convexStep = () => mapping() && S.mapStep === 'convex';
 /** The front map (with the head) and the side map, from either photo's tab. */
@@ -2612,7 +2615,7 @@ function headDots(G) {
   if (h.res.Xcv0) {
     const X0 = h.res.Xcv0, nS = M.nSkin, vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1, R = h.res.poses[0].R, s = h.res.poses[0].s;
     const nrm = hd.nrm || (hd.nrm = HM.normals(X)), applied = h.res.convex ? h.res.convex.h : new Map();
-    for (const k of FM.ALL_LINKS) {
+    for (const k of links3()) {
       const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length;
       if (va < 0 || vb < 0 || va === vb) continue;
       // (its ends too — the link is drawn on the head through them)
@@ -3234,7 +3237,7 @@ function applyTheme() {
   const t = cfg.theme === 'system' ? (mqDark.matches ? 'dark' : 'light') : cfg.theme;
   root.dataset.theme = t;
   const meta = $('meta[name="theme-color"]');
-  if (meta) meta.content = t === 'dark' ? '#070606' : '#E8E6E3';
+  if (meta) meta.content = t === 'dark' ? '#0B0C0E' : '#E6E8EC';
   grid.rgb = getComputedStyle(root).getPropertyValue('--dot-rgb').trim() || '178,186,184';
   grid.a0 = t === 'dark' ? .085 : .13;
   grid.a1 = t === 'dark' ? .32 : .3;
@@ -4052,7 +4055,7 @@ const cxShown = region => !(cfg.cxHide || []).includes(region);
 const frontMap = () => curSlot === 'front' ? S.map : slots.front && slots.front.map;
 const cvxSet3 = i => { const fm = frontMap(); return !!(fm && fm.cvh && Number.isFinite(fm.cvh[i])); };
 let CVX_MIDS = null;
-const cvx3 = i => stageOn() && !!(S.map.head && S.map.head.res.Xcv0) && (CVX_MIDS || (CVX_MIDS = new Set(FM.ALL_LINKS.flatMap(k => k.ms)))).has(i);
+const cvx3 = i => stageOn() && !!(S.map.head && S.map.head.res.Xcv0) && (CVX_MIDS || (CVX_MIDS = new Set(links3().flatMap(k => k.ms)))).has(i);
 // (on the front photo none: it can't show convexity — that's set on the side photo or in 3D)
 const dotShown = i => { const pt = FM.POINTS[i]; if (S.hideGroups.has(pt.group)) return false; if (!pt.cvx) return !!S.map.vis[i]; if (!cxShown(pt.region)) return false; return convexStep() ? curSlot === 'side' && !!S.map.vis[i] : cvx3(i); };
 /** Screen positions of every scan dot (on the photo as it was). */
@@ -4191,7 +4194,7 @@ function drawMap(ctx) {
   ctx.setLineDash([]);
   // in the 3D: the convexity links on the head (both sides, the profile's too), through their points
   if (stageOn() && S.map.head && S.map.head.res.Xcv0) {
-    for (const k of FM.ALL_LINKS) {
+    for (const k of links3()) {
       if (!cxShown(k.region)) continue;
       const ids = [k.a, ...k.ms, k.b], Q = ids.map(i => P_[i]);
       if (Q.some(p => !p || !Number.isFinite(p.x) || p.hid)) continue;
@@ -4421,12 +4424,10 @@ function drawPhotoFrame(ctx) {
   ctx.beginPath();
   for (const [x, y, sx, sy] of [[x0, y0, 1, 1], [x1, y0, -1, 1], [x1, y1, -1, -1], [x0, y1, 1, -1]]) { ctx.moveTo(a(x) + sx * k, a(y)); ctx.lineTo(a(x), a(y)); ctx.lineTo(a(x), a(y) + sy * k); }
   ctx.stroke();
-  // what it is, above it
+  // its size, above it
   if (y0 > 18) {
     ctx.font = `500 10px ${FONT}`; ctx.textBaseline = 'bottom';
     if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '1.5px';
-    ctx.fillStyle = frameInk.warm; ctx.textAlign = 'left';
-    ctx.fillText(curSlot === 'side' ? 'SIDE' : curTab() === '3d' ? '3D' : 'FRONT', x0, y0 - 6);
     ctx.fillStyle = frameInk.faint; ctx.textAlign = 'right';
     ctx.fillText(`${S.iw} × ${S.ih}`, x1, y0 - 6);
   }
@@ -4659,8 +4660,10 @@ function safeRect() {
 }
 function fitView(intro) {
   if (!S.img) return;
+  // (to the same height whatever its shape — the front and the side photo's frames, and the landing frame, alike —
+  // unless it's too wide for the space)
   const r = safeRect();
-  const k = Math.min(r.w / S.iw, r.h / S.ih) * .96;
+  const k = Math.min(r.w * .98 / S.iw, r.h * .96 / S.ih);
   const v = { k, x: r.x + (r.w - S.iw * k) / 2, y: r.y + (r.h - S.ih * k) / 2 };
   S.fitK = k; S.viewT = v; S.fitted = true;
   if (intro) {
@@ -4991,12 +4994,9 @@ function syncSurfacePane() {
   setText($('#sfStatus'), !m ? 'Place the dots first (step 1).'
     : headRefit ? 'Fitting the head to your dots…'
     : busy ? (busy.head ? (HM && HM.model ? 'Fitting the measured head to the dots…' : 'Loading the measured head (≈ 3 MB, once)…') : `Building the surface… ${Math.round(busy.p * 100)}%`)
-    : !s ? 'Build a 3D surface of this face from your dots and the photo’s own light and shade.'
-    : (s.view !== m.view ? 'Built for another view — build again. '
-      : `Light ${dirText(s.dir)}${S.lightDir ? ' (set in step 2)' : ''}. The surface explains ${Math.round(Math.max(0, s.fit1) * 100)}% of the photo’s shading (the dots alone: ${Math.round(Math.max(0, s.fit0) * 100)}%).`
-        + (s.strength < .25 ? ' The light is flat here, so the surface stays close to the dots.' : '')
-        + (m.head && m.head.key === headKey() ? ` Shape from a measured head (ICT-FaceKit) fitted to ${m.head.n} dots${m.head.side ? ' on both photos' : ''} — they sit within ${(m.head.res.rms * 10).toFixed(1)} mm of it.` : '')
-        + (stale ? ' Dots moved since — build again to update.' : s.deps !== surfDeps() ? ' The light or the marks changed — build again to use them.' : '')));
+    : !s ? ''
+    : s.view !== m.view ? 'Built for another view — rebuild.'
+    : stale ? 'Dots moved — rebuild.' : s.deps !== surfDeps() ? 'Light or marks changed — rebuild.' : '');
   const bb = $('#sfBuild');
   setText(bb, busy ? 'Building…' : s ? 'Rebuild' : 'Build surface');
   bb.disabled = !m || !!busy;
@@ -6478,7 +6478,7 @@ addEventListener('keyup', e => {
   if (e.key === 'Shift') { S.shift = false; wake(); }
 });
 addEventListener('blur', () => { S.space = false; S.shift = false; setCompare(false); if (S.stroke) endStroke(); if (S.tstroke) endTone(); if (S.zstroke) endSurfBrush(); if (S.hstroke) endHintBrush(); if (S.mapDrag || S.mapBox || S.mapXf) morphUp({}); });
-addEventListener('resize', () => { resize(); if (S.img) fitView(); });
+addEventListener('resize', () => { resize(); if (S.img) fitView(); layoutDrop(); });
 
 /* --------------------------------------------------------- image input -- */
 
@@ -6641,10 +6641,21 @@ function syncSlotBar() {
     b.classList.toggle('done', !!(d && d.map && d.map.snapped && (n !== '3d' || (d.surf && d.surf.view === d.map.view))));
     b.classList.toggle('has', !!(d && d.img));
   });
-  // the landing card names the photo it wants
-  const side = curSlot === 'side';
-  setText($('#drop h1'), side ? 'Add the side photo' : 'Add the front photo');
-  setText($('#drop .drop-zone p'), side ? 'A true side profile of the same person — drop it here, paste it, or browse your files.' : 'Drop a photo here, paste it, or browse your files.');
+  // the landing frame names the photo it wants
+  setText($('#drop h1'), curSlot === 'side' ? 'Add the side photo' : 'Add the front photo');
+  layoutDrop();
+}
+/**
+ * The landing frame: as tall as a photo's frame (photos are fitted to the same height, see fitView), so switching
+ * between a photo and an empty tab keeps the height. Centred like the tabs below it — without a photo there's no panel.
+ */
+function layoutDrop() {
+  const card = $('#drop .drop-card');
+  if (!card) return;
+  let r = safeRect();
+  if (W > 860) r = { x: 84, y: r.y, w: W - 112, h: r.h };
+  const h = Math.round(r.h * .96 + 20), w = Math.min(Math.round(r.w), Math.round(h * .75));
+  Object.assign(card.style, { left: Math.round(r.x + (r.w - w) / 2) + 'px', top: Math.round(r.y + (r.h - h) / 2) + 'px', width: w + 'px', height: h + 'px' });
 }
 
 $('#slots').addEventListener('click', e => { const b = e.target.closest('[data-slot]'); if (b) goTab(b.dataset.slot); });
@@ -7379,26 +7390,24 @@ function buildFaceMapPanel() {
     <p class="to-note" id="mMapStatus"></p>
     <div class="to-actions" style="margin:2px 0 10px">
       <button type="button" class="btn sm" id="mFind" title="Find the face and place every dot automatically (Google’s MediaPipe face finder, run in your browser — the photo isn’t uploaded; the first time it loads ≈ 6 MB)">Auto-place</button>
-      <button type="button" class="btn ghost sm" id="mQuick">Quick fit · guided</button>
+      <button type="button" class="btn ghost sm" id="mQuick" title="A short series of clicks on the landmarks">Quick fit</button>
       <button type="button" class="btn ghost sm" id="mSnap" title="Pull the edge dots (face edge, hairline, hair, neck) and the eye and lip outlines onto the edges in the photo">Snap to edges</button>
       <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the map from your measured landmarks">Fit to landmarks</button>
     </div>
     <div class="to-actions" style="margin:-4px 0 10px"><button type="button" class="btn ghost sm" id="mExport" title="Save every dot, depth fix and measurement as a text file (JSON)">Export map</button><button type="button" class="btn ghost sm" id="mImport" title="Place a saved face map (and its measurements) on this photo">Import map</button></div>
     <div class="sym-box">
-      <label class="tg sm"><span>Symmetry <kbd>X</kbd><small>Both sides move together, mirrored. In Quick fit the right-side ring starts as the mirror of your left click — Enter accepts it. Turn it off for touch-ups.</small></span><input type="checkbox" class="sw-toggle" id="mMirror"></label>
+      <label class="tg sm" title="Both sides move together, mirrored"><span>Symmetry <kbd>X</kbd></span><input type="checkbox" class="sw-toggle" id="mMirror"></label>
       <div class="to-actions" style="margin:0 0 4px"><button type="button" class="btn ghost sm" id="mCopyL" title="Make the right side a mirror image of the left">Copy left → right</button><button type="button" class="btn ghost sm" id="mCopyR" title="Make the left side a mirror image of the right">Copy right → left</button></div>
     </div>
-    <label class="tg sm"><span>Auto detail dots<small>The small dots between the named ones follow them by themselves — about half as many dots to place. Off: place them by hand.</small></span><input type="checkbox" class="sw-toggle" id="mAutoDet"></label>
-    <div class="to-label">Dots <small>click to hide a group</small></div>
+    <label class="tg sm" title="The small dots between the named ones follow them by themselves"><span>Auto detail dots</span><input type="checkbox" class="sw-toggle" id="mAutoDet"></label>
+    <div class="to-label">Dots</div>
     <div class="chips" id="mGroups">${MAP_GROUPS.map(([g, label, c]) => `<button type="button" class="chip-dot" data-g="${g}" style="--c:${c}"><i></i>${label}</button>`).join('')}</div>
-    <div class="to-label">Select a feature <small>then drag it, or scale and rotate it with the box</small></div>
+    <div class="to-label">Select a feature</div>
     <div class="chips looks" id="mFeat"></div>
     <div class="to-label">Editing</div>
-    <label class="tg sm"><span>Soft move<small>Dragging a dot pulls the dots around it along, fading with distance</small></span><input type="checkbox" class="sw-toggle" id="mSoft"></label>
+    <label class="tg sm" title="Dragging a dot pulls the dots around it along, fading with distance"><span>Soft move</span><input type="checkbox" class="sw-toggle" id="mSoft"></label>
     <div id="mSoftRow">${sliderRow('mSoftR', 'Reach', 5, 100, 1, 'How far the pull reaches')}</div>
-    <p class="to-note">Double-click a dot to select its whole line. With several selected, drag a corner of the box to scale them or the knob to rotate them.</p>
-    <label class="tg sm"><span>Show layers<small>Teal = the face layer, blue = hair, ears, neck and background behind it</small></span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
-    <p class="to-note">Drag dots onto the face — the photo is shown unchanged here. Box-select or <kbd>Shift</kbd>-click to move several, arrow keys nudge, <kbd>Ctrl</kbd> <kbd>A</kbd> selects all. Hover a dot to see its name and tissue depth. Then go to <b>Light</b>.</p>
+    <label class="tg sm" title="The face layer, and hair, ears, neck and background behind it"><span>Show layers</span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
     </div>
     <div id="fmLight" hidden>
       <p class="to-note"><b>Optional</b> — read from the photo automatically. Check it when the 3D looks wrong: where the light comes from, and which bright and dark spots come from the shape.</p>
@@ -7585,8 +7594,8 @@ function syncFaceMapPanel() {
   fmapEl.classList.toggle('open', open);
   fmapItem.classList.toggle('sel', open);
   fmapItem.classList.toggle('measured', !!m);
-  setText(fmapItem.querySelector('.it-sub'), m ? `${VIEW_LABEL[m.view]} · ${shown} dots${S.surf && S.surf.view === m.view ? ' · surface' : ''}` : 'Not placed — click to start');
-  setText(fmapItem.querySelector('.it-val'), m ? (m.snapped ? 'fitted' : 'guess') : '');
+  setText(fmapItem.querySelector('.it-sub'), m ? '' : 'Not placed — click to start');
+  setText(fmapItem.querySelector('.it-val'), '');
   if (!open) return;
   const st = S.mapStep, side = curSlot === 'side';
   $$('#fmStep [data-v]').forEach(b => {
@@ -7620,7 +7629,7 @@ function syncFaceMapPanel() {
   if ($('#sfShade')) $('#sfShade').checked = !!cfg.headShading;
   $('#mExport').disabled = !m && !S.meas.size;
   const qb = $('#mQuick');
-  setText(qb, S.qfit ? `Stop quick fit (${S.qfit.step + 1}/${qfitSteps().length})` : 'Quick fit · guided');
+  setText(qb, S.qfit ? `Stop quick fit (${S.qfit.step + 1}/${qfitSteps().length})` : 'Quick fit');
   qb.classList.toggle('on', !!S.qfit);
   const fb = $('#mFind');
   setText(fb, autoBusy ? 'Finding the face…' : 'Auto-place');
@@ -7630,9 +7639,8 @@ function syncFaceMapPanel() {
   $$('#mGroups [data-g]').forEach(b => b.classList.toggle('off', S.hideGroups.has(b.dataset.g)));
   setText($('#mMapStatus'), !m ? 'Not placed yet — use Auto-place (or Quick fit).'
     : S.qfit ? `Step ${S.qfit.step + 1} of ${qfitSteps().length}: ${qfitSteps()[S.qfit.step].label}. The ring shows the current guess.`
-    : S.mapSel.size ? `${S.mapSel.size} dot${S.mapSel.size === 1 ? '' : 's'} selected of ${shown}.`
-    : m.snapped ? `${shown} dots in view, ${m.snapped} placed from your landmarks or clicks. Check the edges.`
-    : `${shown} dots centred on a guess — use Quick fit, then drag the dots onto the face.`);
+    : S.mapSel.size ? `${S.mapSel.size} selected`
+    : '');
 }
 /* -------------------------------------------------------------- readout -- */
 
@@ -7642,7 +7650,6 @@ function freeReadout() {
   const t = TOOLS[S.tool], cal = S.meas.get(S.calibId);
   const ids = slotPresets(), done = ids.filter(id => S.meas.has(id)).length;
   return `
-    <div class="ro-kicker">${S.showAll ? 'All layers' : 'Free measure'}</div>
     <div class="ro-title">${S.showAll ? 'Showing everything' : t.title}</div>
     <p class="ro-desc">${S.showAll ? 'Every measurement is overlaid. Export saves exactly what you see as an annotated image.' : t.help}</p>
     <div class="ro-meta"><span>Scale</span><button class="link" type="button" data-act="calib">${cal ? fmtNum(S.calibMM) + ' mm reference' : irisMmPerPx() ? `≈ from the irises (${fmtNum(IRIS_MM)} mm)` : 'Not calibrated'}</button></div>
@@ -7822,9 +7829,9 @@ function renderHint() {
     } else if (lightStep()) {
       html = `<b>Face light</b><span class="h-desc">${isHintBrush() ? 'Hold on the photo to ' + SURF_BRUSH_TEXT[cfg.surfBrush] : 'Drag the ball to move the light · pick a brush to correct the marks · drag to pan'} · <kbd>Esc</kbd> closes</span>`;
     } else if (surfStep()) {
-      html = `<b>Face surface · 3D</b><span class="h-desc">${S.surf ? (fixBrush() ? 'Hold on the photo to ' + SURF_BRUSH_TEXT[cfg.surfBrush] : 'Drag to turn the face · turned, drag a dot to set its depth · double-click to face it') : 'Building the surface from your dots and the photo’s light…'} · <kbd>Esc</kbd> closes</span>`;
+      html = `<b>3D</b><span class="h-desc">${S.surf ? (fixBrush() ? 'Hold on the photo to ' + SURF_BRUSH_TEXT[cfg.surfBrush] : 'Drag to turn · double-click to face it') : 'Building…'}</span>`;
     } else if (mapping()) {
-      html = `<b>Face map${cfg.mapMirror ? ' · symmetry on' : ''}</b><span class="h-desc">Drag the dots onto the face (shown unchanged) · box or <kbd>Shift</kbd> selects several · <kbd>X</kbd> symmetry · <kbd>Esc</kbd> closes</span>`;
+      html = cfg.mapMirror ? '<b>Symmetry on</b>' : '';
     } else if (S.tool === 'morph') {
       const names = { push: 'push', bloat: 'bloat', pinch: 'pinch', restore: 'restore', tDodge: 'add light (dodge)', tBurn: 'add shade (burn)', tErase: 'erase light and shade' };
       const act = cfg.mMode === 'push' ? 'drag' : 'hold';
