@@ -1266,7 +1266,11 @@ function shading(res, views, opt = {}) {
  * (Generic bumps alone, held back enough to stay smooth, changed a real face's cheekbones and under-eyes by under
  * a millimetre: these forms are the ones those bumps had to build from nothing.)
  */
-const LIGHT_OPS = ['malarProj', 'infraorbital', 'browRidge', 'browDrop', 'hooding', 'underEye', 'buccal', 'midfaceProj', 'temples'];
+// (not the brow's height nor the upper lid's fold: read from the side photo's light they came out ≈ +36 % — the
+// brow pulled down over the lid — and the upper lids folded over themselves: on trvejester 104 triangles turned
+// inside out against 57 without the side photo, the "holes" round the eyes. Without them, 59; and the brow ridge
+// read as projecting, +24 %, not −33 %)
+const LIGHT_OPS = ['malarProj', 'infraorbital', 'browRidge', 'underEye', 'buccal', 'midfaceProj', 'temples'];
 /**
  * The face map's anatomical forms on a head (X, model frame): each at full strength, per skin vertex (B: 3 per vertex,
  * cm, y up) and where it reaches (SUP). Each skin vertex is taken as a template point — its place on the template,
@@ -1741,5 +1745,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, linkPoint, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '61' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, convexFit, linkMid, linkPoint, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '62' };
 })();
