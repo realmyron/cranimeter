@@ -824,6 +824,6 @@ window.CraniMap = {
   ANCHOR: POINTS.map(p => { if (!p.anchor) return -1; const s = p.id.slice(-1), j = INDEX[p.anchor + s] ?? INDEX[p.anchor]; return j ?? -1; }),
   REGIONS: ['brow', 'eye', 'temple', 'cheek', 'lips', 'jaw'],
   visible, project, contours, nearSide, anatomy, anatomyAt,
-  mls, tpsFit, tpsEval, spline, build: '64',
+  mls, tpsFit, tpsEval, spline, build: '65',
 };
 })();
