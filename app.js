@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '70';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '71';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -4405,7 +4405,8 @@ function drawPhotoFrame(ctx) {
   if (!S.img || (stageOn() && rotated())) return;
   if (frameInk.theme !== root.dataset.theme) {
     const cs = getComputedStyle(root);
-    frameInk = { theme: root.dataset.theme, line: cs.getPropertyValue('--line-strong').trim(), warm: cs.getPropertyValue('--muted').trim(), faint: cs.getPropertyValue('--faint').trim() };
+    // (subtle: the hairline and the corners a step down from the panels' own rules)
+    frameInk = { theme: root.dataset.theme, line: cs.getPropertyValue('--line').trim(), warm: cs.getPropertyValue('--faint').trim(), faint: cs.getPropertyValue('--faint').trim() };
   }
   const P = [mapToScreen({ x: 0, y: 0 }), mapToScreen({ x: S.iw, y: 0 }), mapToScreen({ x: S.iw, y: S.ih }), mapToScreen({ x: 0, y: S.ih })];
   const x0 = Math.min(...P.map(p => p.x)) - 10, x1 = Math.max(...P.map(p => p.x)) + 10, y0 = Math.min(...P.map(p => p.y)) - 10, y1 = Math.max(...P.map(p => p.y)) + 10;
@@ -4649,7 +4650,7 @@ function stepView(dt) {
     v.k += (g.k - v.k) * a; v.x += (g.x - v.x) * a; v.y += (g.y - v.y) * a;
     wake();
   } else { v.k = g.k; v.x = g.x; v.y = g.y; }
-  setText(zoomPct, Math.round(g.k * 100) + '%');
+  setText(zoomPct, Math.round((S.img ? g.k : dropV.k) * 100) + '%');
 }
 function setViewNow(v) { S.view = { ...v }; S.viewT = { ...v }; S.fitted = false; wake(); }
 const TOOLPANEL_W = 272;
@@ -4681,9 +4682,18 @@ function zoomAt(sx, sy, f) {
   wake();
 }
 const zoomCenter = f => { if (!S.img) return zoomDrop(f); const r = safeRect(); zoomAt(r.x + r.w / 2, r.y + r.h / 2, f); };
-/** Before a photo: the empty frame zooms in and out, like a photo would (dropZ: its scale, 1 = fitted). */
-let dropZ = 1;
-function zoomDrop(f) { dropZ = f ? clamp(dropZ * f, .3, 4) : 1; layoutDrop(); setText(zoomPct, Math.round(dropZ * 100) + '%'); }
+/** Before a photo: the empty frame zooms and moves like a photo would (dropV: scale k, shift x y; cx cy its fitted centre). */
+const dropV = { k: 1, x: 0, y: 0, cx: 0, cy: 0 };
+/** Zoom it by f about the screen point (px, py) — its centre when not given; f = 0: back to fitted. */
+function zoomDrop(f, px, py) {
+  if (!f) Object.assign(dropV, { k: 1, x: 0, y: 0 });
+  else {
+    const k = clamp(dropV.k * f, .2, 6), g = k / dropV.k, cx = dropV.cx + dropV.x, cy = dropV.cy + dropV.y;
+    if (px != null) { dropV.x += (cx - px) * (g - 1); dropV.y += (cy - py) * (g - 1); }
+    dropV.k = k;
+  }
+  layoutDrop(); setText(zoomPct, Math.round(dropV.k * 100) + '%');
+}
 
 /* -------------------------------------------------------------- pointer -- */
 
@@ -6340,10 +6350,10 @@ ov.addEventListener('wheel', e => {
   let dy = e.deltaY;
   if (e.deltaMode === 1) dy *= 16;
   const f = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016));
-  if (!S.img) zoomDrop(f); else zoomAt(e.clientX, e.clientY, f);
+  if (!S.img) zoomDrop(f, e.clientX, e.clientY); else zoomAt(e.clientX, e.clientY, f);
 }, { passive: false });
 // (over the empty frame too)
-$('#drop').addEventListener('wheel', e => { if (S.img) return; e.preventDefault(); let dy = e.deltaY; if (e.deltaMode === 1) dy *= 16; zoomDrop(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016))); }, { passive: false });
+$('#drop').addEventListener('wheel', e => { if (S.img) return; e.preventDefault(); let dy = e.deltaY; if (e.deltaMode === 1) dy *= 16; zoomDrop(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016)), e.clientX, e.clientY); }, { passive: false });
 ov.addEventListener('dblclick', e => {
   if (surfStep() && S.surf && mapHitAt(e.clientX, e.clientY) == null) { S.rot3 = { yaw: 0, pitch: 0 }; wake(); return; }   // face it again
   if (mapping() && !lightStep() && S.map) {
@@ -6659,13 +6669,27 @@ function layoutDrop() {
   if (!card) return;
   let r = safeRect();
   if (W > 860) r = { x: 84, y: r.y, w: W - 112, h: r.h };
-  const h0 = r.h * .96 + 20, h = Math.round(h0 * dropZ), w = Math.round(Math.min(r.w, h0 * .75) * dropZ);
-  Object.assign(card.style, { left: Math.round(r.x + (r.w - w) / 2) + 'px', top: Math.round(r.y + (r.h - h) / 2) + 'px', width: w + 'px', height: h + 'px' });
+  const h = Math.round(r.h * .96 + 20), w = Math.round(Math.min(r.w, h * .75));
+  dropV.cx = r.x + r.w / 2; dropV.cy = r.y + r.h / 2;
+  // (zoomed and moved as a whole — the words with it, as a photo's would be)
+  Object.assign(card.style, { left: Math.round(dropV.cx - w / 2) + 'px', top: Math.round(dropV.cy - h / 2) + 'px', width: w + 'px', height: h + 'px', transform: `translate(${dropV.x}px, ${dropV.y}px) scale(${dropV.k})` });
 }
+// dragging the empty frame (or the field round it) moves it; a click without moving adds a photo
+let dropDrag = null, dropMoved = false;
+const dropDown = e => { if (S.img || e.button > 1 || e.target.closest('button')) return; dropDrag = { x: e.clientX, y: e.clientY, ox: dropV.x, oy: dropV.y }; dropMoved = false; };
+$('#drop').addEventListener('pointerdown', dropDown);
+ov.addEventListener('pointerdown', dropDown);
+addEventListener('pointermove', e => {
+  if (!dropDrag) return;
+  const dx = e.clientX - dropDrag.x, dy = e.clientY - dropDrag.y;
+  if (!dropMoved && Math.hypot(dx, dy) < 4) return;
+  dropMoved = true; dropV.x = dropDrag.ox + dx; dropV.y = dropDrag.oy + dy; layoutDrop();
+});
+addEventListener('pointerup', () => { dropDrag = null; });
 
 $('#slots').addEventListener('click', e => { const b = e.target.closest('[data-slot]'); if (b) goTab(b.dataset.slot); });
 $('#btnBrowse').addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
-$('#dropZone').addEventListener('click', () => fileInput.click());
+$('#dropZone').addEventListener('click', () => { if (dropMoved) { dropMoved = false; return; } fileInput.click(); });
 $('#dropZone').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
 fileInput.addEventListener('change', () => { if (fileInput.files[0]) loadFile(fileInput.files[0]); fileInput.value = ''; });
 
