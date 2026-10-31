@@ -1921,5 +1921,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '69' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '70' };
 })();
