@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '69';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '70';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -4680,7 +4680,10 @@ function zoomAt(sx, sy, f) {
   S.fitted = false;
   wake();
 }
-const zoomCenter = f => { const r = safeRect(); zoomAt(r.x + r.w / 2, r.y + r.h / 2, f); };
+const zoomCenter = f => { if (!S.img) return zoomDrop(f); const r = safeRect(); zoomAt(r.x + r.w / 2, r.y + r.h / 2, f); };
+/** Before a photo: the empty frame zooms in and out, like a photo would (dropZ: its scale, 1 = fitted). */
+let dropZ = 1;
+function zoomDrop(f) { dropZ = f ? clamp(dropZ * f, .3, 4) : 1; layoutDrop(); setText(zoomPct, Math.round(dropZ * 100) + '%'); }
 
 /* -------------------------------------------------------------- pointer -- */
 
@@ -6334,11 +6337,13 @@ ov.addEventListener('pointerleave', () => { if (!S.drag && !S.pan && !S.mdrag &&
 ov.addEventListener('contextmenu', e => e.preventDefault());
 ov.addEventListener('wheel', e => {
   e.preventDefault();
-  if (!S.img) return;
   let dy = e.deltaY;
   if (e.deltaMode === 1) dy *= 16;
-  zoomAt(e.clientX, e.clientY, Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016)));
+  const f = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016));
+  if (!S.img) zoomDrop(f); else zoomAt(e.clientX, e.clientY, f);
 }, { passive: false });
+// (over the empty frame too)
+$('#drop').addEventListener('wheel', e => { if (S.img) return; e.preventDefault(); let dy = e.deltaY; if (e.deltaMode === 1) dy *= 16; zoomDrop(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016))); }, { passive: false });
 ov.addEventListener('dblclick', e => {
   if (surfStep() && S.surf && mapHitAt(e.clientX, e.clientY) == null) { S.rot3 = { yaw: 0, pitch: 0 }; wake(); return; }   // face it again
   if (mapping() && !lightStep() && S.map) {
@@ -6654,7 +6659,7 @@ function layoutDrop() {
   if (!card) return;
   let r = safeRect();
   if (W > 860) r = { x: 84, y: r.y, w: W - 112, h: r.h };
-  const h = Math.round(r.h * .96 + 20), w = Math.min(Math.round(r.w), Math.round(h * .75));
+  const h0 = r.h * .96 + 20, h = Math.round(h0 * dropZ), w = Math.round(Math.min(r.w, h0 * .75) * dropZ);
   Object.assign(card.style, { left: Math.round(r.x + (r.w - w) / 2) + 'px', top: Math.round(r.y + (r.h - h) / 2) + 'px', width: w + 'px', height: h + 'px' });
 }
 
@@ -7384,17 +7389,14 @@ function buildFaceMapPanel() {
       <button type="button" data-v="points" title="Place the dots on the face"><b>1</b>Points</button><button type="button" data-v="light" title="Check the light, and mark which bright and dark spots are shape"${SF ? '' : ' disabled'}><b>2</b>Light</button><button type="button" data-v="convex" title="How the surface curves between the dots: a roll or a crease, full or hollow"${HM ? '' : ' disabled'}><b>3</b>Convexity</button>
     </div>
     <div id="fmPoints">
-    <div class="seg full mview" id="mView">
-      <button type="button" data-v="front">Front</button><button type="button" data-v="left" title="Face looking to the left">◀ Profile</button><button type="button" data-v="right" title="Face looking to the right">Profile ▶</button>
-    </div>
     <p class="to-note" id="mMapStatus"></p>
     <div class="to-actions" style="margin:2px 0 10px">
       <button type="button" class="btn sm" id="mFind" title="Find the face and place every dot automatically (Google’s MediaPipe face finder, run in your browser — the photo isn’t uploaded; the first time it loads ≈ 6 MB)">Auto-place</button>
       <button type="button" class="btn ghost sm" id="mQuick" title="A short series of clicks on the landmarks">Quick fit</button>
       <button type="button" class="btn ghost sm" id="mSnap" title="Pull the edge dots (face edge, hairline, hair, neck) and the eye and lip outlines onto the edges in the photo">Snap to edges</button>
       <button type="button" class="btn ghost sm" id="mAuto" title="Re-place the map from your measured landmarks">Fit to landmarks</button>
+      <button type="button" class="btn ghost sm" id="mFlip" title="Flip the face map: the face looking the other way">Flip</button>
     </div>
-    <div class="to-actions" style="margin:-4px 0 10px"><button type="button" class="btn ghost sm" id="mExport" title="Save every dot, depth fix and measurement as a text file (JSON)">Export map</button><button type="button" class="btn ghost sm" id="mImport" title="Place a saved face map (and its measurements) on this photo">Import map</button></div>
     <div class="sym-box">
       <label class="tg sm" title="Both sides move together, mirrored"><span>Symmetry <kbd>X</kbd></span><input type="checkbox" class="sw-toggle" id="mMirror"></label>
       <div class="to-actions" style="margin:0 0 4px"><button type="button" class="btn ghost sm" id="mCopyL" title="Make the right side a mirror image of the left">Copy left → right</button><button type="button" class="btn ghost sm" id="mCopyR" title="Make the left side a mirror image of the right">Copy right → left</button></div>
@@ -7408,6 +7410,7 @@ function buildFaceMapPanel() {
     <label class="tg sm" title="Dragging a dot pulls the dots around it along, fading with distance"><span>Soft move</span><input type="checkbox" class="sw-toggle" id="mSoft"></label>
     <div id="mSoftRow">${sliderRow('mSoftR', 'Reach', 5, 100, 1, 'How far the pull reaches')}</div>
     <label class="tg sm" title="The face layer, and hair, ears, neck and background behind it"><span>Show layers</span><input type="checkbox" class="sw-toggle" id="mShowLayers"></label>
+    <div class="to-actions" style="margin:14px 0 4px"><button type="button" class="btn ghost sm" id="mExport" title="Save every dot, depth fix and measurement as a text file (JSON)">Export map</button><button type="button" class="btn ghost sm" id="mImport" title="Place a saved face map (and its measurements) on this photo">Import map</button></div>
     </div>
     <div id="fmLight" hidden>
       <p class="to-note"><b>Optional</b> — read from the photo automatically. Check it when the 3D looks wrong: where the light comes from, and which bright and dark spots come from the shape.</p>
@@ -7549,7 +7552,7 @@ function buildFaceMapPanel() {
     S.glDirty = true; syncPts(); syncUI();
   });
   $('#sfUse').addEventListener('change', e => { cfg.surfUse = e.target.checked; saveCfg(); S.glDirty = true; syncPts(); syncUI(); });
-  $('#mView').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) setMapView(b.dataset.v); });
+  $('#mFlip').addEventListener('click', () => { const m = S.map; if (m && isProfile(m)) setMapView(m.view === 'left' ? 'right' : 'left'); });
   $('#mShowLayers').addEventListener('change', e => { cfg.mShowLayers = e.target.checked; saveCfg(); S.glDirty = true; wake(); });
   $('#mSoft').addEventListener('change', e => { cfg.mapSoft = e.target.checked; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#mSoftR').addEventListener('input', e => { cfg.mapSoftR = +e.target.value / 100; saveCfg(); syncFaceMapPanel(); wake(); });
@@ -7618,8 +7621,8 @@ function syncFaceMapPanel() {
   const fk = m && isProfile(m) ? 'profile' : 'front', fe = $('#mFeat');
   if (fe._k !== fk) { fe._k = fk; fe.innerHTML = FEATURES[fk].map(([n], q) => `<button type="button" class="chip-dot look" data-f="${q}">${n}</button>`).join(''); }
   $$('#mFeat [data-f]').forEach(b => { b.disabled = !m; });
-  $$('#mView [data-v]').forEach(b => { b.classList.toggle('on', !!m && b.dataset.v === m.view); b.hidden = side === (b.dataset.v === 'front'); });
-  $('#mView').hidden = !side;   // (the front photo is mapped from the front; the side one faces left or right)
+  $('#mFlip').hidden = !side;   // (the front photo is mapped from the front; the side one faces left or right)
+  $('#mFlip').disabled = !m;
   $('#mShowLayers').checked = !!cfg.mShowLayers;
   $('#mSoft').checked = !!cfg.mapSoft; $('#mSoftRow').hidden = !cfg.mapSoft;
   setRange('mSoftR', Math.round(cfg.mapSoftR * 100), Math.round(cfg.mapSoftR * 100) + '%');
@@ -7648,12 +7651,10 @@ let RO = null, roKey = '';
 
 function freeReadout() {
   const t = TOOLS[S.tool], cal = S.meas.get(S.calibId);
-  const ids = slotPresets(), done = ids.filter(id => S.meas.has(id)).length;
   return `
     <div class="ro-title">${S.showAll ? 'Showing everything' : t.title}</div>
     <p class="ro-desc">${S.showAll ? 'Every measurement is overlaid. Export saves exactly what you see as an annotated image.' : t.help}</p>
-    <div class="ro-meta"><span>Scale</span><button class="link" type="button" data-act="calib">${cal ? fmtNum(S.calibMM) + ' mm reference' : irisMmPerPx() ? `≈ from the irises (${fmtNum(IRIS_MM)} mm)` : 'Not calibrated'}</button></div>
-    <div class="ro-meta"><span>Measured</span><span>${done} / ${ids.length} presets · ${customs().length} custom</span></div>`;
+    <div class="ro-meta"><span>Scale</span><button class="link" type="button" data-act="calib">${cal ? fmtNum(S.calibMM) + ' mm reference' : irisMmPerPx() ? `≈ from the irises (${fmtNum(IRIS_MM)} mm)` : 'Not calibrated'}</button></div>`;
 }
 function presetReadout(id) {
   const it = P[id], m = S.meas.get(id);
@@ -7990,8 +7991,8 @@ function closeSettings() {
 $$('.tool[data-tool]').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
 $('#zoomIn').addEventListener('click', () => zoomCenter(1.25));
 $('#zoomOut').addEventListener('click', () => zoomCenter(.8));
-$('#zoomFit').addEventListener('click', () => fitView());
-$('#zoomPct').addEventListener('click', () => zoomCenter(1 / S.viewT.k));
+$('#zoomFit').addEventListener('click', () => S.img ? fitView() : zoomDrop(0));
+$('#zoomPct').addEventListener('click', () => S.img ? zoomCenter(1 / S.viewT.k) : zoomDrop(0));
 $('#btnUndo').addEventListener('click', undo);
 $('#btnRedo').addEventListener('click', redo);
 if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) $$('.mod-key').forEach(k => { k.textContent = '⌘'; });
