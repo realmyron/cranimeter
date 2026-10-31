@@ -1,8 +1,7 @@
   /* ==========================================================================
      Cranimeter · styles
      Drawn on the grid: the panels are a veil over the dot grid, not surfaces of
-     their own, and every colour is the grid's own blue — the accent is a lit
-     dot. Geometric throughout: one Futura-like face (Jost), sharp corners, and
+     their own — the accent (magenta) is a lit dot. Geometric throughout: one Futura-like face (Jost), sharp corners, and
      the face map's own vocabulary of dots and hairlines for every state (a
      selected item, a tool, a switch). The background (the dot grid on its dark
      field) is the canvas's own and stays as it was.
@@ -11,7 +10,7 @@
      ========================================================================== */
 
   :root {
-    --cm-build: 65;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
+    --cm-build: 69;   /* must match BUILD in app.js — the app re-fetches this file if it doesn't */
     --font: 'Jost', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --mono: 'Jost', ui-sans-serif, system-ui, sans-serif;
     --c1: #7CCBF5;
@@ -25,59 +24,58 @@
   }
 
   :root[data-theme="dark"] {
-    /* One palette for the whole screen. The darks — the field behind the photo and the panels on it — are
-       a very dark, desaturated orange (a brown-black); the panels a step lighter than the field. Everything
-       drawn on them — the grid's dots, lines, words — is cyan-green at some strength: faint for the grid
-       and rules, grey-green for secondary words, pale for names, bright for what's active or measured. */
-    --bg: #070606;
-    --dot-rgb: 178, 186, 184;
+    /* One palette for the whole screen. The darks — the field behind the photo and the panels on it — are a
+       blue-black; the panels a step lighter than the field. Words and rules are cool greys; what's active or
+       measured is magenta. */
+    --bg: #0B0C0E;
+    --dot-rgb: 176, 182, 194;
     --backdrop: none;
-    --panel: #0D0C0B;
-    --panel-solid: #0D0C0B;
+    --panel: #111317;
+    --panel-solid: #111317;
     --well: rgba(255, 255, 255, .03);
     --line: rgba(255, 255, 255, .07);
     --line-strong: rgba(255, 255, 255, .14);
-    --text: #E2E3E1;
-    --muted: #8B8D8A;
-    --faint: #50524F;
+    --text: #E3E5EA;
+    --muted: #8A8F99;
+    --faint: #4D525C;
     --hover: rgba(255, 255, 255, .045);
     --press: rgba(255, 255, 255, .08);
     --warm: var(--muted);
-    --accent: #5FB8B0;
-    --accent-ink: #070606;
-    --accent-soft: rgba(95, 184, 176, .1);
+    --accent: #DC27A6;
+    --accent-ink: #FFFFFF;
+    --accent-soft: rgba(220, 39, 166, .12);
     --blue: var(--accent);
     --sel: rgba(255, 255, 255, .05);
-    --sel-ring: rgba(95, 184, 176, .5);
-    --ok: #5FB8B0;
+    --sel-ring: rgba(220, 39, 166, .55);
+    --ok: #DC27A6;
     --shadow: 0 18px 40px -18px rgba(0, 0, 0, .7);
     --inset-hi: transparent;
     color-scheme: dark;
   }
 
   :root[data-theme="light"] {
-    /* (the same, inverted: a pale desaturated-orange paper, everything on it a deep cyan-green) */
-    --bg: #E8E6E3;
-    --dot-rgb: 60, 66, 64;
+    /* (the same, inverted: a pale cool paper, the accent a deeper magenta) */
+    --bg: #E6E8EC;
+    --dot-rgb: 58, 64, 76;
     --backdrop: none;
-    --panel: #F2F1EF;
-    --panel-solid: #F2F1EF;
+    --panel: #F1F2F5;
+    --panel-solid: #F1F2F5;
     --well: rgba(0, 0, 0, .03);
     --line: rgba(0, 0, 0, .08);
     --line-strong: rgba(0, 0, 0, .16);
-    --text: #1B1C1B;
-    --muted: #6A6C69;
-    --faint: #A4A6A3;
+    --text: #1A1C21;
+    --muted: #686D77;
+    --faint: #A3A7B0;
     --hover: rgba(0, 0, 0, .04);
     --press: rgba(0, 0, 0, .07);
     --warm: var(--muted);
-    --accent: #2E8A83;
+    --accent: #B81E8A;
     --accent-ink: #FFFFFF;
-    --accent-soft: rgba(46, 138, 131, .09);
+    --accent-soft: rgba(184, 30, 138, .09);
     --blue: var(--accent);
     --sel: rgba(0, 0, 0, .045);
-    --sel-ring: rgba(46, 138, 131, .5);
-    --ok: #2E8A83;
+    --sel-ring: rgba(184, 30, 138, .5);
+    --ok: #B81E8A;
     --shadow: 0 18px 40px -20px rgba(30, 50, 100, .25);
     --inset-hi: transparent;
     color-scheme: light;
@@ -722,6 +720,7 @@
     text-align: left;
   }
   .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  body:not(.has-img) .toast { left: calc(50% + var(--rail-w) / 2); }   /* (no panel without a photo: centred like the tabs) */
 
   /* ---------- photo tabs (bottom centre): Front · Side · 3D ---------- */
   .slots {
@@ -749,49 +748,48 @@
   .slots button.done i { opacity: 1; background: var(--ok); box-shadow: none; }
   .slots button.on.done i { background: var(--accent-ink); }
 
-  /* ---------- landing: a viewfinder ---------- */
+  /* ---------- landing: the photo's frame, empty ----------
+     (placed and sized by layoutDrop: where the photo's frame will be, as tall) */
   .drop {
     position: fixed; inset: 0; z-index: 5;
-    display: grid; place-items: center;
-    padding: 24px 16px 24px calc(var(--rail-w) + 16px);
-    overflow: auto;
+    pointer-events: none;
     transition: opacity .3s ease;
   }
-  body.has-img .drop { opacity: 0; pointer-events: none; visibility: hidden; transition: opacity .3s ease, visibility 0s linear .3s; }
-  .drop-card { position: relative; width: min(560px, 100%); border-radius: 0; padding: 0; background: var(--panel); box-shadow: 0 0 0 1px var(--line), var(--shadow); }
-  .drop-brand { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
-  .drop-brand span { font: 500 12px var(--mono); letter-spacing: .22em; text-transform: uppercase; }
-  .drop-brand small { font: 400 10.5px var(--mono); letter-spacing: .08em; color: var(--faint); text-transform: uppercase; }
+  body.has-img .drop { opacity: 0; visibility: hidden; transition: opacity .3s ease, visibility 0s linear .3s; }
+  .drop-card { position: absolute; left: 50%; top: 50%; width: 360px; height: 480px; transform: none; pointer-events: auto; }
+  body.has-img .drop-card { pointer-events: none; }
   .drop-zone {
-    position: relative;
-    margin: 18px;
-    padding: 46px 28px 40px;
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px;
     text-align: center;
     cursor: pointer;
-    background: var(--well);
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
     transition: background .15s;
   }
-  /* crop marks at the corners, and a centre cross */
+  /* as the photo's frame: its corners, and a ruler's ticks along the top and the left */
   .drop-zone::before {
-    content: ''; position: absolute; inset: 0; pointer-events: none;
+    content: ''; position: absolute; inset: -1px; pointer-events: none;
     --cm: var(--muted);
     background:
-      linear-gradient(var(--cm), var(--cm)) 0 0 / 18px 1px, linear-gradient(var(--cm), var(--cm)) 0 0 / 1px 18px,
-      linear-gradient(var(--cm), var(--cm)) 100% 0 / 18px 1px, linear-gradient(var(--cm), var(--cm)) 100% 0 / 1px 18px,
-      linear-gradient(var(--cm), var(--cm)) 0 100% / 18px 1px, linear-gradient(var(--cm), var(--cm)) 0 100% / 1px 18px,
-      linear-gradient(var(--cm), var(--cm)) 100% 100% / 18px 1px, linear-gradient(var(--cm), var(--cm)) 100% 100% / 1px 18px;
+      linear-gradient(var(--cm), var(--cm)) 0 0 / 14px 1.5px, linear-gradient(var(--cm), var(--cm)) 0 0 / 1.5px 14px,
+      linear-gradient(var(--cm), var(--cm)) 100% 0 / 14px 1.5px, linear-gradient(var(--cm), var(--cm)) 100% 0 / 1.5px 14px,
+      linear-gradient(var(--cm), var(--cm)) 0 100% / 14px 1.5px, linear-gradient(var(--cm), var(--cm)) 0 100% / 1.5px 14px,
+      linear-gradient(var(--cm), var(--cm)) 100% 100% / 14px 1.5px, linear-gradient(var(--cm), var(--cm)) 100% 100% / 1.5px 14px;
     background-repeat: no-repeat;
     transition: inset .2s var(--ease);
   }
-  .drop-zone:hover, .drop-zone:focus-visible { background: var(--accent-soft); }
-  .drop-zone:hover::before { inset: -6px; --cm: var(--accent); }
-  .drop-icon {
-    width: 44px; height: 44px; margin: 0 auto 18px;
-    display: grid; place-items: center;
-    color: var(--accent);
+  .drop-zone::after {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), var(--line-strong) calc(10% - 1px) 10%) 0 0 / 100% 4px no-repeat,
+      repeating-linear-gradient(180deg, transparent 0 calc(10% - 1px), var(--line-strong) calc(10% - 1px) 10%) 0 0 / 4px 100% no-repeat;
   }
-  .drop-icon .ic { width: 30px; height: 30px; stroke-width: 1.2; }
-  .drop h1 { margin: 0; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
+  .drop-zone:hover, .drop-zone:focus-visible { background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+  .drop-zone:hover::before { inset: -6px; --cm: var(--accent); }
+  .drop h1 { margin: 0 0 22px; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
+  .to-note:empty { display: none; }
   .drop p { margin: 8px 0 24px; color: var(--muted); font-size: 13.5px; }
   .drop-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center; }
   .drop-or { color: var(--faint); font-size: 12.5px; }
@@ -958,7 +956,7 @@
     .hint { left: 12px; right: 12px; bottom: 60px; }
     .slots, body:not(.has-img) .slots { left: 50%; bottom: 10px; }
     .slots button { min-width: 70px; padding: 0 12px 0 24px; }
-    .toast { left: 50%; }
+    .toast, body:not(.has-img) .toast { left: 50%; }
     .modal, body.topts-open .modal { padding: 64px 8px 8px; align-items: flex-start; }
     .toolpanel { left: 0; right: 0; top: 52px; bottom: auto; width: auto; max-height: 46vh; transform: translateY(-110%); border-right: 0; border-bottom: 1px solid var(--line); }
     body.topts-open .hint { left: 12px; }
