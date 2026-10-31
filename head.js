@@ -217,6 +217,55 @@ function skinUnder(X, pose) {
     return best;
   };
 }
+/**
+ * The dots on both photos as points in 3D (Vf: the front view, photo F; V: the side view, photo q; V.pair(i) → weight):
+ * where the front photo's line of sight through the dot and the side photo's meet (Gauss–Newton on both reprojections,
+ * from the skin under the front dot). The two lines cross nearly square, so the point is well set; how far apart they
+ * pass (gap, cm: the rms of the four reprojections — mostly how high each photo has it) is how much the two placements
+ * disagree. Returns Map(dot → { Q, gap, w }).
+ */
+function pairPoints(res, X, Vf, F, V, q) {
+  const out = new Map(), pf = res.poses[F], ps = res.poses[q], under = skinUnder(X, pf);
+  for (let i = 0; i < FM.POINTS.length; i++) {
+    const w = V.vis[i] && Vf.vis[i] ? V.pair(i) : 0;
+    if (!(w > 0)) continue;
+    const v0 = under(Vf.p[2 * i], Vf.p[2 * i + 1]);
+    if (v0 < 0) continue;
+    let Q = [X[3 * v0], X[3 * v0 + 1], X[3 * v0 + 2]], gap = 0;
+    for (let it = 0; it < 8; it++) {
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], b = [0, 0, 0];
+      let se = 0;
+      for (const [pose, u, v] of [[pf, Vf.p[2 * i], Vf.p[2 * i + 1]], [ps, V.p[2 * i], V.p[2 * i + 1]]]) {
+        const [pu, pv] = projK(pose, Q), J = projJ(pose, Q), e = [(u - pu) / pose.s, (v - pv) / pose.s];
+        for (let r = 0; r < 2; r++) { se += e[r] * e[r]; for (let a = 0; a < 3; a++) { b[a] += J[r][a] * e[r]; for (let c = 0; c < 3; c++) A[a][c] += J[r][a] * J[r][c]; } }
+      }
+      gap = Math.sqrt(se / 4);
+      for (let a = 0; a < 3; a++) A[a][a] += 1e-6;
+      const d = solve(A, b);
+      Q = Q.map((x, k) => x + d[k]);
+    }
+    out.set(i, { Q, gap, w });
+  }
+  // … and on the face's other side, which the side photo doesn't see: where the front photo has that side's dot, at the
+  // depth the side photo has this side's (the face's two sides alike in depth, not in where the front photo has them —
+  // copied over vertex for vertex instead, a cheekbone uneven across the face came out with a crease along it)
+  for (const [i, o] of [...out]) {
+    const j = FM.MIRROR[i];
+    if (j == null || j === i || out.has(j) || !Vf.vis[j]) continue;
+    let Q = [-o.Q[0], o.Q[1], o.Q[2]];
+    for (let it = 0; it < 6; it++) {
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], b = [0, 0, 0], [pu, pv] = projK(pf, Q), J = projJ(pf, Q), e = [(Vf.p[2 * j] - pu) / pf.s, (Vf.p[2 * j + 1] - pv) / pf.s];
+      for (let r = 0; r < 2; r++) for (let a = 0; a < 3; a++) { b[a] += J[r][a] * e[r]; for (let c = 0; c < 3; c++) A[a][c] += J[r][a] * J[r][c]; }
+      // (its depth: the model's forward, held to the other side's)
+      A[2][2] += 4; b[2] += 4 * (o.Q[2] - Q[2]);
+      for (let a = 0; a < 3; a++) A[a][a] += 1e-6;
+      const d = solve(A, b);
+      Q = Q.map((x, k) => x + d[k]);
+    }
+    out.set(j, { Q, gap: o.gap, w: o.w, mirror: i });
+  }
+  return out;
+}
 /** A view's outline (V.outline: its dots in order) as unit normals in its photo, out from its dots' centre: Map(dot → [x, y]). */
 function outlineNormals(V) {
   const out = new Map(), L = V.outline && V.outline.filter(i => V.vis[i]);
@@ -965,6 +1014,7 @@ function deform(res, views, opt = {}) {
   const wOf = new Map();
   for (const r of rows) { if (r.i == null || r.hold) continue; const d = [dX[3 * r.v], dX[3 * r.v + 1], dX[3 * r.v + 2]], e = Math.abs(r.e - (r.g[0] * d[0] + r.g[1] * d[1] + r.g[2] * d[2])) * 10, key = `${r.q}:${r.i}`; if (!(mis.get(key) >= e)) mis.set(key, e); wOf.set(key, Math.max(wOf.get(key) || 0, r.w0 ?? r.w)); }
   res.dX = dX;
+  res.rows = rows;
   res.bendMs = performance.now() - t0;
   // (the outline's samples: where, and what's left — mm across the outline, + = the head inside it)
   res.outline = rows.filter(r => r.at).map(r => ({ x: r.at.x, y: r.at.y, q: r.q, ch: r.at.ch, v: r.v, mm: 10 * (r.e - (r.g[0] * dX[3 * r.v] + r.g[1] * dX[3 * r.v + 1] + r.g[2] * dX[3 * r.v + 2])) }));
@@ -1085,7 +1135,7 @@ function alignFront(res, opt = {}) {
     for (const o of L) {
       const pt = FM.POINTS[o.i], edge = !!(C[o.i].cand && o.n), chin = edge && pt.y >= yJaw && Math.abs(pt.x) <= xChin;
       if (/^(pu|irI|irO)$/.test(pt.id.replace(/[LR]$/, ''))) continue;
-      if (jaw ? !edge || pt.y < yJaw : fine ? !(chin && opt.chin === true) && (edge || pt.mid || !/^(eyes|nose|lips)$/.test(pt.group)) : !edge && (pt.mid || !/^(eyes|nose|lips|ears)$/.test(pt.group))) continue;
+      if (jaw ? !edge || pt.y < yJaw : fine ? !(chin && opt.chin === true) && (edge || pt.mid || !(opt.fineGroups || /^(eyes|nose|lips)$/).test(pt.group)) : !edge && (pt.mid || !/^(eyes|nose|lips|ears)$/.test(pt.group))) continue;
       let v = o.vert;
       // (an edge dot: the head's edge there as it is now — the vertex furthest out along the outline's normal)
       if (edge) { let bv = -Infinity; for (const j of C[o.i].cand) { const [u, w] = projK(p, at(j)), sc = u * o.n[0] + w * o.n[1]; if (sc > bv) { bv = sc; v = j; } } }
@@ -1137,7 +1187,7 @@ function alignFront(res, opt = {}) {
     }
     for (let i = 0; i < 3 * N; i++) { X[i] += D[i]; Dall[i] += D[i]; }
   };
-  pass(false, opt.reg ?? .1, opt.fade || [-11, -1, 3, 9]);
+  if (opt.smooth !== false) pass(false, opt.reg ?? .1, opt.fade || [-11, -1, 3, 9]);
   // (opt.jawIters: then the jaw's own edge onto the photo's outline, a few times over — moved, another vertex
   // becomes its edge. The jaw's edge met the photo's, but pulled out across the photo the skin between the face
   // and the jaw's turn bulged into a jowl: off. opt.chin: the chin's edge with the close pass — it met the
@@ -1871,5 +1921,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, linkMid, linkPoint, skinUnder, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '65' };
+window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '69' };
 })();
