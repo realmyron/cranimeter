@@ -684,7 +684,8 @@ function unfold(res, opt = {}) {
   };
   let F = flipped();
   const before = F.length / 3, tmp = new Float32Array(3 * nS);
-  for (let round = 0; round < (opt.rounds || 40) && F.length; round++) {
+  // (100 rounds: at 40 a real head kept 34 of 105 — the eyes' inner corners and the mouth's need the ring a little wider)
+  for (let round = 0; round < (opt.rounds || 100) && F.length; round++) {
     // (the flipped triangles' corners and a ring or two round them — wider every 10 rounds)
     let reg = new Set(F);
     for (let r = 0; r < 1 + Math.floor(round / 10); r++) { const g = new Set(reg); for (const v of reg) for (let q = Tp.off[v]; q < Tp.off[v + 1]; q++) if (Tp.nb[q] < nS) g.add(Tp.nb[q]); reg = g; }
@@ -739,7 +740,8 @@ function deform(res, views, opt = {}) {
   const chains = views.map((V, q) => {
     if (V.view === 'front' || !V.outline) return [];
     const L = V.outline, at = id => L.indexOf(FM.INDEX[id]), out = [];
-    const a = at('gl'), b = at('cerv');
+    // (opt.profileFrom: from higher up the forehead — profileLock's, so the forehead above the glabella is held too)
+    const af = at(opt.profileFrom || 'gl'), a = af >= 0 ? af : at('gl'), b = at('cerv');
     if (a >= 0 && b > a) out.push({ idx: L.slice(a, b + 1), prof: true });
     const j0 = L.findIndex(i => /^jaw2[LR]$/.test(P[i].id)), j1 = L.findIndex(i => /^ramus[LR]$/.test(P[i].id));
     if (j0 >= 0 && j1 > j0) { const sg = Math.sign(P[L[j0]].x); out.push({ idx: L.slice(j0, j1 + 1), cand: v => C.turn[v] && T[3 * v] * sg > 0 }); }
@@ -768,6 +770,8 @@ function deform(res, views, opt = {}) {
     P.forEach((_, i) => { if (V.vis[i]) { cx += V.p[2 * i]; cy += V.p[2 * i + 1]; k++; } });
     cx /= k || 1; cy /= k || 1;
     for (const [ci, ch] of chains[q].entries()) {
+      // (opt.profileOnly: the profile itself, glabella to the neck–chin angle — see profileLock)
+      if (opt.profileOnly && !(ch.prof && ch.w == null)) continue;
       const pts = ch.pts || ch.idx.map(i => ({ x: V.p[2 * i], y: V.p[2 * i + 1] })), ws = ch.pts ? ch.pts.map(() => ch.w) : ch.idx.map(i => ch.w ?? V.weight(i));
       const seg = i => Math.max(1, Math.round(Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y) / (.3 * s)));
       const sp = FM.spline(pts, false, seg), wq = [], at = [];
@@ -785,7 +789,8 @@ function deform(res, views, opt = {}) {
     return out;
   });
   // (a vertex as photo q caught it — its expression, res.exOff[q], on the head — before the bend, and as bent so far)
-  const XO = res.exOff || [], x0q = (v, q) => { const o = XO[q]; return o ? [X0[3 * v] + o[3 * v], X0[3 * v + 1] + o[3 * v + 1], X0[3 * v + 2] + o[3 * v + 2]] : X0.subarray(3 * v, 3 * v + 3); };
+  // (opt.noEx: the head itself, as the 3D shows it, not as each photo's expression has it)
+  const XO = opt.noEx ? [] : res.exOff || [], x0q = (v, q) => { const o = XO[q]; return o ? [X0[3 * v] + o[3 * v], X0[3 * v + 1] + o[3 * v + 1], X0[3 * v + 2] + o[3 * v + 2]] : X0.subarray(3 * v, 3 * v + 3); };
   const dX = new Float32Array(3 * N), cur = (v, q) => { const p = x0q(v, q); return [p[0] + dX[3 * v], p[1] + dX[3 * v + 1], p[2] + dX[3 * v + 2]]; };
   const proj = (p, pose) => projK(pose, p);
   // (a row's direction g for (a, b) across the photo's (u, v): how a vertex's move shows there)
@@ -889,7 +894,8 @@ function deform(res, views, opt = {}) {
         if (Vf) {
           const under = res.underF || (res.underF = skinUnder(X0, pf));
           for (let i = 0; i < P.length; i++) {
-            const w = V.vis[i] && Vf.vis[i] ? V.pair(i) : 0;
+            // (opt.pairOnly: only these dots — orbitLock's, the orbit's and the brows')
+            const w = V.vis[i] && Vf.vis[i] && (!opt.pairOnly || opt.pairOnly.test(P[i].id)) ? V.pair(i) * (opt.pairW ? opt.pairW(P[i]) : 1) : 0;
             if (!(w > 0)) continue;
             const vert = under(Vf.p[2 * i], Vf.p[2 * i + 1]);
             if (vert < 0) continue;
@@ -905,6 +911,8 @@ function deform(res, views, opt = {}) {
             const w = Vf.vis[i] ? V.hold(i) : 0;
             if (!(w > 0) || !C[i] || C[i].v < 0 || C[i].v >= nS) continue;
             rows.push({ v: C[i].v, g: pf.R[2].slice(), e: 0, w, i, q: F, pair: true, hold: true });
+            // (opt.holdXY: across the front photo too — orbitLock's: the eye's opening as it is)
+            if (opt.holdXY) rows.push({ v: C[i].v, g: pf.R[0].slice(), e: 0, w, i, q: F, pair: true, hold: true }, { v: C[i].v, g: pf.R[1].slice(), e: 0, w, i, q: F, pair: true, hold: true });
           }
         }
       }
@@ -1025,6 +1033,85 @@ function deform(res, views, opt = {}) {
   return res;
 }
 
+/**
+ * The side photo's profile, last (changes res.X): after the bend the head's profile met the side photo's within ≈ ½ mm,
+ * but the steps after it — the front photo's alignment moving the nose and lips up and down, the side photo's own
+ * expression put back when the head is shown — left it 2–5 mm off where the 3D shows it (lips and chin forward,
+ * nasal bridge sunk). Here the head as the 3D shows it (no expression) is bent once more to the profile's line alone
+ * (from the forehead's middle down), with the finest kernels (≈ 1 and 2.5 cm), and only along a band round the midline (full within 2 cm of it, none past
+ * 4 cm) — the cheeks and the eyes stay as they are; each eyeball moves with the skin round it. Returns the largest
+ * move (mm).
+ */
+function profileLock(res, views, opt = {}) {
+  const q = views.findIndex(V => V.view !== 'front');
+  if (q < 0) return 0;
+  const m = model, N = m.N, nS = m.nSkin, C = correspond(), T = C.T, X0 = Float32Array.from(res.X);
+  const keep = { dX: res.dX, misfit: res.misfit, outline: res.outline, rows: res.rows, pairOff: res.pairOff, bendMs: res.bendMs, jawSegOff: res.jawSegOff };
+  // (6 rounds, each finding the head's edge again: in 3, the last move pushed the skin between the samples past the
+  // line — the glabella 1.5 mm — unseen; the 1 cm kernel at half the 2.5 cm one's weight: at full, it rippled more)
+  deform(res, views, { only: ['ss'], profileOnly: true, profileFrom: 'fhC', noEx: true, kw: opt.kw || [.5, 1, 0], lambda: opt.lambda ?? .05, iters: opt.iters || 6, mirrorSide: false });
+  const lockOutline = res.outline;
+  Object.assign(res, keep);
+  const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  let mx = 0;
+  const D = new Float32Array(3 * N);
+  for (let v = 0; v < nS; v++) {
+    const w = 1 - ss(opt.band0 ?? 2, opt.band1 ?? 4, Math.abs(T[3 * v]));
+    for (let k = 0; k < 3; k++) D[3 * v + k] = w * (res.X[3 * v + k] - X0[3 * v + k]);
+  }
+  // (the eyeballs whole: the mean move of the skin within 1.5 cm of each eye's middle)
+  for (const sg of [-1, 1]) {
+    const c = [0, 0, 0];
+    let n = 0;
+    for (let v = nS; v < N; v++) if (Math.sign(X0[3 * v]) === sg) { for (let k = 0; k < 3; k++) c[k] += X0[3 * v + k]; n++; }
+    if (!n) continue;
+    for (let k = 0; k < 3; k++) c[k] /= n;
+    const s = [0, 0, 0];
+    let ns = 0;
+    for (let v = 0; v < nS; v++) if ((X0[3 * v] - c[0]) ** 2 + (X0[3 * v + 1] - c[1]) ** 2 + (X0[3 * v + 2] - c[2]) ** 2 < 2.25) { for (let k = 0; k < 3; k++) s[k] += D[3 * v + k]; ns++; }
+    if (ns) for (let v = nS; v < N; v++) if (Math.sign(X0[3 * v]) === sg) for (let k = 0; k < 3; k++) D[3 * v + k] = s[k] / ns;
+  }
+  for (let i = 0; i < 3 * N; i++) { res.X[i] = X0[i] + D[i]; if (i < 3 * nS) mx = Math.max(mx, Math.abs(D[i])); }
+  res.lock = { mm: +(10 * mx).toFixed(1), outline: lockOutline };
+  return res.lock.mm;
+}
+/**
+ * The orbits and the cheeks as the two photos have them (changes res.X): your dots of the orbit's rim, under the eye,
+ * the cheekbone's ring, the hollow under it and the cheek's lines — each a point both photos place (the skin under the
+ * front dot, as deep as the side dot) — fitted once more after the front photo's alignment, with the bend's finer kernel
+ * (2.5 cm) alone, while the lids and the lips stay where they are, and only near those dots (the profile lock comes after).
+ * On a real pair the bend had left the brow ridge and the lateral orbital rim 3–6 mm in front of both photos' dots, the
+ * area under the eye 1.5–3.5 mm behind them and the cheek under the cheekbone 3–8 mm too full: with the rows of the
+ * whole face to meet at once, and the lids' depth held beside the rim, it can't. The eyeballs stay. Returns the
+ * largest move (mm).
+ */
+// (not the medial orbit's — beside the eye's inner corner, pulled there it folded the corner, and it's within 2 mm
+// already — nor the brows': hair; at a third as firmly they changed nothing. opt.cheeks: the cheek's too)
+const ORBIT_DOTS = /^(so\d|supra|lo\d|lor|ior|ss\d|tt\d)[LR]$/, CHEEK_DOTS = /^(so\d|supra|lo\d|lor|ior|ss\d|tt\d|zc\d|sm\d|hcm|mar|pjs|nl\d|jowl)[LR]$/;
+function orbitLock(res, views, opt = {}) {
+  if (!views.some(V => V.view !== 'front' && V.pair)) return 0;
+  const m = model, N = m.N, nS = m.nSkin, C = correspond(), T = C.T, X0 = Float32Array.from(res.X);
+  const keep = { dX: res.dX, misfit: res.misfit, outline: res.outline, rows: res.rows, pairOff: res.pairOff, bendMs: res.bendMs, jawSegOff: res.jawSegOff };
+  // (the lids held in all three directions; the 2.5 cm kernel alone, held back a little more than the bend's: with the
+  // 1 cm one too it moved the brows 8 mm and left a frown's crease between them)
+  deform(res, views, { only: ['tr'], pairOnly: opt.re || (opt.cheeks === false ? ORBIT_DOTS : CHEEK_DOTS), pairW: pt => pt.group === 'brows' ? (opt.browW ?? 0) : 1, holdXY: true, kw: opt.kw || [0, 1, 0], lambda: opt.lambda ?? .2, iters: opt.iters || 4 });
+  // (both sides: the side photo's rows are mirrored onto the other side)
+  const lockMis = res.misfit, centres = [...new Set(res.rows.filter(r => (r.pair || r.mirror) && !r.hold).map(r => r.v))];
+  Object.assign(res, keep);
+  const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  // (only near the dots it fitted: full within 2.5 cm of one, fading to none at 7 cm — reaching everywhere it moved
+  // skin it doesn't fit, and fading within 3 cm it left a step down the cheek's side)
+  let mx = 0;
+  for (let v = 0; v < nS; v++) {
+    let d2 = Infinity;
+    for (const c of centres) { const d = (X0[3 * v] - X0[3 * c]) ** 2 + (X0[3 * v + 1] - X0[3 * c + 1]) ** 2 + (X0[3 * v + 2] - X0[3 * c + 2]) ** 2; if (d < d2) d2 = d; }
+    const w = (1 - ss(opt.r0 ?? 2.5, opt.r1 ?? 7, Math.sqrt(d2))) * (opt.midFade ? ss(.6, 1.6, Math.abs(T[3 * v])) : 1);
+    for (let k = 0; k < 3; k++) { const d = w * (res.X[3 * v + k] - X0[3 * v + k]); res.X[3 * v + k] = X0[3 * v + k] + d; mx = Math.max(mx, Math.abs(d)); }
+  }
+  for (let i = 3 * nS; i < 3 * N; i++) res.X[i] = X0[i];
+  res.orbitLock = { mm: +(10 * mx).toFixed(1), misfit: lockMis };
+  return res.orbitLock.mm;
+}
 /**
  * The fitted head seen in a view's photo: per vertex its photo position (px) and depth toward the camera
  * (cm, forward from the ear plane — measured at the dot `ear`, the tragion's vertex, or the template's).
@@ -1555,19 +1642,6 @@ function anatomyFromLight(res, views, opt = {}) {
   return (res.anatLight = { values, it, ms: Math.round(performance.now() - t0), n: S.map(s => s.v.length) });
 }
 /**
- * The convexity points (the Convexity step): each one you placed says how far the surface between its link's two
- * ends bulges or sinks — how far off the straight line between them the photo shows it. The head gets each as a
- * smooth bump along the skin's normal round the mid's point (reaching 0.6 of the link's length, so its ends
- * hardly move), its height fitted so that, from that photo, the head's mid point lies as far off the line between
- * its ends (as the head has them) as yours does, for the link's length on each — so it's the curve that's
- * matched, not where the line lies. (The bend before it can't make anything under ≈ 2.5 cm: its finest shape is
- * that wide.) Where the photo sees the surface face on — a link on the cheek's front, from the front — the bump
- * barely moves the point in the photo and is held near none. A side photo's bumps go on the other side too,
- * unless the front photo has that side's own.
- * views: [{ q (pose), p (the map's photo positions), user(i), links: [{ a, m, b }] }]. Changes res.X (skin) and
- * keeps the head before them in res.Xcv0; returns res.convex = { n, ms, h: Map(mid → cm) }.
- */
-/**
  * A point of a link on the head (Y): the skin a fraction t of the way between its ends' vertices — the one under
  * that point of the line between them, pushed out along their normals (on the surface between them, not through
  * it). (The template's own point for it was sometimes its end's vertex: under the jaw, on a 4 mm link above the
@@ -1674,128 +1748,57 @@ function bumpField(Y, c, a, e) {
   K.map.set(key, F);
   return F;
 }
+/**
+ * Convexity (the Convexity step), set by hand on the head itself. Each link is a curve across a form, between two points
+ * of the skin (opt.links: [{ a, b: their vertices, ms: [the link's points] }]); each of its points can be pushed out or
+ * in (opt.fixed: Map(point → cm, along the skin's smoothed normal)). Round each point you moved the head gets a smooth
+ * bump (bumpField: ≥ 1 cm wide, none at the link's own ends nor at the lids' margins), sized so that each moved point
+ * moves by just its amount — points near each other share it instead of adding up (two bumps overlapping had made an
+ * 8 mm crater at a temple). Points you haven't moved neither move nor hold the skin.
+ * Nothing here is fitted to a photo. It used to be: your point's place on a photo, read against the line between the
+ * link's ends there — where the photo sees the skin face on (the cheekbone's side from the side, 0.97 of the way) that
+ * read as a 3 mm dent, and the jaw's angle as a 4 mm lump. Now a photo only shows the head's own curve and lets you push
+ * it (app.js, the Convexity step): a point left alone leaves the head as it is.
+ *   convexBasis — each link point's vertex on the head before convexity (res.Xcv0); cached per head and links
+ *   convexX     — the head with the given amounts, as a new array (res unchanged): a live preview while dragging
+ *   convexFit   — that, into res.X, the head before it kept in res.Xcv0. Returns res.convex = { n, h: Map(point → cm) }
+ */
+function convexBasis(res, links) {
+  const X0 = res.Xcv0 || res.X;
+  if (res.cvBasis && res.cvBasis.X0 === X0 && res.cvBasis.links === links) return res.cvBasis;
+  const pts = new Map();
+  for (const k of links || []) {
+    const n = k.ms.length;
+    if (!(k.a >= 0) || !(k.b >= 0) || k.a === k.b) continue;
+    k.ms.forEach((i, j) => { const vm = linkPoint(X0, k.a, k.b, (j + 1) / (n + 1)); if (vm >= 0) pts.set(i, { vm, a: k.a, e: k.b, k }); });
+  }
+  return (res.cvBasis = { X0, links, pts });
+}
+function convexX(res, links, fixed) {
+  const X0 = res.Xcv0 || res.X, B = convexBasis(res, links), X = Float32Array.from(X0);
+  const ids = [...(fixed || new Map()).keys()].filter(i => B.pts.has(i) && Number.isFinite(fixed.get(i)) && Math.abs(fixed.get(i)) > 1e-4);
+  if (!ids.length) return { X, ids, c: [] };
+  const n0 = smoothNormals(X0), F = ids.map(i => { const p = B.pts.get(i); return bumpField(X0, p.vm, p.a, p.e); }), nk = ids.length;
+  // (each bump's height c: Φ c = h at the moved points, least squares with a little damping — a point the lids' guard
+  // mutes can't take a huge bump to make up for it)
+  const Phi = ids.map(i => { const v = B.pts.get(i).vm; return F.map(f => f.at.get(v) || 0); });
+  const h = ids.map(i => Math.max(-1, Math.min(1, fixed.get(i)))), mu = .02;
+  const M = Array.from({ length: nk }, (_, a) => Array.from({ length: nk }, (_, b) => { let s = 0; for (let r = 0; r < nk; r++) s += Phi[r][a] * Phi[r][b]; return s + (a === b ? mu : 0); }));
+  const rhs = Array.from({ length: nk }, (_, a) => { let s = 0; for (let r = 0; r < nk; r++) s += Phi[r][a] * h[r]; return s; });
+  const c = solve(M, rhs).map(x => Math.max(-1.5, Math.min(1.5, x)));
+  for (let k = 0; k < nk; k++) {
+    const { idx, w } = F[k];
+    for (let q = 0; q < idx.length; q++) { const v = idx[q], s = c[k] * w[q]; X[3 * v] += s * n0[3 * v]; X[3 * v + 1] += s * n0[3 * v + 1]; X[3 * v + 2] += s * n0[3 * v + 2]; }
+  }
+  return { X, ids, c };
+}
 function convexFit(res, views, opt = {}) {
-  const t0 = performance.now(), m = model, C = correspond(), nS = m.nSkin, X = res.X;
-  if (!res.Xcv0 || opt.fresh) res.Xcv0 = Float32Array.from(X);
-  const X0 = res.Xcv0, n0 = smoothNormals(X0), mir = mirrorOf(), FMIR = FM.MIRROR;
-  const vOf = i => C[i] && C[i].v >= 0 && C[i].v < nS ? C[i].v : -1;
-  // the rows: one per link point you placed, per photo. A link's points are the head's a fraction 1/(n+1), 2/(n+1)…
-  // of the way between its ends; each bends between its neighbours on the link (the points before and after it,
-  // or its ends) — so 2 or 3 points on a link draw a curve, not one bump
-  const L = [];
-  // (a link's ends on the head: the skin under your end dots as that photo shows the head — V.vert — and where the
-  // photo shows it, V.off: the head's own 2D bend through the dots, per vertex. Taken as the template's own place for
-  // them, they lay 4–19 mm from your dots: the head's own curve between them came out 8–12 mm off the line, and
-  // every cheek point read as a 5 mm dent)
-  views.forEach(V => {
-    for (const k of V.links) {
-      if (!k.ms.some(i => V.user(i))) continue;
-      const va = V.vert ? V.vert(k.a) : vOf(k.a), vb = V.vert ? V.vert(k.b) : vOf(k.b), n = k.ms.length;
-      if (va < 0 || vb < 0 || va === vb) continue;
-      const nodes = [va, ...k.ms.map((_, j) => linkPoint(X0, va, vb, (j + 1) / (n + 1))), vb];
-      if (nodes.some(v => v < 0)) continue;
-      const A = [V.p[2 * k.a], V.p[2 * k.a + 1]], B = [V.p[2 * k.b], V.p[2 * k.b + 1]], cx = B[0] - A[0], cy = B[1] - A[1], Lu = Math.hypot(cx, cy);
-      if (!(Lu > 3)) continue;
-      k.ms.forEach((i, j) => {
-        if (!V.user(i)) return;
-        const d = ((V.p[2 * i] - A[0]) * -cy + (V.p[2 * i + 1] - A[1]) * cx) / Lu;
-        L.push({ q: V.q, i, k0: k.ms[0], va, vb, vm: nodes[j + 1], prev: nodes[j], next: nodes[j + 2], du: d, ex: -cy / Lu, ey: cx / Lu, off: V.off || null });
-      });
-    }
-  });
-  // … and the points set by hand in 3D (opt.fixed: point → how far out, cm), each where it lies on its link
-  // (opt.links: every link): those aren't fitted, the head just has them — and the photos' points there give way
-  const fixed = opt.fixed || new Map(), geo = new Map();
-  for (const [i] of fixed) {
-    const k = (opt.links || []).find(l => l.ms.includes(i));
-    if (!k) continue;
-    const va = vOf(k.a), vb = vOf(k.b), n = k.ms.length, j = k.ms.indexOf(i);
-    if (va < 0 || vb < 0 || va === vb) continue;
-    const nodes = [va, ...k.ms.map((_, q) => linkPoint(X0, va, vb, (q + 1) / (n + 1))), vb];
-    if (nodes.some(v => v < 0)) continue;
-    geo.set(i, { vm: nodes[j + 1], prev: nodes[j], next: nodes[j + 2], va, vb });
-  }
-  for (let q = L.length - 1; q >= 0; q--) if (geo.has(L[q].i)) L.splice(q, 1);
-  // (a point and its mirror both placed on the photos: one amount for both, the face's two sides alike — each fitted
-  // by itself, the two cheeks came out dented unevenly by how each was placed: −0.4 mm on one side, +2.8 on the other)
-  const photo = [...new Set(L.map(r => r.i))], pset = new Set(photo);
-  // (and on the front photo, a link's points one amount together: the front photo sees the cheek's side nearly edge
-  // on, and a link's points read one by one swung in and out — on a real map, dents along the jaw and the temple)
-  const front = new Map(L.filter(r => r.q === 0).map(r => [r.i, r.k0]));
-  const grp = i => { const j = front.has(i) ? front.get(i) : i, m = FMIR[j]; return m !== j && (pset.has(m) || [...front.values()].includes(m)) ? Math.min(j, m) : j; };
-  const keys = [...new Set(photo.map(grp))];
-  const ids = [...keys, ...geo.keys()], nk = ids.length, col = new Map(ids.map((i, c) => [i, c]));
-  const colOf = i => geo.has(i) ? col.get(i) : col.get(grp(i));
-  const isFixed = ids.map(i => geo.has(i));
-  res.convex = { n: nk, ms: 0, h: new Map() };
-  if (!nk) { X.set(X0); return res.convex; }
-  // each point's bump (bumpField): set on one photo or side alone, its mirror on the other side too
-  // (held at the link's own ends, not at the points beside it on the link: pinned at those, three points side by side
-  // made three narrow dents — on a real face's cheeks, a row of lumps. Wide, they overlap and run together)
-  const fieldOf = i => {
-    const r = geo.get(i) || L.find(o => o.i === i), onlySide = geo.has(i) || L.every(o => o.i !== i || o.q > 0), mi = FMIR[i];
-    const a = r.va ?? r.prev, e = r.vb ?? r.next, ms = [r.vm, a, e].map(v => mir[v]), F = bumpField(X0, r.vm, a, e);
-    return onlySide && !pset.has(mi) && !geo.has(mi) && ms.every(v => v >= 0) && ms[0] !== r.vm ? [F, bumpField(X0, ms[0], ms[1], ms[2])] : [F];
-  };
-  // (several points' bumps as one: overlapped, normalised to 1 at their highest — the amount is how far out at most)
-  // (any two or more: two overlapping bumps added up to twice the limit — the 8.4 mm crater at the temple)
-  const merge = Fs => { const at = new Map(); for (const F of Fs) F.at.forEach((x, v) => at.set(v, (at.get(v) || 0) + x)); if (Fs.length > 1) { const mx = Math.max(...at.values()) || 1; if (mx > 1) at.forEach((x, v) => at.set(v, x / mx)); } return { idx: Int32Array.from(at.keys()), w: Float32Array.from(at.values()), at }; };
-  const bump = ids.map((key, j) => merge(j < keys.length ? photo.filter(i => grp(i) === key).flatMap(fieldOf) : fieldOf(key)));
-  const phi = (v, j) => bump[j].at.get(v) || 0;
-  const h = Float64Array.from(ids, i => geo.has(i) ? Math.max(-1, Math.min(1, fixed.get(i))) : 0);
-  const apply = () => {
-    X.set(X0);
-    for (let j = 0; j < nk; j++) {
-      if (!h[j]) continue;
-      const { idx, w } = bump[j];
-      for (let q = 0; q < idx.length; q++) { const v = idx[q], s = h[j] * w[q]; X[3 * v] += s * n0[3 * v]; X[3 * v + 1] += s * n0[3 * v + 1]; X[3 * v + 2] += s * n0[3 * v + 2]; }
-    }
-  };
-  // (held near none: at .3 a point where the skin faces the photo sideways — a cheek, the outer orbit, from the
-  // side — came out at a third of how far you moved it; at .12 at ⅔–⅘, but where the photo barely sees the
-  // bulge — skin facing it — 1 mm off on the photo became 4 mm of bump: the head came out humped. At .25, at most
-  // 2×, and ⅘ where the photo sees it well. A bump the lids' guard mostly mutes is held the harder: unseen, it
-  // swung to the cap)
-  // (at .45 at most ≈ 1×: a point moves the head about as far as you moved it off the head's curve, never more —
-  // where the photo barely sees the bulge, less)
-  const sbar = views.length ? views.reduce((s, V) => s + res.poses[V.q].s, 0) / views.length : res.poses[0].s, lam = ((opt.lambda ?? .45) * sbar) ** 2, eps = .05;
-  const lamOf = ids.map((i, j) => { const r = geo.get(i) || L.find(o => grp(o.i) === i); return lam / Math.max(.1, phi(r.vm, j)) ** 2; });
-  const out = () => { for (const i of photo) res.convex.h.set(i, h[colOf(i)]); for (const i of geo.keys()) res.convex.h.set(i, h[col.get(i)]); res.convex.ms = Math.round(performance.now() - t0); return res.convex; };
-  if (!L.length) { apply(); return out(); }
-  for (let it = 0; it < (opt.iters || 3); it++) {
-    // (the image's motion when a vertex moves along its normal, per cm)
-    const Dn = (pose, v) => { const p = X.subarray(3 * v, 3 * v + 3), a = projK(pose, p), b = projK(pose, [p[0] + eps * n0[3 * v], p[1] + eps * n0[3 * v + 1], p[2] + eps * n0[3 * v + 2]]); return [(b[0] - a[0]) / eps, (b[1] - a[1]) / eps]; };
-    const M = Array.from({ length: nk }, () => new Float64Array(nk)), rhs = new Float64Array(nk);
-    for (const r of L) {
-      const pose = res.poses[r.q], at = v => { const a = projK(pose, X.subarray(3 * v, 3 * v + 3)); return r.off ? [a[0] + r.off[2 * v], a[1] + r.off[2 * v + 1]] : a; };
-      const A = at(r.va), B = at(r.vb), Mh = at(r.vm);
-      const cx = B[0] - A[0], cy = B[1] - A[1], Lh = Math.hypot(cx, cy);
-      // (both across your line, in the photo's px — the head's own ends can lie at another angle in a side photo,
-      // whose dots off the midline the bend before doesn't follow: across its chord the bulge pointed elsewhere)
-      const ex = r.ex, ey = r.ey, th = Lh > 1 ? Math.min(1, Math.max(0, ((Mh[0] - A[0]) * cx + (Mh[1] - A[1]) * cy) / (Lh * Lh))) : .5;
-      const dh = (Mh[0] - A[0] - th * cx) * ex + (Mh[1] - A[1] - th * cy) * ey;
-      const e = r.du - dh;
-      const Da = Dn(pose, r.va), Db = Dn(pose, r.vb), Dm = Dn(pose, r.vm), J = new Float64Array(nk);
-      for (let j = 0; j < nk; j++) {
-        if (isFixed[j]) continue;
-        const fa = phi(r.va, j), fb = phi(r.vb, j), fm = phi(r.vm, j);
-        if (!fa && !fb && !fm) continue;
-        J[j] = ex * (fm * Dm[0] - (1 - th) * fa * Da[0] - th * fb * Db[0]) + ey * (fm * Dm[1] - (1 - th) * fa * Da[1] - th * fb * Db[1]);
-      }
-      for (let a = 0; a < nk; a++) { if (!J[a]) continue; rhs[a] += J[a] * e; for (let b = 0; b < nk; b++) M[a][b] += J[a] * J[b]; }
-    }
-    for (let a = 0; a < nk; a++) { if (isFixed[a]) { M[a][a] = 1; rhs[a] = 0; continue; } M[a][a] += lamOf[a]; rhs[a] -= lamOf[a] * h[a]; }
-    const dh = solve(M.map(r => Array.from(r)), Array.from(rhs));
-    for (let j = 0; j < nk; j++) if (!isFixed[j]) h[j] = Math.max(-.4, Math.min(.4, h[j] + dh[j]));
-    apply();
-  }
-  // what's left per point (mm across its link, on its photo): res.convex.left
-  res.convex.left = new Map(L.map(r => {
-    const pose = res.poses[r.q], at = v => { const a = projK(pose, X.subarray(3 * v, 3 * v + 3)); return r.off ? [a[0] + r.off[2 * v], a[1] + r.off[2 * v + 1]] : a; };
-    const A = at(r.va), B = at(r.vb), Mh = at(r.vm), cx = B[0] - A[0], cy = B[1] - A[1], Lh = Math.hypot(cx, cy), th = Lh > 1 ? Math.min(1, Math.max(0, ((Mh[0] - A[0]) * cx + (Mh[1] - A[1]) * cy) / (Lh * Lh))) : .5;
-    return [r.i, 10 * (r.du - ((Mh[0] - A[0] - th * cx) * r.ex + (Mh[1] - A[1] - th * cy) * r.ey)) / pose.s];
-  }));
-  return out();
+  const t0 = performance.now();
+  if (!res.Xcv0 || opt.fresh) res.Xcv0 = Float32Array.from(res.X);
+  const fixed = opt.fixed || new Map(), r = convexX(res, opt.links, fixed);
+  res.X.set(r.X);
+  res.convex = { n: r.ids.length, h: new Map(r.ids.map(i => [i, fixed.get(i)])), ms: Math.round(performance.now() - t0) };
+  return res.convex;
 }
 /** A photo's scale (px per cm) at the face's own depth: the pose's, enlarged as its lens enlarges the dots it fitted. */
 function faceScale(res, q = 0) {
@@ -1921,5 +1924,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '71' };
+window.CraniHead = { load, fit, deform, profileLock, orbitLock, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, convexX, convexBasis, smoothNormals, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '72' };
 })();
