@@ -7,7 +7,7 @@
 
 /* ---------------------------------------------------------------- data -- */
 
-const BUILD = '72';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
+const BUILD = '75';   // must match the build in presets.js, warp.js, facemap.js, surface.js and head.js
 /*
  * Make sure the helper scripts belong to this release. Browsers and GitHub Pages cache files for
  * a while, so right after an upload a page can get the new app.js next to an old warp.js (or an
@@ -1150,14 +1150,15 @@ async function ensureHead() {
   if (!HM || !m || isProfile(m) || curSlot !== 'front' || !m.snapped) return null;
   const key = headKey(), cvk = headCvk();
   if (m.head && m.head.key === key) {
-    // (only the convexity points moved: the head as fitted, its fine bend again, seen again)
-    if (m.head.cvk !== cvk && m.head.res.Xcv0) {
-      const res = m.head.res, kz = HM.faceScale(res, 0) / mapFrame().scale;
-      HM.convexFit(res, null, convexOpts(m, res, sideMapOf()));
+    // (only the Symmetry slider moved: the head's last steps again; only the convexity: its fine bend again — then seen again)
+    const res = m.head.res, symCh = m.head.sym !== symAmount() && res.Xsym0;
+    if (symCh || (m.head.cvk !== cvk && res.Xcv0)) {
+      const kz = HM.faceScale(res, 0) / mapFrame().scale;
+      if (symCh) headFinish(res, m, sideMapOf()); else HM.convexFit(res, null, convexOpts(m, res, sideMapOf()));
       const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true, ortho: true });
       for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
       Pg.z = P.z;
-      m.head = { ...m.head, P, Pg, cvk, id: ++headIds };
+      m.head = { ...m.head, P, Pg, cvk, sym: symAmount(), id: ++headIds };
     }
     return m.head;
   }
@@ -1238,20 +1239,18 @@ async function ensureHead() {
     if (HM.anatomyFromLight) HM.anatomyFromLight(res, views, { strength: cfg.headShadeK || 1 });
     HM.shading(res, views, { strength: cfg.headShadeK || 1 });
   }
-  // … and the lips closed where the front map has them closed (its lips' inner edges no further apart than the
-  // scans' closed mouth's, × 1.3): fitted, they stood ≈ 1.5 mm apart — a parted mouth
+  // (the lips closed where the front map has them closed (its lips' inner edges no further apart than the scans'
+  // closed mouth's, × 1.3): fitted, they stood ≈ 1.5 mm apart — a parted mouth)
   {
     const a = FM.INDEX.ulf, b = FM.INDEX.llf, Cc = HM.correspond();
+    res.lipsShut = false;
     if (a != null && b != null && m.vis[a] && m.vis[b] && Cc[a] && Cc[b]) {
       const N0 = HM.model.neu, va = Cc[a].v, vb = Cc[b].v, g0 = Math.hypot(N0[3 * va] - N0[3 * vb], N0[3 * va + 1] - N0[3 * vb + 1], N0[3 * va + 2] - N0[3 * vb + 2]);
-      const gm = Math.hypot(m.p[2 * a] - m.p[2 * b], m.p[2 * a + 1] - m.p[2 * b + 1]) / res.poses[0].s;
-      if (gm <= 1.3 * g0) HM.closeLips(res);
+      res.lipsShut = Math.hypot(m.p[2 * a] - m.p[2 * b], m.p[2 * a + 1] - m.p[2 * b + 1]) / res.poses[0].s <= 1.3 * g0;
     }
   }
-  // … the skin's folds undone (the mouth's and the eyes' corners)
-  if (cfg.unfold !== false && HM.unfold) HM.unfold(res);
-  // … and last the convexity you set (the Convexity step): the surface's fine form between the dots
-  if (HM.convexFit) { res.cvGeo = null; res.cvLinks = null; convexGeo(res); HM.convexFit(res, null, { fresh: true, ...convexOpts(m, res, sm) }); }
+  res.Xsym0 = Float32Array.from(res.X);
+  headFinish(res, m, sm);
   for (const o of res.pairs[0]) vertOf[o.i] = o.vert;   // (the edge dots: the vertex on the fitted head's edge)
   // depths in the photo's centimetres (its scale from the face map): the fitted head's own size is traded
   // against its pose's scale, and only its depth for its width in the photo is the head's.
@@ -1261,17 +1260,33 @@ async function ensureHead() {
   const P = HM.project(res, 0), Pg = HM.project(res, 0, 'traL', { noBend: true, ortho: true });
   for (let i = 0; i < P.z.length; i++) P.z[i] *= kz;
   Pg.z = P.z;
-  m.head = { key, cvk, id: ++headIds, res, P, Pg, vertOf, side: !!sm, dist: views.map(V => V.dist || 0), n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
+  m.head = { key, cvk, sym: symAmount(), id: ++headIds, res, P, Pg, vertOf, side: !!sm, dist: views.map(V => V.dist || 0), n: views.reduce((s, V) => s + FM.POINTS.reduce((c, _, i) => c + (V.vis[i] && V.weight(i) > 0 ? 1 : 0), 0), 0) };
   return m.head;
 }
-/* ---- convexity (step 3): links across the face's forms, each a curve on the head with 1–3 points along it ----
-   Each photo shows the head as it is now as a wire over the photo — its own surface, not your dots — with the links on
-   it. You push a link's points out or in until the wire has the form the photo shows; the head follows. One amount per
-   point (the front map's cvh: cm along the skin's normal), the same on the front photo, the side photo and in 3D, and
-   its mirror on the other side too (Alt: this side only). Nothing is read from where a point lies on a photo: a point
-   left alone leaves the head as it is. (Until build 72 the points were placed on the side photo and read against the
-   line between their link's ends: where that photo sees the skin face on — the cheekbone's side, the jaw's angle — that
-   read as dents and lumps, 3–4 mm, from a point a few pixels off.) */
+/** How alike the head's two sides are made (0…1): cfg.headSym, % — 80 unless set. */
+const symAmount = () => (cfg.headSym ?? 80) / 100;
+/**
+ * The head's last steps, from the head as fitted (res.Xsym0) — again by themselves when only the Symmetry slider
+ * moves: its two sides made alike (symmetrize: the dots' placement scatter, fitted dot by dot, had made them differ
+ * by 2–7 mm) … the lips closed where the front map has them closed … the skin's folds undone (the mouth's and the
+ * eyes' corners) … and last the convexity you set (the Convexity step): the surface's fine form between the dots.
+ */
+function headFinish(res, m, sm) {
+  res.X.set(res.Xsym0);
+  // (after the profile lock, which it leaves ≈ as it was — 0.73 → 0.86 mm mean, 1.5 → 1.8 worst at 80 %: the side
+  // photo pulls one side's skin onto the profile, and the average halves that. Tried and left out: the profile lock
+  // again after it — the profile as it was, but the sides up to 1.9 mm apart along the midline again; that lock with
+  // its rows mirrored — the two sides' rows disagree, the profile 0.93 / 2.0; the midline's skin kept out of it —
+  // little better either way)
+  if (HM.symmetrize) HM.symmetrize(res, { amount: symAmount() });
+  if (res.lipsShut) HM.closeLips(res);
+  if (cfg.unfold !== false && HM.unfold) HM.unfold(res);
+  if (HM.convexFit) { res.cvGeo = null; res.cvLinks = null; convexGeo(res); HM.convexFit(res, null, { fresh: true, ...convexOpts(m, res, sm) }); }
+}
+/* ---- convexity (step 3): the head's wire, shaped by hand (see drawConvexStep and the brushes below) ----
+   (Until build 72 convexity was points placed on the side photo, read against the line between their link's ends:
+   where that photo sees the skin face on — the cheekbone's side, the jaw's angle — a few pixels read as 3–4 mm dents
+   and lumps. Build 72's links and points still apply to maps that have them; the links' code below serves that.) */
 /**
  * Where each photo shows the head as fitted (before its convexity): per vertex its place on the photo — its pose and
  * the head's own 2D bend through the dots (off: that bend) — and whether it faces the photo. Once per fit.
@@ -1315,11 +1330,18 @@ function cvxLinks(res, fm, sm) {
 }
 /** Every link, on both sides (all of them live on the head now, whichever photo shows them best). */
 const links3 = () => FM.ALL_LINKS;
-/** The amounts you set (the front map's cvh, cm), for convexFit. */
+/** What you set (the front map's sculpt — and build 72's points, cvh, where a map has them), for convexFit. */
 function convexOpts(fm, res, sm) {
   const fixed = new Map();
+  // (a sculpt from a map file: mm per vertex → cm, now that the model says how many vertices there are)
+  if (fm && fm.sculptRaw) {
+    const nS = HM.model.nSkin;
+    fm.sculpt = new Float32Array(3 * nS);
+    for (const [v, d] of Object.entries(fm.sculptRaw)) { const i = +v; if (i >= 0 && i < nS && Array.isArray(d)) for (let k = 0; k < 3; k++) fm.sculpt[3 * i + k] = (+d[k] || 0) / 10; }
+    fm.sculptRaw = null;
+  }
   if (fm && fm.cvh) fm.cvh.forEach((h, i) => { if (Number.isFinite(h) && Math.abs(h) > 1e-4) fixed.set(i, h); });
-  return { fixed, links: cvxLinks(res, fm, sm) };
+  return { fixed, links: cvxLinks(res, fm, sm), sculpt: fm && fm.sculpt && fm.sculpt.length === 3 * HM.model.nSkin ? fm.sculpt : null };
 }
 const convexStep = () => mapping() && S.mapStep === 'convex';
 /** The front map (with the head) and the side map, from either photo's tab. */
@@ -1328,33 +1350,34 @@ function convexMaps() {
   return { side, fm, sm: sm && isProfile(sm) && sm.snapped ? sm : null };
 }
 /**
- * The face's wire: the template's lines of equal height and of equal width across the face, every 8 mm, as they run
- * over the head's skin — each segment two points on the mesh's edges (vertex, vertex, fraction), so it follows the head
- * however it's bent. Once.
+ * The Convexity step: the head's own wire (its mesh, as the 3D's Wire view draws it), seen by this photo's camera — the
+ * front photo's from the front, the side photo's from the side — over the photo or over the head in clay. You shape it
+ * with brushes, as in a sculpting program: Move (drag a soft patch of the skin across the view — an outline onto the
+ * photo's), Fuller and Hollower (push the skin out or in along its normal), Smooth (even out what you've done). Each
+ * brush falls off smoothly from its middle to its edge (the circle round the cursor), so no stroke leaves a step, and
+ * the other side of the face follows mirrored (Symmetry). What you do is a move per vertex of the head (the front map's
+ * sculpt: cm, the model's frame), added last when the head is built (convexFit) — the 3D, its depths and the
+ * measurements on it all have it, and a head fitted again keeps it. (Build 72's convexity points — their amounts, cvh —
+ * still apply to maps that have them, but aren't edited any more.)
  */
-let WIRE = null;
-function wireLattice() {
-  if (WIRE) return WIRE;
-  const M = HM.model, C = HM.correspond(), T = C.T, nS = M.nSkin, segs = [];
-  const ok = v => v < nS && !C.neck[v] && !C.ear[v] && Math.abs(T[3 * v]) < 7.6 && T[3 * v + 1] > -10 && T[3 * v + 1] < 9.5 && T[3 * v + 2] > -1;
-  for (const ax of [0, 1]) for (let k = -12; k <= 12; k++) {
-    const val = k * .8 + (ax ? 0 : .001);
-    for (let t = 0; t < M.nTri; t++) {
-      const a = M.tri[3 * t], b = M.tri[3 * t + 1], c = M.tri[3 * t + 2];
-      if (!ok(a) || !ok(b) || !ok(c)) continue;
-      const tv = [a, b, c], f = tv.map(v => T[3 * v + ax] - val), p = [];
-      for (let e = 0; e < 3; e++) { const i = e, j = (e + 1) % 3; if ((f[i] < 0) !== (f[j] < 0)) p.push(tv[i], tv[j], f[i] / (f[i] - f[j])); }
-      if (p.length === 6) segs.push(...p);
-    }
+let EDGES = null;
+/** The skin's edges (once): the wire. */
+function meshEdges() {
+  if (EDGES) return EDGES;
+  const M = HM.model, nS = M.nSkin, seen = new Set(), out = [];
+  for (let t = 0; t < M.nTri; t++) for (let e = 0; e < 3; e++) {
+    const a = M.tri[3 * t + e], b = M.tri[3 * t + (e + 1) % 3];
+    if (a >= nS || b >= nS) continue;
+    const k = a < b ? a * nS + b : b * nS + a;
+    if (!seen.has(k)) { seen.add(k); out.push(a, b); }
   }
-  return (WIRE = Float64Array.from(segs));
+  return (EDGES = Int32Array.from(out));
 }
 /**
- * The Convexity step's view of the head on this photo (cached; while you drag, of the head as it would be — cvPrev):
- * every skin vertex's place on the photo, which of them the photo sees (facing it, not hidden behind the nose or the
- * cheek), the wire's segments, the links' curves and their points — each with how far (px) its place moves on the
- * photo per cm pushed out (dx, dy), and whether that's enough to see (ok: a point the photo sees face on can't be
- * judged there — push it on the other photo or in 3D).
+ * The Convexity step's view of the head on this photo (cached; while you brush, of the head as it is under the brush —
+ * cvPrev): every skin vertex's place on the photo (its pose and the head's own 2D bend through the dots), its depth
+ * toward the camera and whether the photo sees it (facing it, and not hidden behind the nose or the cheek — a coarse
+ * depth buffer; kept from the head before the stroke while you brush).
  */
 let cvView = null, cvPrev = null;
 function cvGeom() {
@@ -1365,12 +1388,11 @@ function cvGeom() {
   if (cvView && cvView.key === key) return cvView;
   const pose = res.poses[q], g = convexGeo(res)[q];
   if (!pose || !g) return null;
-  const nS = HM.model.nSkin, uv = new Float32Array(2 * nS), z = new Float32Array(nS);
+  const M = HM.model, nS = M.nSkin, uv = new Float32Array(2 * nS), z = new Float32Array(nS), R = pose.R;
   for (let v = 0; v < nS; v++) { const [u, w, , Y] = HM.projK(pose, X.subarray(3 * v, 3 * v + 3)); uv[2 * v] = u + g.off[2 * v]; uv[2 * v + 1] = w + g.off[2 * v + 1]; z[v] = -Y[2]; }
-  // (which vertices the photo sees: kept from the head as fitted while you drag — the bumps don't change that much)
   let vis = cvPrev && cvView && cvView.hid === h.id && cvView.q === q ? cvView.vis : null;
   if (!vis) {
-    const M = HM.model, nrm = HM.normals(X), R = pose.R, cell = .15 * pose.s;
+    const nrm = HM.normals(X), cell = .15 * pose.s;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (let v = 0; v < nS; v++) { x0 = Math.min(x0, uv[2 * v]); x1 = Math.max(x1, uv[2 * v]); y0 = Math.min(y0, uv[2 * v + 1]); y1 = Math.max(y1, uv[2 * v + 1]); }
     const gw = Math.ceil((x1 - x0) / cell) + 2, gh = Math.ceil((y1 - y0) / cell) + 2, zb = new Float32Array(gw * gh).fill(-Infinity);
@@ -1391,116 +1413,278 @@ function cvGeom() {
     for (let v = 0; v < nS; v++) {
       if (-(R[2][0] * nrm[3 * v] + R[2][1] * nrm[3 * v + 1] + R[2][2] * nrm[3 * v + 2]) < .03) continue;
       // (its own cell of the depth buffer: none in front of it by more than 3 mm)
-      const i = Math.min(gw - 1, Math.max(0, Math.round((uv[2 * v] - x0) / cell))), j = Math.min(gh - 1, Math.max(0, Math.round((uv[2 * v + 1] - y0) / cell))), top = zb[j * gw + i];
-      if (!(top > z[v] + .3)) vis[v] = 1;
+      const i = Math.min(gw - 1, Math.max(0, Math.round((uv[2 * v] - x0) / cell))), j = Math.min(gh - 1, Math.max(0, Math.round((uv[2 * v + 1] - y0) / cell)));
+      if (!(zb[j * gw + i] > z[v] + .3)) vis[v] = 1;
     }
   }
-  // the wire
-  const W = wireLattice(), segs = [];
-  for (let s = 0; s < W.length; s += 6) {
-    const a1 = W[s], b1 = W[s + 1], t1 = W[s + 2], a2 = W[s + 3], b2 = W[s + 4], t2 = W[s + 5];
-    if (!(vis[a1] && vis[b1] && vis[a2] && vis[b2])) continue;
-    segs.push(uv[2 * a1] + t1 * (uv[2 * b1] - uv[2 * a1]), uv[2 * a1 + 1] + t1 * (uv[2 * b1 + 1] - uv[2 * a1 + 1]), uv[2 * a2] + t2 * (uv[2 * b2] - uv[2 * a2]), uv[2 * a2 + 1] + t2 * (uv[2 * b2 + 1] - uv[2 * a2 + 1]));
-  }
-  // the links and their points
-  const links = cvxLinks(res, fm, sm), B = HM.convexBasis(res, links), n0 = HM.smoothNormals(res.Xcv0), pts = new Map(), curves = [];
-  for (const [i, p] of B.pts) {
-    const v = p.vm;
-    if (!vis[v]) continue;
-    const at = [X[3 * v] + .1 * n0[3 * v], X[3 * v + 1] + .1 * n0[3 * v + 1], X[3 * v + 2] + .1 * n0[3 * v + 2]], [u1, w1] = HM.projK(pose, at), dx = (u1 + g.off[2 * v] - uv[2 * v]) / .1, dy = (w1 + g.off[2 * v + 1] - uv[2 * v + 1]) / .1;
-    // (ok: pushed 1 cm, the point moves ≥ 5 mm on the photo — the skin turned ≥ 30° from facing it)
-    pts.set(i, { x: uv[2 * v], y: uv[2 * v + 1], dx, dy, ok: Math.hypot(dx, dy) / pose.s > .5, region: p.k.region });
-  }
-  // (each link drawn along the head between its ends — 8 of the skin's points on its way, not just through its own few)
-  for (const k of links) {
-    if (!(k.a >= 0 && k.b >= 0) || k.a === k.b || !vis[k.a] || !vis[k.b] || !k.ms.every(i => pts.has(i))) continue;
-    const path = k.path || (k.path = [k.a, ...[1, 2, 3, 4, 5, 6, 7].map(t => HM.linkPoint(res.Xcv0, k.a, k.b, t / 8)), k.b].filter(v => v >= 0));
-    curves.push({ region: k.region, pts: path.map(v => [uv[2 * v], uv[2 * v + 1]]) });
-  }
-  return (cvView = { key, q, hid: h.id, vis, segs: Float32Array.from(segs), pts, curves, links });
+  return (cvView = { key, q, hid: h.id, pose, uv, z, vis, X, clay: cvView && cvView.hid === h.id && cvView.q === q ? cvView.clay : null });
 }
-const cvhOf = (fm, i) => fm && fm.cvh && Number.isFinite(fm.cvh[i]) ? fm.cvh[i] : 0;
+/** The head in clay as this photo's camera sees it (a canvas over the photo's box, its place in photo px), redrawn at most every ⅙ s while you brush. */
+function cvClay(V) {
+  const now = performance.now();
+  if (V.clay && (V.clay.key === V.key || (S.scDrag && now - V.clay.t < 160))) return V.clay;
+  const M = HM.model, nS = M.nSkin, R = V.pose.R, nrm = HM.normals(V.X), uv = V.uv;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let v = 0; v < nS; v++) { x0 = Math.min(x0, uv[2 * v]); x1 = Math.max(x1, uv[2 * v]); y0 = Math.min(y0, uv[2 * v + 1]); y1 = Math.max(y1, uv[2 * v + 1]); }
+  const sc = Math.min(1, 900 / Math.max(1, y1 - y0)), w = Math.ceil((x1 - x0) * sc) + 2, hh = Math.ceil((y1 - y0) * sc) + 2;
+  const L = [-.38, -.5, -.78], Ln = Math.hypot(...L), I = new Float32Array(nS);
+  for (let v = 0; v < nS; v++) { const n = [0, 1, 2].map(r => R[r][0] * nrm[3 * v] + R[r][1] * nrm[3 * v + 1] + R[r][2] * nrm[3 * v + 2]); I[v] = .2 + .8 * Math.max(0, (n[0] * L[0] + n[1] * L[1] + n[2] * L[2]) / Ln); }
+  const zb = new Float32Array(w * hh).fill(-Infinity), ib = new Float32Array(w * hh).fill(-1);
+  for (let t = 0; t < M.nTri; t++) {
+    const a = M.tri[3 * t], b = M.tri[3 * t + 1], c = M.tri[3 * t + 2];
+    if (a >= nS || b >= nS || c >= nS) continue;
+    const ax = (uv[2 * a] - x0) * sc, ay = (uv[2 * a + 1] - y0) * sc, bx = (uv[2 * b] - x0) * sc, by = (uv[2 * b + 1] - y0) * sc, cx = (uv[2 * c] - x0) * sc, cy = (uv[2 * c + 1] - y0) * sc;
+    const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(den) < 1e-9) continue;
+    for (let j = Math.max(0, Math.floor(Math.min(ay, by, cy))); j <= Math.min(hh - 1, Math.ceil(Math.max(ay, by, cy))); j++) for (let i = Math.max(0, Math.floor(Math.min(ax, bx, cx))); i <= Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx))); i++) {
+      const l1 = ((by - cy) * (i - cx) + (cx - bx) * (j - cy)) / den, l2 = ((cy - ay) * (i - cx) + (ax - cx) * (j - cy)) / den, l3 = 1 - l1 - l2;
+      if (l1 < -1e-4 || l2 < -1e-4 || l3 < -1e-4) continue;
+      const zz = l1 * V.z[a] + l2 * V.z[b] + l3 * V.z[c], k = j * w + i;
+      if (zz > zb[k]) { zb[k] = zz; ib[k] = l1 * I[a] + l2 * I[b] + l3 * I[c]; }
+    }
+  }
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = hh;
+  const g = cv.getContext('2d'), im = g.createImageData(w, hh);
+  for (let k = 0; k < w * hh; k++) { const s = ib[k]; if (s >= 0) { im.data[4 * k] = 232 * s; im.data[4 * k + 1] = 224 * s; im.data[4 * k + 2] = 214 * s; im.data[4 * k + 3] = 255; } }
+  g.putImageData(im, 0, 0);
+  return (V.clay = { key: V.key, t: now, cv, x0, y0, sc });
+}
+/** Photo px → screen: the mapping view's own affine (the photo shown unchanged). */
+const mapAff = () => { const o = mapToScreen({ x: 0, y: 0 }), a = mapToScreen({ x: 1, y: 0 }), b = mapToScreen({ x: 0, y: 1 }); return { ox: o.x, oy: o.y, ax: a.x - o.x, ay: a.y - o.y, bx: b.x - o.x, by: b.y - o.y }; };
 function drawConvexStep(ctx) {
   const V = cvGeom();
   if (!V) return;
-  const { fm } = convexMaps(), T = p => mapToScreen({ x: p[0], y: p[1] });
+  const A = mapAff(), E = meshEdges(), uv = V.uv, vis = V.vis;
   ctx.save();
+  // (inside the photo's frame only — the neck and shoulders below it are no use here)
+  ctx.beginPath(); ctx.moveTo(A.ox, A.oy); ctx.lineTo(A.ox + A.ax * S.iw, A.oy + A.ay * S.iw); ctx.lineTo(A.ox + A.ax * S.iw + A.bx * S.ih, A.oy + A.ay * S.iw + A.by * S.ih); ctx.lineTo(A.ox + A.bx * S.ih, A.oy + A.by * S.ih); ctx.closePath(); ctx.clip();
+  if (cfg.cxView === 'clay') {
+    const C = cvClay(V), w = C.cv.width / C.sc, hh = C.cv.height / C.sc;
+    ctx.setTransform(dpr * A.ax, dpr * A.ay, dpr * A.bx, dpr * A.by, dpr * (A.ox + A.ax * C.x0 + A.bx * C.y0), dpr * (A.oy + A.ay * C.x0 + A.by * C.y0));
+    ctx.drawImage(C.cv, 0, 0, w, hh);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
   if (cfg.cxWire !== false) {
     ctx.beginPath();
-    for (let s = 0; s < V.segs.length; s += 4) { const a = mapToScreen({ x: V.segs[s], y: V.segs[s + 1] }), b = mapToScreen({ x: V.segs[s + 2], y: V.segs[s + 3] }); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); }
-    ctx.strokeStyle = 'rgba(0,0,0,.16)'; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.strokeStyle = 'rgba(235,242,246,.5)'; ctx.lineWidth = .6; ctx.stroke();
-  }
-  for (const c of V.curves) {
-    if (!cxShown(c.region)) continue;
-    // (smoothed twice: its points are the mesh's vertices, a little off the line)
-    let P = c.pts.map(T);
-    for (let it = 0; it < 2; it++) P = P.map((p, q) => q && q < P.length - 1 ? { x: (P[q - 1].x + 2 * p.x + P[q + 1].x) / 4, y: (P[q - 1].y + 2 * p.y + P[q + 1].y) / 4 } : p);
-    const sp = FM.spline(P, false, 8);
-    ctx.beginPath(); sp.forEach((p, q) => q ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-    ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 2.6; ctx.stroke();
-    ctx.strokeStyle = 'rgba(245,250,248,.95)'; ctx.lineWidth = 1.2; ctx.stroke();
-  }
-  const acc = getComputedStyle(root).getPropertyValue('--accent').trim() || '#DC27A6', hot = S.cvDrag ? S.cvDrag.i : S.mapHover;
-  for (const [i, p] of V.pts) {
-    if (!cxShown(p.region)) continue;
-    const s = mapToScreen(p), h = cvhOf(fm, i), on = i === hot;
-    ctx.beginPath(); ctx.arc(s.x, s.y, p.ok ? (on ? 5.5 : 3.6) : 2.2, 0, Math.PI * 2);
-    if (!p.ok) { ctx.strokeStyle = Math.abs(h) > .005 ? acc : 'rgba(235,240,245,.5)'; ctx.lineWidth = 1; ctx.stroke(); continue; }
-    ctx.fillStyle = Math.abs(h) > .005 ? acc : '#F2F5F4'; ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = 1.2; ctx.stroke();
-    if (on) {
-      const t = `${h >= 0 ? '+' : '−'}${Math.abs(10 * h).toFixed(1)} mm`;
-      ctx.font = `500 11px ${FONT}`; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
-      const w = ctx.measureText(t).width + 10;
-      ctx.fillStyle = 'rgba(11,12,14,.85)'; ctx.fillRect(s.x + 10, s.y - 9, w, 18);
-      ctx.fillStyle = '#F2F5F4'; ctx.fillText(t, s.x + 15, s.y);
+    for (let k = 0; k < E.length; k += 2) {
+      const a = E[k], b = E[k + 1];
+      if (!vis[a] || !vis[b]) continue;
+      const ux = uv[2 * a], uy = uv[2 * a + 1], vx = uv[2 * b], vy = uv[2 * b + 1];
+      ctx.moveTo(A.ox + A.ax * ux + A.bx * uy, A.oy + A.ay * ux + A.by * uy); ctx.lineTo(A.ox + A.ax * vx + A.bx * vy, A.oy + A.ay * vx + A.by * vy);
     }
+    ctx.strokeStyle = cfg.cxView === 'clay' ? 'rgba(96,150,255,.75)' : 'rgba(110,165,255,.62)'; ctx.lineWidth = .6; ctx.stroke();
+  }
+  // where the other photo's outline holds (cvHold): the wire there in magenta, as firm as it holds (not for Move:
+  // it moves the skin only across this photo's view, which nothing holds)
+  const { side, fm, sm } = convexMaps(), H = cfg.scHold !== false && (cfg.scTool || 'move') !== 'move' && fm && fm.head && fm.head.side && sm ? cvHold(fm.head, side ? 1 : 0, side ? fm : sm) : null;
+  if (H && H.tint) {
+    const tn = cfg.scSym !== false ? H.tintS : H.tint, lv = [[], [], []];
+    for (let k = 0; k < E.length; k += 2) {
+      const a = E[k], b = E[k + 1], t = Math.min(tn[a], tn[b]);
+      if (t < .2 || !vis[a] || !vis[b]) continue;
+      lv[t < .45 ? 0 : t < .7 ? 1 : 2].push(a, b);
+    }
+    lv.forEach((L, j) => {
+      if (!L.length) return;
+      ctx.beginPath();
+      for (let k = 0; k < L.length; k += 2) { const a = L[k], b = L[k + 1]; ctx.moveTo(A.ox + A.ax * uv[2 * a] + A.bx * uv[2 * a + 1], A.oy + A.ay * uv[2 * a] + A.by * uv[2 * a + 1]); ctx.lineTo(A.ox + A.ax * uv[2 * b] + A.bx * uv[2 * b + 1], A.oy + A.ay * uv[2 * b] + A.by * uv[2 * b + 1]); }
+      ctx.strokeStyle = `rgba(220,39,166,${[.35, .6, .85][j]})`; ctx.lineWidth = .9; ctx.stroke();
+    });
+  }
+  ctx.restore(); ctx.save();
+  // the brush: its circle, a dot in its middle
+  if (S.cursorIn && (!S.pan || S.scDrag)) {
+    const c = S.scDrag && S.scDrag.tool === 'move' ? S.scDrag.at : S.cursor, r = cfg.scR || 40;
+    ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = 'rgba(245,248,250,.9)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.beginPath(); ctx.arc(c.x, c.y, 1.6, 0, Math.PI * 2); ctx.fillStyle = 'rgba(245,248,250,.9)'; ctx.fill();
   }
   ctx.restore();
 }
-/** The point under the cursor that this photo can show pushed out or in (or null). */
-function cvHit(sx, sy) {
-  const V = cvGeom();
-  if (!V) return null;
-  let best = null, bd = 11;
-  for (const [i, p] of V.pts) { if (!p.ok || !cxShown(p.region)) continue; const s = mapToScreen(p), d = Math.hypot(s.x - sx, s.y - sy); if (d < bd) { bd = d; best = i; } }
-  return best;
+/**
+ * The two photos share one head, so a stroke on one shows on the other at once; what keeps them from fighting is
+ * that each photo is the judge of its own outline. A photo sees across and up, not its own depth — the front photo
+ * shows how wide the face is, not how far forward; the side photo how far forward, not how wide — and an outline is
+ * the one thing a photo shows for certain. So:
+ *   - Move drags the skin across this photo's view only (never along its line of sight): it can't change what only
+ *     the other photo sees. Height both photos see — a move up or down shows on the other photo too, as it should.
+ *   - Fuller, Hollower and Smooth shape the surface, and never move the other photo's outline: near it they give way,
+ *     smoothly. On the side photo, Fuller on the jaw can't widen the jaw past the front photo's outline — it fills
+ *     the jaw forward instead; on the front photo, Fuller on the lips or the nose can't move the profile the side
+ *     photo shows. Shape those on the photo that shows them as outline.
+ * (As when modelling from a front and a side drawing: each view moves the mesh in its own plane, and the other view's
+ * outline is the constraint — without it the two views undo each other, back and forth.)
+ *
+ * cvHold: the other photo's outline on the head — the skin on the head's own edge as that photo sees it, where your
+ * outline in that photo runs (within 5 mm; at the cheekbones the photo's outline is where the skin meets the hair,
+ * not the head's edge, so nothing's held there). Cached per head and photo.
+ */
+let HOLD = null;
+function cvHold(h, qA, mB) {
+  const key = `${h.id}|${qA}`;
+  if (HOLD && HOLD.key === key) return HOLD.v ? HOLD : null;
+  HOLD = { key };
+  const t0 = performance.now();
+  const res = h.res, qB = 1 - qA, pose = res.poses[qB], pA = res.poses[qA], gg = convexGeo(res), g = gg && gg[qB], bc = mB && mB.contours && mB.contours.find(c => c.boundary);
+  if (!pose || !pA || !g || !bc) return null;
+  const M = HM.model, nS = M.nSkin, X = res.X, C = HM.correspond(), uv = new Float32Array(2 * nS);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let v = 0; v < nS; v++) { const [u, w] = HM.projK(pose, X.subarray(3 * v, 3 * v + 3)); uv[2 * v] = u + g.off[2 * v]; uv[2 * v + 1] = w + g.off[2 * v + 1]; x0 = Math.min(x0, uv[2 * v]); x1 = Math.max(x1, uv[2 * v]); y0 = Math.min(y0, uv[2 * v + 1]); y1 = Math.max(y1, uv[2 * v + 1]); }
+  // (the head's own edge in that photo: the skin it covers on a 1 mm grid, and its border)
+  const cell = .1 * pose.s; x0 -= 2 * cell; y0 -= 2 * cell;
+  const gw = Math.ceil((x1 - x0) / cell) + 3, gh = Math.ceil((y1 - y0) / cell) + 3, cov = new Uint8Array(gw * gh);
+  for (let t = 0; t < M.nTri; t++) {
+    const a = M.tri[3 * t], b = M.tri[3 * t + 1], c = M.tri[3 * t + 2];
+    if (a >= nS || b >= nS || c >= nS) continue;
+    const ax = (uv[2 * a] - x0) / cell, ay = (uv[2 * a + 1] - y0) / cell, bx = (uv[2 * b] - x0) / cell, by = (uv[2 * b + 1] - y0) / cell, cx = (uv[2 * c] - x0) / cell, cy = (uv[2 * c + 1] - y0) / cell;
+    const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(den) < 1e-9) continue;
+    for (let j = Math.max(0, Math.ceil(Math.min(ay, by, cy))); j <= Math.min(gh - 1, Math.floor(Math.max(ay, by, cy))); j++) for (let i = Math.max(0, Math.ceil(Math.min(ax, bx, cx))); i <= Math.min(gw - 1, Math.floor(Math.max(ax, bx, cx))); i++) {
+      const l1 = ((by - cy) * (i - cx) + (cx - bx) * (j - cy)) / den, l2 = ((cy - ay) * (i - cx) + (ax - cx) * (j - cy)) / den;
+      if (l1 >= -1e-6 && l2 >= -1e-6 && l1 + l2 <= 1 + 1e-6) cov[j * gw + i] = 1;
+    }
+  }
+  const edge = k => cov[k] && (!cov[k - 1] || !cov[k + 1] || !cov[k - gw] || !cov[k + gw]);
+  // (your outline on that photo: its segments between the dots it shows, with the length along it, cm)
+  const L = bc.idx, segs = [];
+  let arc = 0;
+  for (let k = 0; k < L.length - (bc.closed ? 0 : 1); k++) {
+    const a = L[k], b = L[(k + 1) % L.length], ax = mB.p[2 * a], ay = mB.p[2 * a + 1], bx = mB.p[2 * b], by = mB.p[2 * b + 1], len = Math.hypot(bx - ax, by - ay) / pose.s;
+    if (mB.vis[a] && mB.vis[b]) segs.push([ax, ay, bx, by, arc, len]);
+    arc += len;
+  }
+  const near = .5 * pose.s, c = pA.R[2], out = [];
+  for (let v = 0; v < nS; v++) {
+    if (C.ear && C.ear[v]) continue;
+    const i = Math.round((uv[2 * v] - x0) / cell), j = Math.round((uv[2 * v + 1] - y0) / cell);
+    let on = false;
+    for (let dj = -1; dj <= 1 && !on; dj++) for (let di = -1; di <= 1 && !on; di++) { const ii = i + di, jj = j + dj; if (ii > 0 && jj > 0 && ii < gw - 1 && jj < gh - 1 && edge(jj * gw + ii)) on = true; }
+    if (!on) continue;
+    let bd = Infinity, ba = 0;
+    for (const [ax, ay, bx, by, a0, len] of segs) {
+      const ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey || 1, t = Math.max(0, Math.min(1, ((uv[2 * v] - ax) * ex + (uv[2 * v + 1] - ay) * ey) / l2)), d = Math.hypot(ax + t * ex - uv[2 * v], ay + t * ey - uv[2 * v + 1]);
+      if (d < bd) { bd = d; ba = a0 + t * len; }
+    }
+    if (bd > near) continue;
+    out.push([v, 1]);
+  }
+  if (!out.length) return null;
+  // (every vertex's distance to it over the skin, cm — out to 6 cm: a shortest-path sweep from all of it at once)
+  const T = HM.topology(), dist = new Float32Array(nS).fill(Infinity), hp = [], push = (dd, v) => { hp.push([dd, v]); let i = hp.length - 1; while (i) { const p = (i - 1) >> 1; if (hp[p][0] <= hp[i][0]) break; [hp[p], hp[i]] = [hp[i], hp[p]]; i = p; } };
+  const pop = () => { const top = hp[0], last = hp.pop(); if (hp.length) { hp[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < hp.length && hp[l][0] < hp[m][0]) m = l; if (r < hp.length && hp[r][0] < hp[m][0]) m = r; if (m === i) break; [hp[m], hp[i]] = [hp[i], hp[m]]; i = m; } } return top; };
+  for (const [v] of out) { dist[v] = 0; push(0, v); }
+  while (hp.length) {
+    const [dd, v] = pop();
+    if (dd > dist[v]) continue;
+    for (let q = T.off[v]; q < T.off[v + 1]; q++) {
+      const u = T.nb[q];
+      if (u >= nS) continue;
+      const nd = dd + Math.hypot(X[3 * u] - X[3 * v], X[3 * u + 1] - X[3 * v + 1], X[3 * u + 2] - X[3 * v + 2]);
+      if (nd < dist[u] && nd < 6) { dist[u] = nd; push(nd, u); }
+    }
+  }
+  // (and the same mirrored: a side photo is never quite square on, so its profile runs a little off the midline —
+  // with Symmetry on, both sides are held alike, or a mirrored stroke would come out lopsided)
+  const distS = new Float32Array(nS);
+  for (let v = 0; v < nS; v++) distS[v] = Math.min(dist[v], dist[T.mir[v]]);
+  // (what's drawn: how firmly each vertex is held, fading over 6 mm — the wire there is tinted)
+  const tintOf = D => Float32Array.from(D, r => Math.exp(-r * r / .36));
+  Object.assign(HOLD, { v: Int32Array.from(out, o => o[0]), dist, distS, tint: tintOf(dist), tintS: tintOf(distS), c: [c[0], c[1], c[2]], ms: performance.now() - t0 });
+  return HOLD;
 }
-/** A drag on a point: out or in along how the skin's normal lies on the photo (Shift: finer; Alt: this side only). */
-function cvDown(sx, sy, e) {
-  const i = cvHit(sx, sy), { fm } = convexMaps();
-  if (i == null || !fm) { S.pan = { x: sx, y: sy, vx: S.view.x, vy: S.view.y }; refreshCursor(); return; }
-  const p = cvGeom().pts.get(i), s0 = mapToScreen(p), s1 = mapToScreen({ x: p.x + p.dx, y: p.y + p.dy }), ex = s1.x - s0.x, ey = s1.y - s0.y;
-  const j = e.altKey ? -1 : FM.MIRROR[i];
-  S.cvDrag = { i, j: j != null && j !== i ? j : -1, sx, sy, ex, ey, e2: ex * ex + ey * ey || 1, h0: cvhOf(fm, i), snap: curSlot === 'front' ? snapshot() : null, moved: false };
+/** How firmly the other photo's outline holds vertex v (0…1): fully on it, fading over σ (cm) beyond it. */
+const holdAt = (d, X, v) => { const r = (cfg.scSym !== false ? d.hold.distS : d.hold.dist)[v]; return r < 3 * d.sig ? Math.exp(-r * r / (d.sig * d.sig)) : 0; };
+/** The visible skin under the brush (screen px, radius r): [vertex, weight] — 1 in its middle, 0 at its edge, smooth (1 − d²/r²)². */
+function brushVerts(V, sx, sy, r) {
+  const A = mapAff(), out = [], r2 = r * r;
+  for (let v = 0; v < V.vis.length; v++) {
+    if (!V.vis[v]) continue;
+    const x = A.ox + A.ax * V.uv[2 * v] + A.bx * V.uv[2 * v + 1] - sx, y = A.oy + A.ay * V.uv[2 * v] + A.by * V.uv[2 * v + 1] - sy, d2 = x * x + y * y;
+    if (d2 < r2) { const t = 1 - d2 / r2; out.push([v, t * t]); }
+  }
+  return out;
+}
+function scDown(sx, sy, e) {
+  const { side, fm, sm } = convexMaps(), V = cvGeom();
+  if (!fm || !V) { S.pan = { x: sx, y: sy, vx: S.view.x, vy: S.view.y }; refreshCursor(); return; }
+  const tool = cfg.scTool || 'move', W = brushVerts(V, sx, sy, cfg.scR || 40);
+  if (!W.length) { S.pan = { x: sx, y: sy, vx: S.view.x, vy: S.view.y }; refreshCursor(); return; }
+  const nS = HM.model.nSkin, A = mapAff();
+  fm.sculpt = fm.sculpt && fm.sculpt.length === 3 * nS ? Float32Array.from(fm.sculpt) : new Float32Array(3 * nS);
+  // (the other photo's outline, and how far its hold fades beyond it: half the brush's size, 8 – 18 mm)
+  const hold = cfg.scHold !== false && fm.head.side && sm ? cvHold(fm.head, side ? 1 : 0, side ? fm : sm) : null, rcm = (cfg.scR || 40) / (Math.hypot(A.ax, A.ay) * V.pose.s);
+  S.scDrag = { tool, W: tool === 'move' ? W : null, at: { x: sx, y: sy }, last: { x: sx, y: sy }, snap: curSlot === 'front' ? snapshot() : null, moved: false, hold, sig: Math.min(1.8, Math.max(.8, .5 * rcm)) };
   refreshCursor(); wake();
 }
-function cvMove(sx, sy, e) {
-  const d = S.cvDrag, { fm } = convexMaps();
-  if (!fm) return;
-  if (!d.moved && Math.hypot(sx - d.sx, sy - d.sy) < 2) return;
-  if (!d.moved) { d.moved = true; fm.cvh = fm.cvh ? Float32Array.from(fm.cvh) : new Float32Array(NMAP).fill(NaN); }
-  // (at half the cursor's pace — zoomed out, a centimetre of skin is a few pixels — and at most 8 mm either way)
-  const fine = e.shiftKey ? .12 : .5, h = clamp(d.h0 + fine * ((sx - d.sx) * d.ex + (sy - d.sy) * d.ey) / d.e2, -.8, .8);
-  fm.cvh[d.i] = h;
-  if (d.j >= 0) fm.cvh[d.j] = h;
-  // (the head as it would be, at once: the wire follows the drag)
-  const { sm } = convexMaps(), res = fm.head.res, o = convexOpts(fm, res, sm);
-  cvPrev = { X: HM.convexX(res, o.links, o.fixed).X, hid: fm.head.id, ver: (cvPrev ? cvPrev.ver : 0) + 1 };
+function scMove(sx, sy, e) {
+  const d = S.scDrag, { fm } = convexMaps(), V = cvGeom();
+  if (!fm || !V || !fm.head) return;
+  const dx = sx - d.last.x, dy = sy - d.last.y, step = Math.hypot(dx, dy);
+  if (!d.moved && Math.hypot(sx - d.at.x, sy - d.at.y) < 2) return;
+  d.moved = true; d.last = { x: sx, y: sy };
+  if (d.tool === 'move') d.at = { x: sx, y: sy };
+  const res = fm.head.res, D = fm.sculpt, K = (cfg.scK ?? 50) / 100, fine = e.shiftKey ? .25 : 1, T = HM.topology(), mir = T.mir, nS = HM.model.nSkin;
+  // this step's change: vertex → [dx, dy, dz, the brush's weight there]
+  const ch = new Map();
+  let W = d.W;
+  if (d.tool === 'move') {
+    // (the screen's move as a move across this photo's view, cm: the patch follows the cursor)
+    const A = mapAff(), det = A.ax * A.by - A.ay * A.bx || 1, pu = (dx * A.by - dy * A.bx) / det, pv = (A.ax * dy - A.ay * dx) / det, R = V.pose.R, s = V.pose.s;
+    const m = [0, 1, 2].map(k => fine * (pu * R[0][k] + pv * R[1][k]) / s);
+    for (const [v, w] of W) ch.set(v, [w * m[0], w * m[1], w * m[2], w]);
+  } else {
+    W = brushVerts(V, sx, sy, cfg.scR || 40);
+    if (d.tool === 'smooth') {
+      // (towards the average of its neighbours' moves — yours only; the head's own shape stays)
+      for (const [v, w] of W) {
+        let s0 = 0, s1 = 0, s2 = 0, n = 0;
+        for (let q = T.off[v]; q < T.off[v + 1]; q++) { const u = T.nb[q]; if (u >= nS) continue; s0 += D[3 * u]; s1 += D[3 * u + 1]; s2 += D[3 * u + 2]; n++; }
+        if (!n) continue;
+        const a = Math.min(1, w * K * fine * .5);
+        ch.set(v, [a * (s0 / n - D[3 * v]), a * (s1 / n - D[3 * v + 1]), a * (s2 / n - D[3 * v + 2]), w]);
+      }
+    } else {
+      // (out or in along the skin's normal, as far as the cursor travels: ≈ 2 mm over 100 px at half strength)
+      const n0 = HM.smoothNormals(res.Xcv0), a = (d.tool === 'hollower' ? -1 : 1) * K * fine * .004 * step;
+      for (const [v, w] of W) ch.set(v, [a * w * n0[3 * v], a * w * n0[3 * v + 1], a * w * n0[3 * v + 2], w]);
+    }
+  }
+  // (the other side of the face the same, mirrored: where the brush and its mirror image overlap — at the
+  // midline — the two are blended, not added, and the midline doesn't move sideways)
+  // (each vertex: [its own change, its weight, its mirror image's change (x flipped), that weight, how many map onto it])
+  const sym = cfg.scSym !== false, out = new Map(), at = v => { let o = out.get(v); if (!o) out.set(v, o = [0, 0, 0, 0, 0, 0, 0, 0, 0]); return o; };
+  for (const [v, c] of ch) {
+    const o = at(v); o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; o[3] = c[3];
+    const u = sym ? mir[v] : -1;
+    if (u >= 0) { const p = at(u); p[4] -= c[0]; p[5] += c[1]; p[6] += c[2]; p[7] = Math.max(p[7], c[3]); p[8]++; }
+  }
+  for (const o of out.values()) if (o[8] > 1) { o[4] /= o[8]; o[5] /= o[8]; o[6] /= o[8]; }
+  // (Fuller, Hollower and Smooth give way near the other photo's outline (cvHold): as firmly as it holds there, or
+  // under the brush's middle, whichever is more — so a stroke centred on that outline doesn't leave a groove along it.
+  // Move needn't: it moves the skin only across this photo's view)
+  const H = d.tool !== 'move' ? d.hold : null, ctr = H && W.length ? W.reduce((b, o) => o[1] > b[1] ? o : b)[0] : -1, mc = ctr >= 0 ? holdAt(d, res.X, ctr) : 0;
+  for (const [v, o] of out) {
+    const a = o[3], b = o[7], sw = a + b || 1, k = Math.max(a, b) / sw * (H ? 1 - Math.max(holdAt(d, res.X, v), mc) : 1);
+    D[3 * v] += k * (o[0] + o[4]); D[3 * v + 1] += k * (o[1] + o[5]); D[3 * v + 2] += k * (o[2] + o[6]);
+  }
+  // (the head as it is under the brush, at once: the wire follows)
+  const base = res.Xsc0 || res.Xcv0, X = Float32Array.from(res.X);
+  for (let i = 0; i < 3 * nS; i++) X[i] = base[i] + D[i];
+  cvPrev = { X, hid: fm.head.id, ver: (cvPrev ? cvPrev.ver : 0) + 1 };
   wake();
 }
-function cvUp() {
-  const d = S.cvDrag;
-  S.cvDrag = null;
+function scUp() {
+  const d = S.scDrag;
+  S.scDrag = null;
   refreshCursor();
   if (!d || !d.moved) return;
   const { fm, sm } = convexMaps();
   fm.cver = (fm.cver || 0) + 1;
   if (curSlot === 'front') { if (d.snap) pushUndo(d.snap); mapTouched(false); scheduleConvexHead(); }
   else {
-    // (on the side photo's tab the head can't be fitted again — its convexity is just given it now, and the 3D
-    // and the front photo see it the next time they're opened)
+    // (on the side photo's tab the head can't be fitted again — it's just given your change now, and the 3D and the
+    // front photo see it the next time they're opened)
     const res = fm.head.res;
     HM.convexFit(res, null, convexOpts(fm, res, sm));
     fm.head = { ...fm.head, cvk: '', id: ++headIds };
@@ -1509,18 +1693,22 @@ function cvUp() {
   syncUI(); wake();
 }
 function syncConvexPane() {
-  const { side, fm, sm } = convexMaps(), h = fm && fm.head, set = fm && fm.cvh ? fm.cvh.reduce((c, v) => c + (Number.isFinite(v) && Math.abs(v) > 1e-4 ? 1 : 0), 0) : 0;
+  const { side, fm, sm } = convexMaps(), h = fm && fm.head, any = !!(fm && ((fm.sculpt && fm.sculpt.some(x => x)) || (fm.cvh && fm.cvh.some(x => Number.isFinite(x) && x))));
   setText($('#cxStatus'), !h ? (side ? 'Open the 3D tab once: the head is built there.' : 'Building the head…')
     : side && !(h.side && sm) ? 'The head was built without this profile — open the 3D tab to fit it again.' : '');
-  $$('#cxRegions [data-r]').forEach(b => b.classList.toggle('off', !cxShown(b.dataset.r)));
+  $$('#scTool [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (cfg.scTool || 'move')));
+  setRange('scR', cfg.scR || 40, (cfg.scR || 40) + ' px');
+  setRange('scK', cfg.scK ?? 50, (cfg.scK ?? 50) + '%');
   $('#cxWire').classList.toggle('on', cfg.cxWire !== false);
-  $('#cxReset').disabled = !set;
+  $('#cxClay').classList.toggle('on', cfg.cxView === 'clay');
+  $('#cxSym').classList.toggle('on', cfg.scSym !== false);
+  $('#cxReset').disabled = !any;
 }
-/** After a convexity point is let go on the front photo: the head given it (its fine bend again, seen again). */
+/** After a stroke on the front photo: the head given it (its last step again, seen again). */
 function scheduleConvexHead() {
   clearTimeout(cvxTimer);
   if (curSlot !== 'front') return;
-  cvxTimer = setTimeout(async () => { if (!S.map) return; await ensureHead(); S.glDirty = true; syncFaceMapPanel(); wake(); }, 120);
+  cvxTimer = setTimeout(async () => { if (!S.map) return; await ensureHead(); S.glDirty = true; syncFaceMapPanel(); wake(); }, 60);
 }
 let cvxTimer = 0;
 /** The fitted head, in numbers (for the console: cranimeter.headReport()): each photo's pose off its nominal
@@ -3137,7 +3325,7 @@ function drawStage() {
   }
   // the head follows the dots: when a drag ends — or the side map or a depth you set in 3D changed — it's
   // fitted again and redrawn (it used to wait for Rebuild: moving the jaw's dots seemed to do nothing)
-  if (HM && HM.model && S.map.head && S.map.head.key !== headKey() && !S.mapDrag && !headRefit && !S.surfBusy) {
+  if (HM && HM.model && S.map.head && (S.map.head.key !== headKey() || (S.map.head.sym !== symAmount() && S.map.head.res.Xsym0)) && !S.mapDrag && !headRefit && !S.surfBusy) {
     headRefit = setTimeout(async () => {
       try {
         await ensureHead();
@@ -3577,7 +3765,7 @@ function snapshot() {
     img: S.imgRec,
     adj: { ...S.adj, ell: S.adj.ell ? { ...S.adj.ell } : null },
     warp: S.warp,   // field arrays are copy-on-write, so sharing the reference is safe
-    map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light, zo: S.map.zo ? S.map.zo.slice() : null, af: S.map.af ? { ...S.map.af } : null, user: S.map.user ? S.map.user.slice() : null, cvh: S.map.cvh ? S.map.cvh.slice() : null } : null,
+    map: S.map ? { view: S.map.view, p: S.map.p.slice(), snapped: S.map.snapped, light: S.map.light, zo: S.map.zo ? S.map.zo.slice() : null, af: S.map.af ? { ...S.map.af } : null, user: S.map.user ? S.map.user.slice() : null, cvh: S.map.cvh ? S.map.cvh.slice() : null, sculpt: S.map.sculpt ? S.map.sculpt.slice() : null } : null,
     anat: { ...S.anat }, anatBase: { ...S.anatBase },
     tone: S.tone,   // paint arrays are copy-on-write too
     surf: S.surf,   // so is the face surface (and its fixes)
@@ -3627,6 +3815,7 @@ function restore(s) {
     if (S.map && sm && 'user' in sm) {
       S.map.user = sm.user ? Uint8Array.from(sm.user) : null;
       S.map.cvh = sm.cvh ? Float32Array.from(sm.cvh) : null;
+      S.map.sculpt = sm.sculpt ? Float32Array.from(sm.sculpt) : null;
       S.map.cver = (old ? old.cver || 0 : 0) + 1;
       // (and the head given it again at once in the Convexity step — it waited for the next drag)
       cvPrev = null;
@@ -4199,7 +4388,8 @@ const cxShown = region => !(cfg.cxHide || []).includes(region);
 const frontMap = () => curSlot === 'front' ? S.map : slots.front && slots.front.map;
 const cvxSet3 = i => { const fm = frontMap(); return !!(fm && fm.cvh && Number.isFinite(fm.cvh[i])); };
 let CVX_MIDS = null;
-const cvx3 = i => stageOn() && !!(S.map.head && S.map.head.res.Xcv0) && (CVX_MIDS || (CVX_MIDS = new Set(links3().flatMap(k => k.ms)))).has(i);
+// (build 72's points in 3D only with cfg.cxLinks3d: the Convexity step sculpts the head's wire instead)
+const cvx3 = i => !!cfg.cxLinks3d && stageOn() && !!(S.map.head && S.map.head.res.Xcv0) && (CVX_MIDS || (CVX_MIDS = new Set(links3().flatMap(k => k.ms)))).has(i);
 // (on the photos never as dots: the Convexity step draws them on the head's wire itself, see drawConvexStep)
 const dotShown = i => { const pt = FM.POINTS[i]; if (S.hideGroups.has(pt.group)) return false; if (!pt.cvx) return !!S.map.vis[i]; if (!cxShown(pt.region)) return false; return !convexStep() && cvx3(i); };
 /** Screen positions of every scan dot (on the photo as it was). */
@@ -4337,7 +4527,7 @@ function drawMap(ctx) {
   }
   ctx.setLineDash([]);
   // in the 3D: the convexity links on the head (both sides, the profile's too), through their points
-  if (stageOn() && S.map.head && S.map.head.res.Xcv0) {
+  if (stageOn() && S.map.head && S.map.head.res.Xcv0 && cfg.cxLinks3d) {
     for (const k of links3()) {
       if (!cxShown(k.region)) continue;
       const ids = [k.a, ...k.ms, k.b], Q = ids.map(i => P_[i]);
@@ -4883,7 +5073,7 @@ function refreshCursor() {
   let c;
   const xz = S.tdrag ? S.tdrag.zone : S.hoverXf;
   if (S.tool === 'adjust' && xz && !S.space && !S.pan && !(S.press && S.press.moved)) c = xfCursor(xz);
-  else if (S.orbit || S.cvDrag || S.drag || S.pan || S.hdrag || (S.mapDrag && S.mapDrag.moved) || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
+  else if (S.orbit || (S.scDrag && S.scDrag.tool === 'move') || S.drag || S.pan || S.hdrag || (S.mapDrag && S.mapDrag.moved) || (S.press && S.press.moved) || (S.mdrag && S.mdrag.moved) || (S.rpress && S.rpress.moved)) c = 'grabbing';
   else if (S.box || S.mapBox || S.qfit) c = 'crosshair';
   else if (S.space) c = 'grab';
   else if (S.selXfHover && mapping()) c = S.selXfHover === 'rotate' ? ROT_CURSOR : 'nwse-resize';
@@ -5044,7 +5234,7 @@ ov.addEventListener('pointermove', e => {
     S.rot3 = { yaw: clamp(S.orbit.yaw + (sx - S.orbit.x) * .008, -1.4, 1.4), pitch: clamp(S.orbit.pitch - (sy - S.orbit.y) * .008, -1.2, 1.2) };
     wake(); return;
   }
-  if (S.cvDrag) { cvMove(sx, sy, e); return; }
+  if (S.scDrag) { scMove(sx, sy, e); return; }
   if (S.mapDrag || S.mapBox || S.mapXf) { morphMove(sx, sy, e); return; }
   if (S.tstroke) { S.tstroke.sx = sx; S.tstroke.sy = sy; return; }
   if (S.zstroke) { S.zstroke.sx = sx; S.zstroke.sy = sy; return; }
@@ -5105,8 +5295,8 @@ ov.addEventListener('pointermove', e => {
 /* ---- face map interaction (the Face map layer is selected) ---- */
 function mapHitAt(sx, sy) {
   if (!S.map || !mapping() || S.qfit || lightStep() || (surfStep() && (fixBrush() || !S.surf))) return null;
-  // (in the Convexity step only its own points, on the head's wire)
-  if (convexStep()) return cvHit(sx, sy);
+  // (in the Convexity step none: its brushes work on the head's wire)
+  if (convexStep()) return null;
   const P_ = mapScreenPts();
   let best = null, bd = 9;
   P_.forEach((p, i) => { if (!dotShown(i) || autoDot(i) || p.hid) return; const d = Math.hypot(p.x - sx, p.y - sy); if (d < bd) { bd = d; best = i; } });
@@ -5190,6 +5380,7 @@ function syncSurfacePane() {
   }
   $$('#sfMode [data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (cfg.surfMode || 'photo')));
   setRange('sfTrust', Math.round(cfg.surfTrust * 100), Math.round(cfg.surfTrust * 100) + '%');
+  setRange('sfSym', Math.round(symAmount() * 100), Math.round(symAmount() * 100) + '%');
   $$('#sfViews [data-v]').forEach(b => { b.classList.toggle('on', b.dataset.v === cfg.surfView); b.disabled = !s; });
   $('#sfSweepRow').hidden = cfg.surfView !== 'sweep';
   setRange('sfSweep', Math.round(cfg.surfSweep * 100), Math.round(cfg.surfSweep * 100) + '%');
@@ -5328,7 +5519,7 @@ function moveSelXf(sx, sy, e) {
   shiftDots(list);
 }
 function mapDown(sx, sy, e) {
-  if (convexStep()) { cvDown(sx, sy, e); return; }
+  if (convexStep()) { scDown(sx, sy, e); return; }
   if (lightStep()) {   // Light: a marking brush, otherwise drag to pan
     if (isHintBrush()) startHintBrush(sx, sy);
     else { S.pan = { x: sx, y: sy, vx: S.view.x, vy: S.view.y }; refreshCursor(); }
@@ -5876,7 +6067,9 @@ function exportFaceMap() {
     image: { width: S.iw, height: S.ih },
     // (mids: each detail dot's two named neighbours — its number may differ in another build)
     // (convexity: the points set in 3D, mm out (+) or in (−))
-    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [], mids: FM.MID_KEY, convexity: m.cvh ? Object.fromEntries(FM.POINTS.map((pt, i) => [pt.id, m.cvh[i]]).filter(([, v]) => Number.isFinite(v)).map(([id, v]) => [id, Math.round(v * 1000) / 100])) : {} } : null,
+    map: m ? { view: m.view, snapped: m.snapped, points, depth, anatomy: m.af || null, user: m.user ? FM.POINTS.filter((_, i) => m.user[i]).map(pt => pt.id) : [], mids: FM.MID_KEY, convexity: m.cvh ? Object.fromEntries(FM.POINTS.map((pt, i) => [pt.id, m.cvh[i]]).filter(([, v]) => Number.isFinite(v)).map(([id, v]) => [id, Math.round(v * 1000) / 100])) : {},
+      // (the Convexity step's sculpt: per head vertex moved, its move in mm — x, y, z in the head's own frame)
+      sculpt: m.sculpt ? (() => { const o = {}; for (let v = 0; 3 * v < m.sculpt.length; v++) { const d = [0, 1, 2].map(k => Math.round(m.sculpt[3 * v + k] * 100) / 10); if (d.some(x => x)) o[v] = d; } return o; })() : {} } : null,
     measurements, reference: S.refId || null, calibration: S.calibId ? { id: S.calibId, mm: S.calibMM } : null,
     light: S.lightDir, marks: S.hints ? { gw: S.hints.gw, gh: S.hints.gh, highlight: enc8(S.hints.hl), notShape: enc8(S.hints.ig) } : null,
     surface: { trust: cfg.surfTrust, detail: cfg.surfDetail }, morph: { ...S.anat },
@@ -5938,6 +6131,8 @@ async function importFaceMap(file) {
       S.map.cvh = new Float32Array(NMAP).fill(NaN);
       for (const [id, mm] of Object.entries(doc.map.convexity)) { const i = resolve(id); if (i != null && FM.POINTS[i].cvx) S.map.cvh[i] = mm / 10; }
     }
+    // (expanded once the head's model is loaded — convexOpts)
+    if (doc.map.sculpt && Object.keys(doc.map.sculpt).length) { S.map.sculpt = null; S.map.sculptRaw = doc.map.sculpt; S.map.cver = (S.map.cver || 0) + 1; }
     if (doc.map.depth && Object.keys(doc.map.depth).length) {
       S.map.zo = new Float32Array(NMAP).fill(NaN);
       for (const [id, z] of Object.entries(doc.map.depth)) { const i = resolve(id); if (i != null) S.map.zo[i] = z; }
@@ -6452,7 +6647,7 @@ function pointerUp(e) {
   pointers.delete(e.pointerId);
   if (pinch) { if (pointers.size < 2) pinch = null; S.press = null; return; }
   if (S.orbit) { S.orbit = null; refreshCursor(); syncFaceMapPanel(); return; }
-  if (S.cvDrag) cvUp();
+  if (S.scDrag) scUp();
   else if (S.mapDrag || S.mapBox || S.mapXf) morphUp(e);
   else if (S.zstroke) endSurfBrush();
   else if (S.hstroke) endHintBrush();
@@ -6582,6 +6777,11 @@ addEventListener('keydown', e => {
   }
   if (!S.img) return;
   if (TOOL_KEYS[k] && !e.repeat) { setTool(TOOL_KEYS[k]); return; }
+  if ((e.key === '[' || e.key === ']') && convexStep()) {   // (the Convexity step's brush)
+    cfg.scR = Math.round(clamp((cfg.scR || 40) * (e.key === ']' ? 1.15 : 1 / 1.15), 10, 220));
+    saveCfg(); syncFaceMapPanel(); wake();
+    return;
+  }
   if (e.key === '[' || e.key === ']') {
     cfg.mSize = clamp(cfg.mSize * (e.key === ']' ? 1.15 : 1 / 1.15), .01, .5);
     saveCfg(); syncToolOpts(); wake();
@@ -7598,10 +7798,10 @@ function buildFaceMapPanel() {
     </div>
     <div id="fmConvex" hidden>
       <p class="to-note" id="cxStatus"></p>
-      <div class="to-label">Show</div>
-      <div class="chips" id="cxRegions">${[['brow', 'Brow'], ['eye', 'Eyes'], ['temple', 'Temples'], ['cheek', 'Cheeks'], ['lips', 'Lips'], ['jaw', 'Jaw']].map(([r, n]) => `<button type="button" class="chip-dot" data-r="${r}" style="--c:${MAP_COLORS.skin}"><i></i>${n}</button>`).join('')}</div>
-      <div class="to-actions" style="margin:2px 0 6px"><button type="button" class="btn ghost sm" id="cxWire" title="The head's surface as a wire over the photo">Wire</button><button type="button" class="btn ghost sm" id="cxReset" title="Every point back to the head as fitted">Reset</button><button type="button" class="btn ghost sm" id="cx3d">3D →</button></div>
-      <p class="to-note" title="Drag a point out or in until the wire has the photo's form. Shift: finer. Alt: this side only. Rings: this photo sees the skin there face on — push them on the other photo or in 3D.">Drag a point out or in until the wire has the photo's form.</p>
+      <div class="seg full mmode" id="scTool"><button type="button" data-v="move" title="Drag a patch of the skin across the view — an outline onto the photo's">Move</button><button type="button" data-v="fuller" title="Push the skin out under the brush">Fuller</button><button type="button" data-v="hollower" title="Push the skin in under the brush">Hollower</button><button type="button" data-v="smooth" title="Even out your changes under the brush">Smooth</button></div>
+      ${sliderRow('scR', 'Size', 10, 220, 1, 'The brush’s radius on the screen — [ and ]')}
+      ${sliderRow('scK', 'Strength', 5, 100, 1)}
+      <div class="to-actions" style="margin:2px 0 6px"><button type="button" class="btn ghost sm" id="cxClay" title="The head in clay instead of the photo">Clay</button><button type="button" class="btn ghost sm" id="cxWire" title="The head's wire">Wire</button><button type="button" class="btn ghost sm" id="cxSym" title="The other side of the face follows, mirrored">Symmetry</button><button type="button" class="btn ghost sm" id="cxReset" title="The head as fitted again — every change undone">Reset</button><button type="button" class="btn ghost sm" id="cx3d">3D →</button></div>
     </div>
     <div id="fmSurface" hidden>
       <p class="to-note" id="sfStatus"></p>
@@ -7612,6 +7812,7 @@ function buildFaceMapPanel() {
       </div>
       <div id="sfMis" hidden><div class="to-label">Photos disagree</div><div class="chips looks" id="sfMisList"></div></div>
       <div id="sfAnat" class="sf-anat" hidden></div>
+      ${sliderRow('sfSym', 'Symmetry', 0, 100, 5, 'How alike the head’s two sides are made: small differences in where the dots sit otherwise show as a lopsided face. Applies when you let go.')}
       ${sliderRow('sfTrust', 'Follow the photo', 0, 100, 1, 'How far the photo’s light and shade may change the anatomy from the average face (right) or keep it (left). Rebuild to apply.')}
       <p class="to-note">The photo is now 3D: <b>drag it to turn</b> the face, double-click to face it again. <b>Turned, drag a dot</b> to set its depth (the chin forward, a cheek back): it stays where it is on the photo and the surface bends to it. Facing you, dots move on the photo as usual.</p>
       <div class="to-label">Look</div>
@@ -7685,22 +7886,18 @@ function buildFaceMapPanel() {
   $('#lgViews').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.lightView = b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
   $('#lgDetect').addEventListener('click', () => detectMarks(false));
   $('#lgNext').addEventListener('click', () => $('#fmStep [data-v="convex"]').click());
-  $('#cxRegions').addEventListener('click', e => {
-    const b = e.target.closest('[data-r]');
-    if (!b) return;
-    const r = b.dataset.r, hide = new Set(cfg.cxHide || []);
-    if (hide.has(r)) hide.delete(r); else hide.add(r);
-    cfg.cxHide = [...hide]; saveCfg();
-    if (S.map) S.mapSel = new Set([...S.mapSel].filter(i => dotShown(i)));
-    syncFaceMapPanel(); wake();
-  });
+  $('#scTool').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { cfg.scTool = b.dataset.v; saveCfg(); syncFaceMapPanel(); wake(); } });
+  $('#scR').addEventListener('input', e => { cfg.scR = +e.target.value; saveCfg(); syncFaceMapPanel(); wake(); });
+  $('#scK').addEventListener('input', e => { cfg.scK = +e.target.value; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#cx3d').addEventListener('click', () => goTab('3d'));
   $('#cxWire').addEventListener('click', () => { cfg.cxWire = cfg.cxWire === false; saveCfg(); syncFaceMapPanel(); wake(); });
+  $('#cxClay').addEventListener('click', () => { cfg.cxView = cfg.cxView === 'clay' ? 'photo' : 'clay'; saveCfg(); syncFaceMapPanel(); wake(); });
+  $('#cxSym').addEventListener('click', () => { cfg.scSym = cfg.scSym === false; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#cxReset').addEventListener('click', () => {
     const { fm, sm } = convexMaps();
-    if (!fm || !fm.cvh) return;
+    if (!fm || (!fm.cvh && !fm.sculpt)) return;
     if (curSlot === 'front') pushUndo();
-    fm.cvh = null; fm.cver = (fm.cver || 0) + 1; cvPrev = null;
+    fm.cvh = null; fm.sculpt = null; fm.cver = (fm.cver || 0) + 1; cvPrev = null;
     if (curSlot === 'front') { mapTouched(false); scheduleConvexHead(); }
     else if (fm.head) { HM.convexFit(fm.head.res, null, convexOpts(fm, fm.head.res, sm)); fm.head = { ...fm.head, cvk: '', id: ++headIds }; }
     syncUI(); wake();
@@ -7732,6 +7929,8 @@ function buildFaceMapPanel() {
   $('#mCopyR').addEventListener('click', () => copySide('R'));
   $('#sfShade').addEventListener('change', e => { cfg.headShading = e.target.checked; saveCfg(); syncFaceMapPanel(); wake(); });
   // (the strength: shown as it moves, the head fitted again when it's let go — each fit takes a few seconds)
+  $('#sfSym').addEventListener('input', e => setRange('sfSym', +e.target.value, e.target.value + '%'));
+  $('#sfSym').addEventListener('change', e => { cfg.headSym = +e.target.value; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#sfShadeK').addEventListener('input', e => setRange('sfShadeK', +e.target.value, e.target.value + '%'));
   $('#sfShadeK').addEventListener('change', e => { cfg.headShadeK = +e.target.value / 100; saveCfg(); syncFaceMapPanel(); wake(); });
   $('#mAutoDet').addEventListener('change', e => {
@@ -8211,7 +8410,7 @@ requestAnimationFrame(frame);
 if (OLD_CODE.length) setTimeout(() => toast(GL_MESSAGES.stale, 9000), 600);
 
 // tiny scripting hook (handy for debugging from the console)
-window.cranimeter = { loadFile, state: S, build: BUILD, cfg: o => (o && Object.assign(cfg, o), cfg), goTab, curTab, slots, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady, mmPerPx, autoPlace,
+window.cranimeter = { loadFile, state: S, build: BUILD, cfg: o => (o && Object.assign(cfg, o), cfg), goTab, curTab, slots, hold: () => HOLD, ensureHead, sideProfile, refineProfileJaw, jawCorner, markUser, headReport, stageGrid: () => stageDepth(), dotDepth, dotPos3, placeStructure, surfOverlay, surfZ, buildSurface, drawSurfaceStep, drawLightStep, lightInfo, gpu: () => (GLR ? 'webgl2' : GL_REASON), mapSrc, mapInv, maskAt, fitMap, mapToScreen, screenToMap, syncPts, drawEditedPhoto, surfInputs, surfHints, surfBasis, photoToTemplate, photoLabelsReady, mmPerPx, autoPlace,
   paint: () => { wake(); paint(performance.now(), 0); } };
 
 })();
