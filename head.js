@@ -718,6 +718,53 @@ function mirrorOf() {
   }
   return (mirr = out);
 }
+/**
+ * Left and right made alike (changes res.X), by opt.amount (0…1): each vertex moved that far toward the average of
+ * itself and its mirror image — the mirror taken across the head's own best mirror plane, so a head merely turned in
+ * the model's frame isn't changed by it (Mitra et al.'s symmetrization, in its simplest form: one plane, the mirror
+ * pairs known from the scans' symmetric head).
+ * Why: the bend and the front photo's alignment fit each dot you placed, and each dot's scatter went into the head.
+ * On a real pair the left and right dots disagreed with a symmetric head by ±1.2–1.7 mm per pair (half the gap), in
+ * no consistent direction — placement, not the face; the scans' own fit of them was symmetric to ¼ mm. Fitted dot by
+ * dot it came out as the two sides 2.4 mm apart typically, up to 7 mm at the jaw. A real face's sides differ by
+ * ≈ ¾ mm (RMS against its mirror image, 3D photo studies), so most of that is the dots'. The eyeballs too (their
+ * mirror by nearest). Returns { mm: the largest move, deg: the plane's turn off the model's midline }.
+ */
+function symmetrize(res, opt = {}) {
+  const k = Math.max(0, Math.min(1, opt.amount ?? .8));
+  if (!(k > 0)) return (res.sym = { mm: 0, deg: 0 });
+  const m = model, N = m.N, nS = m.nSkin, mir = mirrorOf(), X = res.X, X0 = Float32Array.from(X);
+  // the best mirror plane: the rotation taking the head mirrored (x → −x, each vertex to its mirror's place) onto
+  // the head (Horn's, on the skin), whose product with the mirror is — nearly — the reflection across that plane
+  const ids = [];
+  for (let v = 0; v < nS; v++) if (mir[v] >= 0) ids.push(v);
+  const Y = (v, k2) => k2 === 0 ? -X0[3 * mir[v]] : X0[3 * mir[v] + k2], a = [0, 0, 0], b = [0, 0, 0];
+  for (const v of ids) for (let j = 0; j < 3; j++) { a[j] += Y(v, j) / ids.length; b[j] += X0[3 * v + j] / ids.length; }
+  const Sm = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (const v of ids) for (let i = 0; i < 3; i++) { const yi = Y(v, i) - a[i]; for (let j = 0; j < 3; j++) Sm[i][j] += yi * (X0[3 * v + j] - b[j]); }
+  const [[xx, xy, xz], [yx, yy, yz], [zx, zy, zz]] = Sm;
+  const Q = [[xx + yy + zz, yz - zy, zx - xz, xy - yx], [yz - zy, xx - yy - zz, xy + yx, zx + xz], [zx - xz, xy + yx, -xx + yy - zz, yz + zy], [xy - yx, zx + xz, yz + zy, -xx - yy + zz]];
+  const c = Q.flat().reduce((s, x) => s + Math.abs(x), 0);
+  let q = [1, 0, 0, 0];
+  for (let it = 0; it < 300; it++) { const r = [0, 1, 2, 3].map(i => Q[i].reduce((s, x, j) => s + x * q[j], 0) + c * q[i]), l = Math.hypot(...r); q = r.map(x => x / l); }
+  const [w, qx, qy, qz] = q, R = [[w * w + qx * qx - qy * qy - qz * qz, 2 * (qx * qy - w * qz), 2 * (qx * qz + w * qy)], [2 * (qx * qy + w * qz), w * w - qx * qx + qy * qy - qz * qz, 2 * (qy * qz - w * qx)], [2 * (qx * qz - w * qy), 2 * (qy * qz + w * qx), w * w - qx * qx - qy * qy + qz * qz]];
+  // (the plane's normal: halfway between x and where R takes it — R·mirror = I − 2nnᵀ gives R·x = 2nₓn − x; the
+  // plane through the midpoints of the pairs)
+  let n = [1 + R[0][0], R[1][0], R[2][0]];
+  const nl = Math.hypot(...n); n = n.map(x => x / nl);
+  let d = 0;
+  for (const v of ids) { const u = mir[v]; d += (n[0] * (X0[3 * v] + X0[3 * u]) + n[1] * (X0[3 * v + 1] + X0[3 * u + 1]) + n[2] * (X0[3 * v + 2] + X0[3 * u + 2])) / 2; }
+  d /= ids.length;
+  // each vertex toward the average of itself and its mirror's reflection
+  let mx = 0;
+  for (let v = 0; v < N; v++) {
+    const u = mir[v];
+    if (u < 0) continue;
+    const s = 2 * (n[0] * X0[3 * u] + n[1] * X0[3 * u + 1] + n[2] * X0[3 * u + 2] - d);
+    for (let j = 0; j < 3; j++) { const e = k * ((X0[3 * v + j] + X0[3 * u + j] - s * n[j]) / 2 - X0[3 * v + j]); X[3 * v + j] = X0[3 * v + j] + e; if (v < nS) mx = Math.max(mx, Math.abs(e)); }
+  }
+  return (res.sym = { mm: +(10 * mx).toFixed(2), deg: +(Math.acos(Math.min(1, Math.abs(n[0]))) * 180 / Math.PI).toFixed(2), amount: k });
+}
 // What the bend uses (see deform), and how much — set from a real face, turning on one kind at a time: the side
 // photo's profile, dots and jaw line in full; the front photo's outline lightly (in full it widened the jaw and
 // creased the cheeks); its landmarks very lightly (in full they sheared the face — a flat, wide mid-face, pinched
@@ -1749,7 +1796,8 @@ function bumpField(Y, c, a, e) {
   return F;
 }
 /**
- * Convexity (the Convexity step), set by hand on the head itself. Each link is a curve across a form, between two points
+ * Convexity links, set by hand (from build 72's points — maps saved then still carry them; since build 73 the Convexity
+ * step sculpts the head's wire instead, see convexFit's opt.sculpt). Each link is a curve across a form, between two points
  * of the skin (opt.links: [{ a, b: their vertices, ms: [the link's points] }]); each of its points can be pushed out or
  * in (opt.fixed: Map(point → cm, along the skin's smoothed normal)). Round each point you moved the head gets a smooth
  * bump (bumpField: ≥ 1 cm wide, none at the link's own ends nor at the lids' margins), sized so that each moved point
@@ -1792,10 +1840,17 @@ function convexX(res, links, fixed) {
   }
   return { X, ids, c };
 }
+/**
+ * … and then what you sculpted (opt.sculpt: per skin vertex a move, cm in the model's frame — the Convexity step's
+ * brushes on the head's wire): added last, as it is. Kept per vertex, so a head fitted again keeps your changes where
+ * they were on it.
+ */
 function convexFit(res, views, opt = {}) {
   const t0 = performance.now();
   if (!res.Xcv0 || opt.fresh) res.Xcv0 = Float32Array.from(res.X);
   const fixed = opt.fixed || new Map(), r = convexX(res, opt.links, fixed);
+  res.Xsc0 = Float32Array.from(r.X);
+  if (opt.sculpt) { const D = opt.sculpt, n = Math.min(D.length, 3 * model.nSkin); for (let i = 0; i < n; i++) r.X[i] += D[i]; }
   res.X.set(r.X);
   res.convex = { n: r.ids.length, h: new Map(r.ids.map(i => [i, fixed.get(i)])), ms: Math.round(performance.now() - t0) };
   return res.convex;
@@ -1924,5 +1979,5 @@ function normals(X) {
   return n;
 }
 
-window.CraniHead = { load, fit, deform, profileLock, orbitLock, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, convexFit, convexX, convexBasis, smoothNormals, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '72' };
+window.CraniHead = { load, fit, deform, profileLock, orbitLock, refitPoses, alignFront, shading, anatomyFromLight, anatBasis, LIGHT_OPS, closeLips, unfold, symmetrize, convexFit, convexX, convexBasis, smoothNormals, linkMid, linkPoint, skinUnder, pairPoints, project, faceScale, projK, raster, correspond, topology, normals, get model() { return model; }, build: '75' };
 })();
